@@ -148,25 +148,18 @@ function getPrivateShareRows(state = window.__lastPeerMeshState || null) {
   for (let index = 0; index < configuredSlots; index++) {
     const slotDeviceId = `${baseDeviceId}_slot_${index}`
     if (next.has(slotDeviceId)) continue
-    if (hasBaseShareWithCode) {
-      next.set(slotDeviceId, {
-        ...baseShare,
-        device_id: slotDeviceId,
-        slot_index: index,
-      })
-    } else {
-      next.set(slotDeviceId, {
-        device_id: slotDeviceId,
-        base_device_id: baseDeviceId,
-        slot_index: index,
-        code: '',
-        enabled: false,
-        expires_at: null,
-        active: false,
-        state_actor: null,
-        state_changed_at: null,
-      })
-    }
+    // New slots always start clean — never inherit another slot's private share data
+    next.set(slotDeviceId, {
+      device_id: slotDeviceId,
+      base_device_id: baseDeviceId,
+      slot_index: index,
+      code: '',
+      enabled: false,
+      expires_at: null,
+      active: false,
+      state_actor: null,
+      state_changed_at: null,
+    })
   }
 
   return sortPrivateShares([...next.values()])
@@ -269,7 +262,11 @@ function renderPrivateShare() {
   syncSlotDailyLimitInput()
 
   if (codeEl) codeEl.textContent = privateShare?.code ?? '---------'
-  if (expiryEl) expiryEl.value = privateShareExpiry
+  // Expiry is per-slot: use the selected slot's actual expires_at unless user has a pending edit
+  const slotExpiry = getPendingEdit('expiryHours')
+    ? privateShareExpiry
+    : getPrivateShareExpiryPreset(privateShare?.expires_at ?? null)
+  if (expiryEl) expiryEl.value = slotExpiry
   if (deviceSelect) {
     deviceSelect.innerHTML = rows.length > 0
       ? rows.map((row, index) => {
@@ -448,8 +445,9 @@ function renderSlots(configured, slots) {
   const active = slots?.active ?? statuses.filter((slot) => slot.running).length
   for (let i = 0; i < configured; i += 1) {
     const dot = document.createElement('span')
-    dot.className = `slot-dot${statuses[i]?.running ? ' on' : ''}`
-    dot.title = statuses[i]?.running ? `Slot ${i} active` : `Slot ${i} idle`
+    const s = statuses[i]
+    dot.className = `slot-dot${s?.running ? ' on' : ''}${s?.privateEnabled ? ' private' : ''}`
+    dot.title = s?.running ? `Slot ${i + 1} active (${s.privateEnabled ? 'private' : 'public'})` : `Slot ${i + 1} idle`
     dots.appendChild(dot)
   }
 
@@ -670,21 +668,18 @@ async function startDeviceFlow() {
   if (codeHint) codeHint.style.display = 'block'
   if (copyBtn) {
     copyBtn.style.display = 'inline-block'
-    copyBtn.onclick = () => {
+    copyBtn.onclick = async () => {
       const authUrl = `${verificationUri}?activate=1&code=${encodeURIComponent(userCode)}`
-      navigator.clipboard.writeText(userCode).then(async () => {
-        copyBtn.textContent = 'COPIED!'
-        copyBtn.style.color = 'var(--accent)'
-        copyBtn.style.borderColor = 'var(--accent)'
-        await invoke('openAuth', authUrl)
-        setTimeout(() => {
-          copyBtn.textContent = 'COPY CODE'
-          copyBtn.style.color = 'var(--text)'
-          copyBtn.style.borderColor = ''
-        }, 2000)
-      }).catch(async () => {
-        await invoke('openAuth', authUrl)
-      })
+      try { await navigator.clipboard.writeText(userCode) } catch {}
+      copyBtn.textContent = 'COPIED!'
+      copyBtn.style.color = 'var(--accent)'
+      copyBtn.style.borderColor = 'var(--accent)'
+      await invoke('openAuth', authUrl)
+      setTimeout(() => {
+        copyBtn.textContent = 'COPY CODE'
+        copyBtn.style.color = 'var(--text)'
+        copyBtn.style.borderColor = ''
+      }, 2000)
     }
   }
   if (btn) {
@@ -692,11 +687,7 @@ async function startDeviceFlow() {
     btn.textContent = 'OPEN BROWSER AGAIN'
   }
 
-  // Only open browser automatically on the very first code request (user clicked the button).
-  // Subsequent calls (e.g. from sign-out) must not auto-open a browser window.
-  if (btn && btn.dataset.autoOpen !== 'false') {
-    await invoke('openAuth', `${verificationUri}?activate=1&code=${encodeURIComponent(userCode)}`)
-  }
+
 
   stopDevicePoll()
   deviceFlowActive = true
@@ -895,6 +886,15 @@ function updateUI(state) {
     ? (peerSlots ?? { configured: state.peerConnectionSlots ?? 1, active: 0, statuses: [] })
     : (desktopSlots ?? { configured: configuredSlots, active: 0, statuses: [] })
 
+  const slotStatuses = desktopSlots?.statuses ?? []
+  const privateSlotCount = desktopSlots?.privateCount ?? slotStatuses.filter(s => s.privateEnabled).length
+  const publicSlotCount = configuredSlots - privateSlotCount
+  const privateBadge = running
+    ? (privateSlotCount === configuredSlots ? ' [ALL PRIVATE]'
+      : privateSlotCount > 0 ? ` [${publicSlotCount} public, ${privateSlotCount} private]`
+      : ' [PUBLIC]')
+    : (desktopPrivateShareActive ? ' [PRIVATE]' : ' [PUBLIC]')
+
   if (state.privateShare !== undefined) {
     privateShare = preferLatestSync(privateShare, state.privateShare ?? null)
     if (!getPendingEdit('expiryHours')) {
@@ -918,7 +918,6 @@ function updateUI(state) {
 
   if (!togglingShare) {
     if (running) {
-      const privateBadge = desktopPrivateShareActive ? ' [PRIVATE]' : ' [PUBLIC]'
       if (dot) {
         dot.className = 'status-dot on'
         dot.style.cssText = ''

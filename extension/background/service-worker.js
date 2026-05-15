@@ -73,6 +73,7 @@ let providerReconnectTimer = null
 let providerPeerId = null
 let providerStats = { bytesServed: 0, requestsHandled: 0, connectedAt: null, peerId: null }
 let providerPrivateShare = null
+let providerPrivateShares = []
 let providerAuthFailureCount = 0
 const PROVIDER_AUTH_FAILURE_THRESHOLD = 3
 
@@ -232,6 +233,8 @@ function isAllowedHost(hostname) {
 
 function getStandalonePrivateShares(baseDeviceId, deviceId) {
   if (!deviceId) return []
+  // Use the full synced array if available, fall back to single share
+  if (Array.isArray(providerPrivateShares) && providerPrivateShares.length > 0) return providerPrivateShares
   if (providerPrivateShare?.device_id === deviceId) return [providerPrivateShare]
   return [{
     device_id: deviceId,
@@ -370,6 +373,7 @@ async function loadSharingContext() {
   if (!sharingUserId) sharingUserId = stored.sharingUserId ?? stored.user?.id ?? null
   if (stored.sharingMode !== undefined) sharingMode = stored.sharingMode ?? null
   if (stored.providerPrivateShare !== undefined) providerPrivateShare = stored.providerPrivateShare ?? null
+  if (stored.providerPrivateShares !== undefined) providerPrivateShares = Array.isArray(stored.providerPrivateShares) ? stored.providerPrivateShares : []
   return stored
 }
 
@@ -637,9 +641,10 @@ async function syncProviderPrivateShareState({ source = 'sync' } = {}) {
 
     const data = await response.json()
     const nextPrivateShare = data.private_share ?? null
+    const nextPrivateShares = Array.isArray(data.private_shares) ? data.private_shares : (nextPrivateShare ? [nextPrivateShare] : [])
     providerPrivateShare = nextPrivateShare
-    await chrome.storage.local.set({ providerPrivateShare })
-    log('info', `[PRIVATE] state synced via ${source} enabled=${!!nextPrivateShare?.enabled} active=${!!nextPrivateShare?.active}`)
+    await chrome.storage.local.set({ providerPrivateShare, providerPrivateShares: nextPrivateShares })
+    log('info', `[PRIVATE] state synced via ${source} enabled=${!!nextPrivateShare?.enabled} active=${!!nextPrivateShare?.active} slots=${nextPrivateShares.length}`)
 
     return providerPrivateShare
   } catch (error) {

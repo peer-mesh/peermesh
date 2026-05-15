@@ -2,30 +2,28 @@
 
 ; Shared macro to kill all PeerMesh processes cleanly
 !macro KillPeerMesh
-  ; 1. Ask the running app to quit gracefully via its control server
-  ;    (works whether the window is visible or hidden in the tray)
-  ;    Use PowerShell's Invoke-WebRequest — always available on Win10+
-  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "try { Invoke-WebRequest -Uri http://127.0.0.1:7654/quit -Method POST -TimeoutSec 3 -UseBasicParsing | Out-Null } catch {}"'
+  ; 1. Ask both possible control ports to quit gracefully
+  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "try { Invoke-WebRequest -Uri http://127.0.0.1:7654/quit -Method POST -TimeoutSec 2 -UseBasicParsing | Out-Null } catch {}; try { Invoke-WebRequest -Uri http://127.0.0.1:7656/quit -Method POST -TimeoutSec 2 -UseBasicParsing | Out-Null } catch {}"'
   Sleep 2500
 
   ; 2. Force-kill any remaining Electron processes by name
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh.exe" /T'
-  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper.exe"'
-  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (GPU).exe"'
-  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Renderer).exe"'
-  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Plugin).exe"'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper.exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (GPU).exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Renderer).exe" /T'
+  nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Plugin).exe" /T'
 
   ; 3. Wait until the process is actually gone (poll up to 10s)
+  ; nsExec::ExecToStack pushes: exit-code then stdout — pop both, check exit code
+  ; tasklist exits 0 when it finds a match, 1 when nothing matches
   StrCpy $R1 0
   ${Do}
     Sleep 500
     nsExec::ExecToStack '$SYSDIR\tasklist.exe /FI "IMAGENAME eq PeerMesh.exe" /NH'
-    Pop $R2
-    ${If} $R2 == ""
-      ${Break}
-    ${EndIf}
-    ${If} $R2 == "INFO: No tasks are running which match the specified criteria."
-      ${Break}
+    Pop $R2  ; exit code
+    Pop $R3  ; stdout (discard)
+    ${If} $R2 != "0"
+      ${Break}  ; tasklist found no match = process gone
     ${EndIf}
     IntOp $R1 $R1 + 1
     ${If} $R1 >= 20
@@ -34,11 +32,21 @@
   ${Loop}
 !macroend
 
-; customInit fires at the very start of the installer — before NSIS's built-in
-; CloseApplications check and before any page is shown. This is the only hook
-; that reliably prevents the "PeerMesh cannot be closed" dialog.
-!macro customInit
+; customInstall fires after NSIS's CloseApplications step but before files are written.
+; Killing here ensures the process is gone before NSIS tries to overwrite locked files.
+!macro customInstall
+  DetailPrint "Stopping any running PeerMesh instance..."
   !insertmacro KillPeerMesh
+
+  ; Uninstall previous version silently if registry entry exists
+  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PeerMesh" "UninstallString"
+  ${If} $R0 != ""
+    DetailPrint "Removing previous version..."
+    nsExec::ExecToLog '$R0 /S'
+    Sleep 3000
+    !insertmacro CleanPeerMeshArtifacts
+    !insertmacro CleanPeerMeshInstallDirs
+  ${EndIf}
 !macroend
 
 ; Shared macro to remove all PeerMesh artifacts
@@ -77,20 +85,6 @@
   RMDir /r "$LOCALAPPDATA\Programs\peermesh-desktop"
   RMDir /r "$PROGRAMFILES\PeerMesh"
   RMDir /r "$PROGRAMFILES64\PeerMesh"
-!macroend
-
-!macro customInstall
-  ; Process already killed in customInit (which runs before NSIS's CloseApplications check)
-  ; Uninstall previous version silently if registry entry exists
-  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PeerMesh" "UninstallString"
-  ${If} $R0 != ""
-    DetailPrint "Removing previous version..."
-    nsExec::ExecToLog '$R0 /S'
-    Sleep 3000
-    ; Previous uninstaller may not have cleaned all artifacts
-    !insertmacro CleanPeerMeshArtifacts
-    !insertmacro CleanPeerMeshInstallDirs
-  ${EndIf}
 !macroend
 
 !macro customUnInstall

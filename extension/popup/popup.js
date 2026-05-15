@@ -200,15 +200,8 @@ function mergePrivateShares(rows, baseDeviceId, helper = ownedHelper()) {
   for (let index = 0; index < configuredSlots; index++) {
     if (!hasPrivateShareSlot(currentRows(), baseDeviceId, index)) {
       const deviceId = `${baseDeviceId}_slot_${index}`
-      if (hasBaseShareWithCode) {
-        merged.set(deviceId, {
-          ...baseShare,
-          device_id: deviceId,
-          slot_index: index,
-        })
-      } else {
-        merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, index))
-      }
+      // New slots always start clean — never inherit another slot's private share data
+      merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, index))
     }
   }
 
@@ -252,7 +245,7 @@ function applyPrivateShareRows(rows, baseDeviceId, preferredDeviceId = null) {
   const preferredSelection = pendingSlot || state.selectedPrivateSlot || preferredDeviceId
   state.privateShare = selectPrivateShare(state.privateShares, preferredSelection, baseDeviceId)
   state.selectedPrivateSlot = state.privateShare?.device_id ?? preferredSelection ?? null
-  // Only update expiry if user has no pending unsaved change
+  // Expiry is per-slot: always derive from the selected slot's own expires_at unless user has a pending edit
   if (!getPendingEdit('expiryHours')) {
     state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
   }
@@ -972,6 +965,7 @@ function renderDashboard(app) {
   document.getElementById('privateSlotSelect')?.addEventListener('change', (e) => {
     state.selectedPrivateSlot = e.target.value
     state.privateShare = selectPrivateShare(state.privateShares, e.target.value, ownedHelper()?.baseDeviceId ?? null)
+    // Per-slot expiry: update from the newly selected slot's own expires_at
     state.privateExpiryHours = getPrivateShareExpiryPreset(state.privateShare?.expires_at ?? null)
     setPendingEdit('selectedSlotDeviceId', e.target.value)
     clearPendingEdit('expiryHours')

@@ -1,14 +1,19 @@
 import type { ReactNode } from 'react'
-import { DeveloperNav } from './DeveloperNav'
-import { developerShellStyle } from './ui'
+import { DevSidebar } from './DevSidebar'
 
 export default function DevelopersLayout({ children }: { children: ReactNode }) {
   return (
-    <main className="flex flex-1 justify-center px-6 py-12">
-      <div style={developerShellStyle}>
-        <DeveloperNav />
+    <div style={{
+      position: 'fixed',
+      inset: 0,
+      display: 'flex',
+      background: 'var(--bg)',
+      overflow: 'hidden',
+    }}>
+      <DevSidebar />
+      <main style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {children}
-      </div>
-    </main>
+      </main>
+    </div>
   )
 }

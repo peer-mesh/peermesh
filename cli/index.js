@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.54'
+const VERSION     = '1.0.55'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -403,14 +403,22 @@ function getAggregateStats() {
 }
 
 function getSlotSummary() {
-  return slotStates.map(slot => ({
-    index: slot.index,
-    deviceId: slot.deviceId,
-    running: slot.running,
-    requestsHandled: slot.requestsHandled,
-    bytesServed: slot.sessionBytes,
-    connectedAt: slot.connectedAt,
-  }))
+  const privateSharesByDeviceId = new Map(
+    hydratePrivateShareRows(config.privateShares).map(r => [r.device_id, r])
+  )
+  return slotStates.map(slot => {
+    const ps = privateSharesByDeviceId.get(slot.deviceId)
+    return {
+      index: slot.index,
+      deviceId: slot.deviceId,
+      running: slot.running,
+      requestsHandled: slot.requestsHandled,
+      bytesServed: slot.sessionBytes,
+      connectedAt: slot.connectedAt,
+      privateEnabled: !!(ps?.enabled),
+      privateActive: !!(ps?.enabled && ps?.active),
+    }
+  })
 }
 
 function normalizePrivateShareRows(rows) {
@@ -684,6 +692,30 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
       config.shareEnabled = true
       saveConfig(config)
       connectRelay(_controlLimitBytes)
+    }
+  }
+
+  // Enforce per-slot daily limits and private share expiry
+  if (config.shareEnabled && isRunning()) {
+    const slotLimitMap = new Map((config.slotLimits ?? []).map(r => [r.device_id, r]))
+    for (const slot of slotStates) {
+      if (!slot.running) continue
+      const slotLimit = slotLimitMap.get(slot.deviceId)
+      if (slotLimit?.daily_limit_mb != null) {
+        const slotLimitBytes = slotLimit.daily_limit_mb * 1024 * 1024
+        if ((slot.sessionBytes ?? 0) >= slotLimitBytes) {
+          clog.warn('LIMIT', 'slot daily limit reached - stopping relay', { slot: slot.index, slotLimitBytes })
+          console.log(`\n  Slot ${slot.index + 1} daily limit reached — sharing paused.\n`)
+          stopRelay()
+          return data
+        }
+      }
+      const psRow = nextPrivateShares.find(r => r.device_id === slot.deviceId)
+      if (psRow?.enabled && psRow?.expires_at && new Date(psRow.expires_at).getTime() <= Date.now()) {
+        clog.warn('PRIVATE', 'private share expired - reconnecting slot as public', { slot: slot.index })
+        restartRelayForConfigChange('private_share_expired', _controlLimitBytes, 'A private share expired. Reconnecting.')
+        return data
+      }
     }
   }
 

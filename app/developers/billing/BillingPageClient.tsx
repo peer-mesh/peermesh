@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { formatBytes } from '@/lib/utils'
-import { DeveloperActionLink, DeveloperPageHeader, developerCardStyle } from '../ui'
+import { developerCardStyle } from '../ui'
 
 type WalletSummary = {
   profile: {
@@ -450,23 +450,13 @@ export default function BillingPageClient() {
   }, [banks, payoutBankCode, payoutCurrency])
 
   return (
-    <div style={{ display: 'grid', gap: '16px' }}>
-      <DeveloperPageHeader
-        eyebrow="BILLING"
-        title="Wallet funding, usage pricing, and provider payouts"
-        description={
-          <>
-            Fund the USD wallet for developer API usage, estimate routed traffic cost before creating sessions, and push earned provider
-            payouts out through Flutterwave to a saved local destination.
-          </>
-        }
-        actions={
-          <>
-            <DeveloperActionLink href="/developers/api-docs" label="API Docs" />
-            <DeveloperActionLink href="/developers/keys" label="Manage Keys" />
-          </>
-        }
-      />
+    <div style={{ padding: '36px 48px', maxWidth: '960px' }}>
+      <div style={{ marginBottom: '28px' }}>
+        <h1 style={{ margin: '0 0 6px', fontSize: '28px', fontWeight: 700 }}>Billing</h1>
+        <p style={{ margin: 0, fontSize: '14px', color: 'var(--muted)' }}>
+          Fund your USD wallet, estimate session cost, and withdraw provider earnings via Flutterwave.
+        </p>
+      </div>
 
       {error ? (
         <div style={{ ...sectionStyle, borderColor: 'rgba(255,96,96,0.35)', background: 'rgba(255,96,96,0.08)', color: '#ff8080', fontSize: '13px' }}>

@@ -315,14 +315,22 @@ function getAggregateStats() {
 }
 
 function getSlotSummary() {
-  return slotStates.map(slot => ({
-    index: slot.index,
-    deviceId: slot.deviceId,
-    running: slot.running,
-    requestsHandled: slot.requestsHandled,
-    bytesServed: slot.sessionBytes,
-    connectedAt: slot.connectedAt,
-  }))
+  const privateSharesByDeviceId = new Map(
+    hydratePrivateShareRows(config.privateShares).map(r => [r.device_id, r])
+  )
+  return slotStates.map(slot => {
+    const ps = privateSharesByDeviceId.get(slot.deviceId)
+    return {
+      index: slot.index,
+      deviceId: slot.deviceId,
+      running: slot.running,
+      requestsHandled: slot.requestsHandled,
+      bytesServed: slot.sessionBytes,
+      connectedAt: slot.connectedAt,
+      privateEnabled: !!(ps?.enabled),
+      privateActive: !!(ps?.enabled && ps?.active),
+    }
+  })
 }
 
 function syncAggregateState() {
@@ -428,6 +436,7 @@ function hydratePrivateShareRows(rows) {
   }
 
   const hydratedRows = ensureSlotStates().map(slot => {
+    // Always use the server row if present; never inherit another slot's data for a new slot
     return byDeviceId.get(slot.deviceId) ?? createDisabledPrivateShareRow(slot.deviceId, slot.index)
   })
 
@@ -492,6 +501,7 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, config.privateShareDeviceId)
   const nextPrivateShareEnabled = !!(selectedPrivateShare ?? nextPrivateShare)?.enabled
   const nextPrivateShareActive = !!(selectedPrivateShare ?? nextPrivateShare)?.active
+  const nextPrivateShareCode = (selectedPrivateShare ?? nextPrivateShare)?.code ?? null
 
   const resolvedProfileSync = preferLatestSyncRow(previousProfileSync, data.profile_sync ?? null)
   const resolvedConnectionSlotsSync = preferLatestSyncRow(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
@@ -519,6 +529,35 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   saveConfig()
 
   if (limitHit && config.shareEnabled) enforceLocalLimit()
+
+  // Enforce per-slot daily limits and private share expiry
+  if (config.shareEnabled || activeSlotCount() > 0) {
+    const slotLimitMap = new Map(config.slotLimits.map(r => [r.device_id, r]))
+    for (const slot of slotStates) {
+      if (!slot.running) continue
+      // Per-slot daily limit
+      const slotLimit = slotLimitMap.get(slot.deviceId)
+      if (slotLimit?.daily_limit_mb != null) {
+        const slotLimitBytes = slotLimit.daily_limit_mb * 1024 * 1024
+        const slotBytes = (slot.sessionBytes ?? 0)
+        if (slotBytes >= slotLimitBytes) {
+          log.warn('LIMIT', 'slot daily limit reached - stopping relay', { slot: slot.index, slotBytes, slotLimitBytes })
+          showNotification('PeerMesh paused', `Slot ${slot.index + 1} daily limit reached`)
+          stopRelay()
+          return data
+        }
+      }
+      // Private share expiry: if slot is private and code has expired, disable and reconnect
+      const psRow = nextPrivateShares.find(r => r.device_id === slot.deviceId)
+      if (psRow?.enabled && psRow?.expires_at) {
+        if (new Date(psRow.expires_at).getTime() <= Date.now()) {
+          log.warn('PRIVATE', 'private share expired - reconnecting slot as public', { slot: slot.index, deviceId: slot.deviceId })
+          restartRelayForConfigChange('private_share_expired', 'A private share expired. Reconnecting.')
+          return data
+        }
+      }
+    }
+  }
 
   const privacyToggleChanged = previousPrivateShareEnabled !== nextPrivateShareEnabled
   const visibilityChanged = previousPrivateShareActive !== nextPrivateShareActive || previousPrivateShareCode !== nextPrivateShareCode
@@ -949,6 +988,7 @@ function getPublicState() {
       active: activeSlotCount(),
       statuses: getSlotSummary(),
       warning: getSlotWarning(clampSlots(config.connectionSlots ?? 1)),
+      privateCount: getSlotSummary().filter(s => s.privateEnabled).length,
     },
     stats,
     version: DESKTOP_VERSION,
@@ -2081,8 +2121,15 @@ function updateTray() {
   const configuredSlots = clampSlots(config.connectionSlots ?? 1)
   const activeSlots = activeSlotCount()
   const slotWarning = getSlotWarning(configuredSlots)
-  const privateBadge = config.privateShareActive ? ' [PRIVATE]' : ''
   const starting = !!config.shareEnabled && !running && !peerSharing
+  const slotSummary = getSlotSummary()
+  const privateCount = slotSummary.filter(s => s.privateEnabled).length
+  const publicCount = configuredSlots - privateCount
+  const privateBadge = running
+    ? (privateCount === configuredSlots ? ' [ALL PRIVATE]'
+      : privateCount > 0 ? ` [${publicCount} public, ${privateCount} private]`
+      : ' [PUBLIC]')
+    : (config.privateShareActive ? ' [PRIVATE]' : '')
   const menuItems = [
     { label: 'PeerMesh', enabled: false },
     { type: 'separator' },
