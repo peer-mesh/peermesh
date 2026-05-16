@@ -17,6 +17,8 @@ export default function ResetPasswordPage() {
   const [token,    setToken]    = useState('')
   const [password, setPassword] = useState('')
   const [confirm,  setConfirm]  = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState('')
   const [done,     setDone]     = useState(false)
@@ -79,14 +81,38 @@ export default function ResetPasswordPage() {
             type="text" inputMode="numeric" maxLength={6} placeholder="000000"
             value={token} onChange={e => setToken(e.target.value.replace(/\D/g, '').slice(0, 6))} required
           />
-          <input
-            style={inputStyle} type="password" placeholder="New password (min 8 chars)"
-            value={password} onChange={e => setPassword(e.target.value)} required minLength={8}
-          />
-          <input
-            style={inputStyle} type="password" placeholder="Confirm new password"
-            value={confirm} onChange={e => setConfirm(e.target.value)} required minLength={8}
-          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              type={showPassword ? 'text' : 'password'}
+              placeholder="New password (min 8 chars)"
+              value={password} onChange={e => setPassword(e.target.value)} required minLength={8}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(!showPassword)}
+              style={{ padding: '8px 12px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--muted)', cursor: 'pointer', fontSize: '16px', lineHeight: 1 }}
+              title={showPassword ? 'Hide password' : 'Show password'}
+            >
+              {showPassword ? '👁️' : '👁️‍🗨️'}
+            </button>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              type={showConfirm ? 'text' : 'password'}
+              placeholder="Confirm new password"
+              value={confirm} onChange={e => setConfirm(e.target.value)} required minLength={8}
+            />
+            <button
+              type="button"
+              onClick={() => setShowConfirm(!showConfirm)}
+              style={{ padding: '8px 12px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--muted)', cursor: 'pointer', fontSize: '16px', lineHeight: 1 }}
+              title={showConfirm ? 'Hide password' : 'Show password'}
+            >
+              {showConfirm ? '👁️' : '👁️‍🗨️'}
+            </button>
+          </div>
 
           {error && (
             <p style={{ color: 'var(--danger)', fontSize: '12px', padding: '10px 14px', background: 'rgba(255,68,102,0.1)', borderRadius: '8px', border: '1px solid rgba(255,68,102,0.2)', margin: 0 }}>
@@ -106,7 +132,7 @@ export default function ResetPasswordPage() {
           <Link href="/auth/forgot-password" style={{ color: 'var(--muted)', fontSize: '12px', fontFamily: 'var(--font-geist-mono)', textDecoration: 'none' }}>
             Resend code
           </Link>
-          <Link href="/auth" style={{ color: 'var(--muted)', fontSize: '12px', fontFamily: 'var(--font-geist-mono)', textDecoration: 'none' }}>
+          <Link href="/auth/login" style={{ color: 'var(--muted)', fontSize: '12px', fontFamily: 'var(--font-geist-mono)', textDecoration: 'none' }}>
             Back to sign in
           </Link>
         </div>

@@ -462,6 +462,11 @@ export default function Dashboard() {
         }
 
         const user = session.user
+        if (!user.email_confirmed_at) {
+          setLoading(false)
+          router.replace('/auth/confirm-email')
+          return
+        }
 
         const { data, error: profileError } = await withTimeout(
           supabase.from('profiles').select(PROFILE_SELECT_FIELDS).eq('id', user.id).single<Profile>(),

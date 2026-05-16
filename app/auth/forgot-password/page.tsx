@@ -83,7 +83,7 @@ export default function ForgotPasswordPage() {
             </form>
 
             <div style={{ marginTop: '20px', textAlign: 'center' }}>
-              <Link href="/auth" style={{ color: 'var(--muted)', fontSize: '12px', fontFamily: 'var(--font-geist-mono)', textDecoration: 'none' }}>
+              <Link href="/auth/login" style={{ color: 'var(--muted)', fontSize: '12px', fontFamily: 'var(--font-geist-mono)', textDecoration: 'none' }}>
                 ← Back to sign in
               </Link>
             </div>

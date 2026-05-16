@@ -36,7 +36,7 @@ export default function LandingPage() {
               Browse through verified peers, share your own connection for credits, route trusted users through private codes, and inspect provider traffic from one dashboard.
             </p>
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-              <Link href="/auth?mode=signup" style={{ padding: '13px 22px', background: 'var(--accent)', color: '#000', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, fontSize: '12px', textDecoration: 'none' }}>GET STARTED</Link>
+              <Link href="/auth/signup" style={{ padding: '13px 22px', background: 'var(--accent)', color: '#000', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontWeight: 700, fontSize: '12px', textDecoration: 'none' }}>GET STARTED</Link>
               <Link href="/install" style={{ padding: '13px 22px', background: 'var(--surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', textDecoration: 'none' }}>INSTALL GUIDE</Link>
               <Link href="/developers/api-docs" style={{ padding: '13px 22px', background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', textDecoration: 'none' }}>API DOCS</Link>
             </div>

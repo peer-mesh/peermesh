@@ -53,7 +53,7 @@ create extension if not exists "uuid-ossp";
 create table profiles (
   id uuid references auth.users(id) on delete cascade primary key,
   username text unique,
-  role text not null default 'client' check (role in ('peer','host','client')),
+  role text not null default 'peer' check (role in ('peer','host','client')),
   country_code text not null default 'RW',
   trust_score integer default 50 check (trust_score between 0 and 100),
 

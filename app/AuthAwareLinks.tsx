@@ -33,7 +33,7 @@ export function AuthAwareLinks({ style, linkStyle, includeTraffic = true }: Auth
       <Link href="/install" style={linkStyle}>INSTALL</Link>
       <Link href="/developers" style={linkStyle}>DEVELOPERS</Link>
       {signedIn && includeTraffic ? <Link href="/provider/sessions" style={linkStyle}>TRAFFIC</Link> : null}
-      {signedIn ? <Link href="/dashboard" style={linkStyle}>DASHBOARD</Link> : <Link href="/auth?mode=login" style={linkStyle}>SIGN IN</Link>}
+      {signedIn ? <Link href="/dashboard" style={linkStyle}>DASHBOARD</Link> : <Link href="/auth/login" style={linkStyle}>SIGN IN</Link>}
     </span>
   )
 }
