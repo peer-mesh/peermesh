@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts tests/**/*.test.mjs",
     "relay:dev": "node run-relay.mjs --dev",
     "relay:local": "node run-relay.mjs --local",
     "relay:local:watch": "node run-relay.mjs --local --watch",

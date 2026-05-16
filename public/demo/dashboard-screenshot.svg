@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#0a0a0f"/>
+  <rect x="70" y="54" width="1140" height="612" rx="12" fill="#13131a" stroke="#1e1e2a"/>
+  <text x="100" y="100" fill="#00ff88" font-family="Consolas,monospace" font-size="18" letter-spacing="4">PEERMESH DASHBOARD</text>
+  <rect x="100" y="132" width="500" height="132" rx="8" fill="#0a0a0f" stroke="#1e1e2a"/>
+  <text x="126" y="174" fill="#e8e8f0" font-family="Arial,sans-serif" font-size="26">Share my connection</text>
+  <text x="126" y="214" fill="#00ff88" font-family="Consolas,monospace" font-size="16">2 requests · 264.3KB served · 1 public · 1 private</text>
+  <circle cx="126" cy="242" r="7" fill="#00ff88"/>
+  <circle cx="150" cy="242" r="7" fill="#1e1e2a"/>
+  <rect x="640" y="132" width="470" height="310" rx="8" fill="#0a0a0f" stroke="#1e1e2a"/>
+  <text x="668" y="174" fill="#00ff88" font-family="Consolas,monospace" font-size="15" letter-spacing="2">PRIVATE SHARING</text>
+  <text x="668" y="214" fill="#e8e8f0" font-family="Arial,sans-serif" font-size="22">Slot 2 active</text>
+  <rect x="668" y="244" width="390" height="54" rx="7" fill="#13131a" stroke="#1e1e2a"/>
+  <text x="692" y="279" fill="#00ff88" font-family="Consolas,monospace" font-size="25" letter-spacing="5">191175596</text>
+  <rect x="668" y="326" width="120" height="36" rx="6" fill="#00ff88"/>
+  <text x="704" y="350" fill="#000" font-family="Consolas,monospace" font-size="13" font-weight="700">ACTIVE</text>
+  <rect x="100" y="304" width="500" height="138" rx="8" fill="#0a0a0f" stroke="#1e1e2a"/>
+  <text x="126" y="348" fill="#e8e8f0" font-family="Arial,sans-serif" font-size="22">Connection slots</text>
+  <text x="126" y="388" fill="#666680" font-family="Consolas,monospace" font-size="16">1 / 2 active · synced from CLI</text>
+  <rect x="100" y="482" width="1010" height="118" rx="8" fill="#0a0a0f" stroke="#1e1e2a"/>
+  <text x="126" y="528" fill="#e8e8f0" font-family="Arial,sans-serif" font-size="22">Install surfaces</text>
+  <text x="126" y="568" fill="#666680" font-family="Arial,sans-serif" font-size="18">Desktop, CLI, and extension share limits, slots, and private codes.</text>
+</svg>

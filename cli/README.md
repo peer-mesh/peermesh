@@ -1,94 +1,212 @@
 # PeerMesh Provider CLI
 
-Share your internet connection with PeerMesh and earn free browsing credits.  
-Works as a **drop-in alternative to the desktop app** — the dashboard and extension detect it automatically on port 7654.
+PeerMesh Provider CLI shares your internet connection with PeerMesh from any machine that can run Node.js. It is the headless alternative to the desktop app and is designed for servers, terminals, background services, and automation.
 
----
+The CLI exposes the same local helper API as the desktop app, so the dashboard and browser extension can detect it, read its status, update slot count, apply daily limits, and sync private sharing state.
+
+## Requirements
+
+- Node.js 18 or newer
+- npm or npx
+- A PeerMesh account
+- Outbound access to the PeerMesh API and relay WebSocket endpoints
 
 ## Install
 
-### Windows (cmd / winglet)
-```cmd
-curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -o node.msi && msiexec /i node.msi /quiet && npm install -g peermesh-provider
-```
+### Windows PowerShell
 
-### Windows (PowerShell / Invoke)
 ```powershell
-Invoke-WebRequest https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -OutFile node.msi; Start-Process msiexec -ArgumentList '/i node.msi /quiet' -Wait; npm install -g peermesh-provider
+winget install OpenJS.NodeJS.LTS
+npm install -g @btcmaster1000/peermesh-provider
 ```
 
-### macOS (built-in curl + brew)
-```bash
-brew install node && npm install -g peermesh-provider
-```
-Or without Homebrew (built-in curl only):
-```bash
-curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0.pkg -o node.pkg && sudo installer -pkg node.pkg -target / && npm install -g peermesh-provider
-```
+If winget is unavailable:
 
-### Linux (built-in curl)
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs && npm install -g peermesh-provider
+```powershell
+Invoke-WebRequest https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi -OutFile node.msi
+Start-Process msiexec -ArgumentList '/i node.msi /quiet' -Wait
+npm install -g @btcmaster1000/peermesh-provider
 ```
 
----
-
-## Run without installing
+### macOS
 
 ```bash
-npx peermesh-provider
+brew install node
+npm install -g @btcmaster1000/peermesh-provider
 ```
 
----
+Without Homebrew:
 
-## Run
+```bash
+curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0.pkg -o node.pkg
+sudo installer -pkg node.pkg -target /
+npm install -g @btcmaster1000/peermesh-provider
+```
+
+### Linux
+
+Debian or Ubuntu:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+npm install -g @btcmaster1000/peermesh-provider
+```
+
+Fedora:
+
+```bash
+sudo dnf install -y nodejs npm
+npm install -g @btcmaster1000/peermesh-provider
+```
+
+## Run Without Installing
+
+```bash
+npx @btcmaster1000/peermesh-provider
+```
+
+## First Run
 
 ```bash
 peermesh-provider
 ```
 
-First run opens a sign-in page in your browser. Enter the code shown, approve it, and you're sharing.
+The first run opens a browser sign-in flow and prints a device code. Sign in, approve the device, then return to the terminal. After authentication, the CLI:
 
-The CLI starts a control server on **port 7654** — the same port the desktop app uses.  
-The dashboard and extension will detect it automatically and show **● CLI** in the header.
+- starts a local control server on `127.0.0.1:7654`
+- registers provider slots with the relay
+- syncs dashboard profile data
+- keeps usage, slot, limit, and private-sharing state current
 
----
-
-## Options
+## Status
 
 ```bash
-# Set a daily bandwidth limit (auto-disconnects when reached)
-peermesh-provider --limit 500        # 500 MB/day
-peermesh-provider --limit 1024       # 1 GB/day
-
-# Remove your daily limit
-peermesh-provider --no-limit
-
-# Override your country code
-peermesh-provider --country NG
-
-# Show today's usage and exit
 peermesh-provider --status
-
-# Clear saved credentials and re-authenticate
-peermesh-provider --reset
 ```
 
----
+The status output includes:
 
-## Sync with dashboard / extension
+- signed-in user
+- country
+- configured slot count
+- active or idle sharing state
+- shared bytes for the current day
+- request count for the current day
+- daily limit
+- profile sync actor and timestamp
+- slot sync actor and timestamp
+- per-slot status, bytes, private/public mode, private code, expiry, and sync actor
 
-The CLI and desktop app are interchangeable — both expose the same HTTP control API on `localhost:7654`.
+Example:
 
-- Dashboard share toggle controls the CLI just like the desktop app
-- Extension detects the CLI and shows the correct helper label
-- Only one can run at a time on the same machine (same port)
+```text
+User:          alice
+Country:       NG
+Slots:         2
+Sharing:       active
+Shared today:  264.3KB
+Requests today: 4
+Daily limit:   2048 MB
+Profile sync:  DASHBOARD @ 14:29:45
+Slot sync:     CLI @ 14:29:46
 
----
+Slot state:
+  Slot 1: RUNNING  req=3  served=120.1KB  mode=PUBLIC  code=---------  expiry=no expiry  sync=n/a
+  Slot 2: RUNNING  req=1  served=144.2KB  mode=PRIVATE  code=123456789  expiry=no expiry  sync=DASHBOARD @ 14:30:00
+```
 
-## Keep it running
+## Command Reference
 
-**Mac/Linux — systemd (built-in):**
+### Sharing
+
+```bash
+peermesh-provider
+peermesh-provider --serve
+```
+
+`--serve` skips the interactive terms prompt, which is useful for scripts and services.
+
+### Slots
+
+```bash
+peermesh-provider --slots 4
+peermesh-provider --slot 4
+```
+
+Slots are independent relay connections for concurrent provider capacity.
+
+- valid range: `1` to `32`
+- `1` to `8`: typical home connections
+- `9` to `16`: stable broadband
+- `17` to `32`: dedicated or server-grade connections
+
+Slot count syncs with the dashboard, desktop app, and extension helper state. If the server sync reduces slot count, stale private-share rows beyond the active slot count are trimmed from CLI status and local helper state.
+
+### Daily Limit
+
+```bash
+peermesh-provider --limit 1024
+peermesh-provider --no-limit
+```
+
+Limits are in MB per day. When the daily limit is reached, sharing pauses and resumes after the local daily reset.
+
+### Private Sharing
+
+```bash
+peermesh-provider --private-status
+peermesh-provider --private-on
+peermesh-provider --private-off
+peermesh-provider --private-refresh
+peermesh-provider --private-slot 2 --private-on
+peermesh-provider --private-slot 2 --private-expiry 24
+peermesh-provider --private-slot 2 --private-expiry none
+```
+
+Private sharing is per slot:
+
+- each slot has its own code
+- private slots are available only to code holders
+- public slots stay available to eligible public requesters
+- expiry is in hours, or `none`
+- code refresh keeps the slot private and rotates the code
+
+### Account and Debugging
+
+```bash
+peermesh-provider --reset
+peermesh-provider --debug
+peermesh-provider --docs
+```
+
+`--reset` clears saved credentials and revokes the device session when the API is reachable.
+
+Debug logs are written to:
+
+- Windows: `%USERPROFILE%\Desktop\peermesh-debug.log`
+- macOS/Linux: `~/Desktop/peermesh-debug.log`
+
+Config is stored in:
+
+- Windows: `%USERPROFILE%\.peermesh`
+- macOS/Linux: `~/.peermesh`
+
+## Sync Model
+
+The CLI syncs with the dashboard, desktop app, extension, and API.
+
+- `GET /api/user/sharing` pulls profile, daily limit, slot count, private shares, and per-slot limits.
+- `POST /api/user/sharing` persists local sharing state, slot count, private sharing changes, and bytes served.
+- The local control API on `127.0.0.1:7654` lets dashboard and extension read and update helper state.
+- When both desktop and CLI are installed, only one can own port `7654`; the other may use the peer helper port when supported.
+
+The status output shows sync actors such as `DASHBOARD`, `CLI`, `DESKTOP`, `EXTENSION`, or `SYSTEM`.
+
+## Keep It Running
+
+### Linux systemd
+
 ```bash
 sudo tee /etc/systemd/system/peermesh.service <<EOF
 [Unit]
@@ -96,7 +214,7 @@ Description=PeerMesh Provider
 After=network.target
 
 [Service]
-ExecStart=$(which peermesh-provider)
+ExecStart=$(which peermesh-provider) --serve
 Restart=always
 User=$USER
 
@@ -106,14 +224,18 @@ EOF
 sudo systemctl enable --now peermesh.service
 ```
 
-**Mac — launchd (built-in):**
+### macOS launchd
+
 ```bash
 cat > ~/Library/LaunchAgents/app.peermesh.provider.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>app.peermesh.provider</string>
-  <key>ProgramArguments</key><array><string>$(which peermesh-provider)</string></array>
+  <key>ProgramArguments</key><array>
+    <string>$(which peermesh-provider)</string>
+    <string>--serve</string>
+  </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict></plist>
@@ -121,66 +243,91 @@ EOF
 launchctl load ~/Library/LaunchAgents/app.peermesh.provider.plist
 ```
 
-**Windows — Task Scheduler (built-in):**
+### Windows Task Scheduler
+
 ```powershell
-$action = New-ScheduledTaskAction -Execute "$(where.exe peermesh-provider)"
+$provider = (Get-Command peermesh-provider).Source
+$action = New-ScheduledTaskAction -Execute $provider -Argument "--serve"
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 Register-ScheduledTask -TaskName "PeerMesh Provider" -Action $action -Trigger $trigger -RunLevel Highest -Force
 ```
 
----
+## Troubleshooting
+
+### Dashboard does not show CLI
+
+Run:
+
+```bash
+peermesh-provider --status
+```
+
+If it says sign-in is required, authenticate again with:
+
+```bash
+peermesh-provider
+```
+
+If another app owns the helper port, close the desktop app or the other CLI process.
+
+### Slots look stale after reducing count
+
+Run:
+
+```bash
+peermesh-provider --status
+```
+
+The CLI should show only the synced configured slots. If the dashboard still shows a stale count, refresh the dashboard after the next helper sync.
+
+### Private code is not accepted
+
+Check:
+
+```bash
+peermesh-provider --private-status
+```
+
+Confirm the intended slot is `ACTIVE`, the code has not expired, and the requester is using private-code mode instead of a public country connection.
+
+### Auth was revoked
+
+If the server revokes the CLI device, status commands exit cleanly with a sign-in-required message. Run:
+
+```bash
+peermesh-provider
+```
 
 ## Uninstall
 
 ```bash
-npm uninstall -g peermesh-provider
+npm uninstall -g @btcmaster1000/peermesh-provider
 ```
 
-To also remove saved credentials and config:
+Remove saved credentials and config:
 
-**Mac/Linux:**
 ```bash
 rm -rf ~/.peermesh
 ```
 
-**Windows (PowerShell):**
+Windows PowerShell:
+
 ```powershell
 Remove-Item -Recurse -Force "$env:USERPROFILE\.peermesh"
 ```
 
-**Windows (cmd):**
-```cmd
-rmdir /s /q "%USERPROFILE%\.peermesh"
-```
+Remove background service first if configured:
 
-If you set up a background service, remove it first:
-
-**Linux — systemd:**
 ```bash
 sudo systemctl disable --now peermesh.service
 sudo rm /etc/systemd/system/peermesh.service
 ```
 
-**Mac — launchd:**
 ```bash
 launchctl unload ~/Library/LaunchAgents/app.peermesh.provider.plist
 rm ~/Library/LaunchAgents/app.peermesh.provider.plist
 ```
 
-**Windows — Task Scheduler:**
 ```powershell
 Unregister-ScheduledTask -TaskName "PeerMesh Provider" -Confirm:$false
 ```
-
----
-
-## What it does
-
-- Connects to the PeerMesh relay as a provider
-- Routes other users' HTTPS traffic through your connection
-- Earns you browsing credits (free tier access)
-- Exposes a control server on port 7654 so the dashboard and extension can detect and control it
-- Blocks: .onion, SMTP, mail servers, torrent trackers, private IPs
-- Sends a heartbeat every 30s to keep your peer count accurate
-- Flushes bandwidth stats to the server every 5s
-- Auto-disconnects when daily limit is reached (if set)

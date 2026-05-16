@@ -9,6 +9,19 @@
   --text: #e8e8f0;
   --muted: #666680;
   --danger: #ff4466;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f7f8fb;
+  --surface: #ffffff;
+  --border: #d9e0ea;
+  --accent: #007a4d;
+  --accent-dim: rgba(0, 122, 77, 0.1);
+  --text: #101820;
+  --muted: #647184;
+  --danger: #c6284a;
+  color-scheme: light;
 }
 
 @theme inline {
@@ -21,4 +34,26 @@
 body {
   background: var(--bg);
   color: var(--text);
+}
+
+a {
+  color: inherit;
+}
+
+.theme-toggle {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }

@@ -839,9 +839,9 @@ function loadConfig() {
   config.deviceSessionId = config.deviceSessionId ?? ''
   config.connectionSlots = clampSlots(config.connectionSlots ?? 1)
   if (typeof config.launchOnStartup !== 'boolean') config.launchOnStartup = getDefaultLaunchOnStartup()
-  if (typeof config.autoShareOnLaunch !== 'boolean') {
-    config.autoShareOnLaunch = !!(config.shareEnabled && config.hasAcceptedProviderTerms)
-  }
+  // autoShareOnLaunch is an explicit user preference — read it directly from saved config.
+  // Never derive it from shareEnabled (which is cleared to false on every shutdown by stopRelay).
+  config.autoShareOnLaunch = typeof config.autoShareOnLaunch === 'boolean' ? config.autoShareOnLaunch : false
   config.privateShareActive = !!config.privateShareActive
   config.privateShare = config.privateShare ?? null
   config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
@@ -873,23 +873,23 @@ async function verifyStoredDesktopAuth() {
       signal: AbortSignal.timeout(5000),
     })
     if (res.ok) return true
+    // Try refresh on 401 before giving up
     if (res.status === 401) {
       const refreshed = await tryRefreshDesktopToken()
       if (refreshed) return true
     }
-    if (res.status === 403) {
-      const body = await res.json().catch(() => ({}))
-      if (body.revoked === true) {
-        log.warn('AUTH', 'stored desktop token revoked', { userId: config.userId })
-        await clearDesktopAuth('stored_token_revoked')
-        return false
-      }
+    // Only clear auth when server explicitly says the device is revoked
+    const body = await res.json().catch(() => ({}))
+    if (body.revoked === true) {
+      log.warn('AUTH', 'stored desktop token revoked', { userId: config.userId })
+      await clearDesktopAuth('stored_token_revoked')
+      return false
     }
-    log.warn('AUTH', 'stored desktop token rejected', { status: res.status, userId: config.userId })
-    await clearDesktopAuth('stored_token_rejected')
-    return false
+    // Any other error (network blip, 5xx, etc.) — keep credentials, stay signed in
+    log.warn('AUTH', 'stored desktop token verify non-ok — keeping auth alive', { status: res.status, userId: config.userId })
+    return true
   } catch (e) {
-    log.warn('AUTH', 'stored desktop token verify skipped', { err: e.message })
+    log.warn('AUTH', 'stored desktop token verify skipped (offline?)', { err: e.message })
     return true
   }
 }

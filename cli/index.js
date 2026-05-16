@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.56'
+const VERSION     = '1.0.58'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -144,6 +144,12 @@ function formatSyncStatus(sync) {
   if (!sync?.state_changed_at) return 'n/a'
   const actor = sync.state_actor ? String(sync.state_actor).toUpperCase() : 'SYSTEM'
   return `${actor} @ ${new Date(sync.state_changed_at).toLocaleTimeString()}`
+}
+
+function getSignedInLabel() {
+  if (config.username) return config.username
+  if (config.userId) return config.userId.slice(0, 8)
+  return null
 }
 
 function banner() {
@@ -317,9 +323,12 @@ async function tryRefreshCliToken() {
     })
     if (res.status === 403) {
       const body = await res.json().catch(() => ({}))
+      // Only clear credentials when server explicitly says device is revoked
       if (body.revoked === true) {
         clog.warn('AUTH', 'cli device revoked - clearing credentials', { userId: config.userId })
         await clearCliCredentials('device_revoked')
+      } else {
+        clog.warn('AUTH', 'cli token refresh 403 but not revoked - keeping auth alive', { userId: config.userId })
       }
       return false
     }
@@ -440,6 +449,18 @@ function createDisabledPrivateShareRow(deviceId, slotIndex = null) {
   }
 }
 
+function getPrivateShareSlotIndex(row) {
+  if (!row) return null
+  if (Number.isInteger(row.slot_index) && row.slot_index >= 0) return row.slot_index
+  const base = getBaseDeviceId()
+  const match = typeof row.device_id === 'string'
+    ? row.device_id.match(/^(.+)_slot_(\d+)$/)
+    : null
+  if (!match || match[1] !== base) return null
+  const parsed = parseInt(match[2], 10)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
 function hydratePrivateShareRows(rows) {
   const normalizedRows = normalizePrivateShareRows(rows)
   const byDeviceId = new Map()
@@ -470,9 +491,12 @@ function hydratePrivateShareRows(rows) {
   // Only include extra DB rows that belong to this device's _slot_N namespace.
   // Bare baseDeviceId rows (legacy, no _slot_N suffix) are excluded.
   const _base = getBaseDeviceId()
+  const configuredSlots = getConnectionSlots()
   for (const row of byDeviceId.values()) {
     if (hydratedRows.some(r => r.device_id === row.device_id)) continue
     if (!row.device_id.startsWith(_base + '_slot_')) continue
+    const slotIndex = getPrivateShareSlotIndex(row)
+    if (slotIndex === null || slotIndex >= configuredSlots) continue
     hydratedRows.push(row)
   }
 
@@ -637,15 +661,6 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const previousProfileSync = config.profileSync ?? null
   const previousConnectionSlotsSync = config.connectionSlotsSync ?? null
 
-  const nextPrivateShare = data.private_share ?? null
-  const nextPrivateShares = hydratePrivateShareRows([
-    ...(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : [])),
-    ...config.privateShares,
-  ])
-  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, config.privateShareDeviceId)
-  const nextPrivateShareEnabled = !!(selectedPrivateShare ?? nextPrivateShare)?.enabled
-  const nextPrivateShareActive = !!(selectedPrivateShare ?? nextPrivateShare)?.active
-
   const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
   const resolvedConnectionSlotsSync = preferLatestSync(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
   const shouldApplyConnectionSlots = (resolvedConnectionSlotsSync
@@ -654,15 +669,32 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
 
   config.profileSync = resolvedProfileSync
   config.connectionSlotsSync = resolvedConnectionSlotsSync
-  config.privateShares = nextPrivateShares
-  config.privateShare = selectedPrivateShare ?? nextPrivateShare
-  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
-  config.privateShareActive = nextPrivateShareActive
-  if (data.has_accepted_provider_terms != null) config.hasAcceptedProviderTerms = !!data.has_accepted_provider_terms
   if (shouldApplyConnectionSlots && Number.isInteger(data.connection_slots)) {
     config.connectionSlots = clampSlots(data.connection_slots)
     ensureSlotStates()
   }
+
+  const nextPrivateShare = data.private_share ?? null
+  const nextPrivateShares = hydratePrivateShareRows([
+    ...(data.private_shares ?? (nextPrivateShare ? [nextPrivateShare] : [])),
+    ...config.privateShares,
+  ])
+  const selectedPrivateShare = selectPrivateShareRow(nextPrivateShares, config.privateShareDeviceId)
+  const nextPrivateShareEnabled = !!(selectedPrivateShare ?? nextPrivateShare)?.enabled
+  const nextPrivateShareActive = !!(selectedPrivateShare ?? nextPrivateShare)?.active
+  const nextPrivateShareCode = (selectedPrivateShare ?? nextPrivateShare)?.code ?? null
+
+  config.privateShares = nextPrivateShares
+  config.privateShare = selectedPrivateShare ?? nextPrivateShare
+  config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
+  config.privateShareActive = nextPrivateShareActive
+  config.slotLimits = normalizePrivateShareRows([
+    ...(config.slotLimits ?? []),
+    ...(data.slot_limits ?? []),
+  ])
+  if (data.daily_share_limit_mb !== undefined) config.dailyShareLimitMb = data.daily_share_limit_mb ?? null
+  if (Number.isFinite(data.total_bytes_today)) config.todaySharedBytes = data.total_bytes_today
+  if (data.has_accepted_provider_terms != null) config.hasAcceptedProviderTerms = !!data.has_accepted_provider_terms
   saveConfig(config)
 
   const privacyToggleChanged = previousPrivateShareEnabled !== nextPrivateShareEnabled
@@ -1050,7 +1082,8 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
         case 'registered':
           slot.lastRelay = relay
           if (config.token) persistSharingState(true)
-          printStatus(limitBytes)
+          // Only print status once — when the last expected slot connects
+          if (activeSlotCount() === getConnectionSlots()) printStatus(limitBytes)
           break
 
         case 'error':
@@ -1290,7 +1323,13 @@ function printStatus(limitBytes) {
   const limitStr = limitBytes
     ? `${formatBytes(totalToday)} / ${formatBytes(limitBytes)} today`
     : `${formatBytes(totalToday)} today (no limit)`
-  const privBadge = config.privateShareActive ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'
+  const slotSummary = getSlotSummary()
+  const privateCount = slotSummary.filter(s => s.privateEnabled).length
+  const privBadge = privateCount === configured
+    ? '\uD83D\uDD12 ALL PRIVATE'
+    : privateCount > 0
+      ? `\uD83D\uDD12 ${configured - privateCount} public, ${privateCount} private`
+      : '\uD83C\uDF10 PUBLIC'
   console.log('')
   console.log(`  Sharing active [${privBadge}] — ${active} / ${configured} slots active`)
   console.log(`  ${aggregate.requestsHandled} requests — ${formatBytes(aggregate.bytesServed)} served`)
@@ -1575,7 +1614,7 @@ function printDocs() {
   row('Skip terms prompt (CI/scripts)',  'peermesh-provider --serve')
   row('Verbose debug logs to console',   'peermesh-provider --debug')
   row('Sign out and revoke device',      'peermesh-provider --reset')
-  h('CONNECTION SLOTS  (1�32, default 1)')
+  h('CONNECTION SLOTS  (1-32, default 1)')
   row('Run with 4 concurrent slots',     'peermesh-provider --slots 4')
   row('Run with 16 slots',               'peermesh-provider --slots 16')
   row('--slot is an alias for --slots',  'peermesh-provider --slot 4')
@@ -1653,8 +1692,9 @@ async function main() {
       process.exit(1)
     }
   } else {
+    // Don't blindly persist stale saved slot count — let server profile sync win on next poll
+    // Just ensure the in-memory value is valid
     config.connectionSlots = getConnectionSlots()
-    saveConfig(config)
   }
 
   if (privateSlotArg !== undefined) {
@@ -1699,7 +1739,9 @@ async function main() {
       config.country = user.country ?? 'RW'
       config.trust = user.trustScore ?? 50
       saveConfig(config)
-      console.log(`  Signed in as ${config.username ?? config.userId.slice(0, 8)}`)
+      const label = getSignedInLabel()
+      if (!label) throw new Error('Sign-in did not return a user id')
+      console.log(`  Signed in as ${label}`)
       console.log('')
     } catch (e) {
       console.error(`  x ${e.message}`)
@@ -1712,7 +1754,13 @@ async function main() {
     } catch {
       log('Could not refresh token (offline?) - continuing with saved credentials', 'warn')
     }
-    log(`Signed in as ${config.username ?? config.userId.slice(0, 8)}`)
+    const label = getSignedInLabel()
+    if (!config.token || !config.userId || !label) {
+      console.error('  x Sign in required. Run peermesh-provider to authenticate again.')
+      process.exitCode = 1
+      return
+    }
+    log(`Signed in as ${label}`)
   }
 
   console.log('')

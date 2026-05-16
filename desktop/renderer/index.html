@@ -340,8 +340,14 @@
   <div class="logo">PEERMESH</div>
   <div class="version-tag" id="version-tag"></div>
 
+  <!-- Loading Screen -->
+  <div id="loading-screen" style="display:flex;flex-direction:column;flex:1;align-items:center;justify-content:center;gap:12px">
+    <span style="display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></span>
+    <span style="font-family:'Courier New',monospace;font-size:10px;color:var(--muted);letter-spacing:1px">LOADING...</span>
+  </div>
+
   <!-- Auth Screen -->
-  <div id="auth-screen" class="screen active">
+  <div id="auth-screen" class="screen">
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center;overflow-y:auto">
       <h2 id="welcome-heading">WELCOME TO PEERMESH</h2>
       <p>Click the button below to sign in with your browser.</p>

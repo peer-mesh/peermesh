@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { SignedInDeveloperCards } from './PublicDevLinks'
 
 const BASE = 'https://peermesh-beta.vercel.app'
 
@@ -10,16 +11,10 @@ const cards = [
     tag: 'DOCS',
   },
   {
-    href: '/developers/keys',
-    label: 'API Keys',
-    desc: 'Issue, rotate, and deactivate scoped API keys. Each key enforces its own tier and RPM cap.',
-    tag: 'KEYS',
-  },
-  {
-    href: '/developers/billing',
-    label: 'Billing',
-    desc: 'Fund your USD wallet, estimate session cost, and withdraw provider earnings via Flutterwave.',
-    tag: 'BILLING',
+    href: '/install',
+    label: 'Install PeerMesh',
+    desc: 'Install the CLI, desktop app, or extension and review demo screenshots and video slots.',
+    tag: 'INSTALL',
   },
 ]
 
@@ -56,7 +51,7 @@ export default function DevelopersOverviewPage() {
               padding: '20px',
               background: 'var(--surface)',
               border: '1px solid var(--border)',
-              borderRadius: '12px',
+              borderRadius: '8px',
               cursor: 'pointer',
               transition: 'border-color 0.15s',
             }}>
@@ -68,6 +63,7 @@ export default function DevelopersOverviewPage() {
             </div>
           </Link>
         ))}
+        <SignedInDeveloperCards />
       </div>
 
       {/* Auth note */}
@@ -75,7 +71,7 @@ export default function DevelopersOverviewPage() {
         <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--accent)', letterSpacing: '2px', marginBottom: '10px' }}>AUTH MODEL</div>
         <div style={{ fontSize: '13px', color: 'var(--muted)', lineHeight: 1.8 }}>
           Developer API calls use <strong style={{ color: 'var(--text)' }}>Bearer API keys</strong> only.
-          Create and manage keys on the <Link href="/developers/keys" style={{ color: 'var(--accent)', textDecoration: 'none' }}>API Keys</Link> page.
+          Public docs do not require login. Sign in before creating API keys, funding a wallet, or inspecting provider traffic.
         </div>
         <div style={{ marginTop: '12px', fontFamily: 'var(--font-geist-mono)', fontSize: '12px', color: 'var(--muted)', background: 'var(--bg)', padding: '10px 14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
           Authorization: Bearer pm_live_xxxxxxxxxxxxxxxxxxxx

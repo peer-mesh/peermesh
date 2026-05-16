@@ -115,6 +115,8 @@ function getFlagForCountry(code) {
 }
 
 function showScreen(id) {
+  const loading = document.getElementById('loading-screen')
+  if (loading) loading.style.display = 'none'
   document.querySelectorAll('.screen').forEach((screen) => screen.classList.remove('active'))
   const active = document.getElementById(id)
   if (active) active.classList.add('active')
@@ -141,14 +143,19 @@ function getPrivateShareRows(state = window.__lastPeerMeshState || null) {
   const configuredSlots = Math.max(1, state?.slots?.configured ?? state?.connectionSlots ?? 1)
   if (!baseDeviceId) return merged
 
-  const next = new Map(merged.map((row) => [row.device_id, row]))
-  const baseShare = next.get(baseDeviceId)
-  const hasBaseShareWithCode = baseShare && !Number.isInteger(baseShare.slot_index) && baseShare.code
+  const next = new Map()
+  // Only include rows that belong to a valid slot index for this base device
+  for (const row of merged) {
+    const match = row.device_id?.match(/^(.+)_slot_(\d+)$/)
+    if (match && match[1] === baseDeviceId) {
+      if (parseInt(match[2], 10) >= configuredSlots) continue // drop stale slots
+    }
+    next.set(row.device_id, row)
+  }
 
   for (let index = 0; index < configuredSlots; index++) {
     const slotDeviceId = `${baseDeviceId}_slot_${index}`
     if (next.has(slotDeviceId)) continue
-    // New slots always start clean — never inherit another slot's private share data
     next.set(slotDeviceId, {
       device_id: slotDeviceId,
       base_device_id: baseDeviceId,
@@ -919,6 +926,12 @@ function updateUI(state) {
       if (match[1] !== currentBaseDeviceId) return true
       return parseInt(match[2], 10) < currentConfiguredSlots
     })
+    // If the currently selected slot was trimmed away, reset selection
+    if (privateShareDeviceId && !privateShares.some(row => row.device_id === privateShareDeviceId)) {
+      privateShareDeviceId = privateShares[0]?.device_id ?? null
+      privateShareSelectionLocked = false
+      clearPendingEdit('selectedSlotDeviceId')
+    }
   }
 
   renderPrivateShare()
@@ -1357,6 +1370,13 @@ const openBtn = document.getElementById('btn-open-browser')
 if (openBtn) openBtn.dataset.autoOpen = 'false'
 
 pollState().then((state) => {
+  // loading screen is hidden by showScreen() inside updateUI/pollState
+  // If pollState failed entirely, fall back to auth screen
+  if (!state) {
+    const loading = document.getElementById('loading-screen')
+    if (loading) loading.style.display = 'none'
+    showScreen('auth-screen')
+  }
   if (!state?.config?.userId) {
     // Show auth screen passively — do NOT auto-start device flow
     const codeWaiting = document.getElementById('code-waiting')
@@ -1366,6 +1386,10 @@ pollState().then((state) => {
     const statusEl = document.getElementById('auth-status')
     if (statusEl) statusEl.textContent = 'Click the button above to sign in'
   }
+}).catch(() => {
+  const loading = document.getElementById('loading-screen')
+  if (loading) loading.style.display = 'none'
+  showScreen('auth-screen')
 })
 
 // Keep auth screen passive until the user clicks sign in.

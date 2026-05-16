@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#f7f8fb"/>
+  <text x="80" y="80" fill="#007a4d" font-family="Consolas,monospace" font-size="18" letter-spacing="3">PROVIDER TRAFFIC</text>
+  <text x="80" y="126" fill="#101820" font-family="Arial,sans-serif" font-size="38" font-weight="700">Inspect routed host history</text>
+  <rect x="80" y="166" width="1120" height="72" rx="8" fill="#fff" stroke="#d9e0ea"/>
+  <text x="110" y="211" fill="#647184" font-family="Arial,sans-serif" font-size="22">Search routed host, for example api.example.com</text>
+  <rect x="960" y="178" width="108" height="48" rx="8" fill="#007a4d"/>
+  <text x="984" y="208" fill="#fff" font-family="Consolas,monospace" font-size="14" font-weight="700">SEARCH</text>
+  <rect x="80" y="278" width="1120" height="152" rx="8" fill="#fff" stroke="#d9e0ea"/>
+  <text x="110" y="322" fill="#007a4d" font-family="Consolas,monospace" font-size="18">checkout.stripe.com</text>
+  <text x="110" y="354" fill="#647184" font-family="Arial,sans-serif" font-size="17">US - ACTIVE - a13f900b</text>
+  <text x="110" y="392" fill="#101820" font-family="Arial,sans-serif" font-size="17">Traffic: 1.4MB · Started: 5/16/2026, 2:41 PM · Ended: Active</text>
+  <rect x="110" y="450" width="176" height="34" rx="17" fill="#f7f8fb" stroke="#d9e0ea"/>
+  <text x="132" y="472" fill="#101820" font-family="Arial,sans-serif" font-size="15">api.stripe.com</text>
+  <rect x="300" y="450" width="220" height="34" rx="17" fill="#f7f8fb" stroke="#d9e0ea"/>
+  <text x="322" y="472" fill="#101820" font-family="Arial,sans-serif" font-size="15">checkout.stripe.com</text>
+  <rect x="80" y="514" width="1120" height="98" rx="8" fill="#fff" stroke="#d9e0ea"/>
+  <text x="110" y="558" fill="#007a4d" font-family="Consolas,monospace" font-size="18">cdn.example.net</text>
+  <text x="110" y="590" fill="#647184" font-family="Arial,sans-serif" font-size="17">GB - ENDED - 90ab1d52 · Traffic: 428.1KB</text>
+</svg>

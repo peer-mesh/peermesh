@@ -124,6 +124,27 @@ function formatSyncLabel(sync: SyncState | null | undefined): string | null {
   return `Synced from ${actor} at ${new Date(sync.state_changed_at).toLocaleTimeString()}`
 }
 
+function compareVersions(a: string | null | undefined, b: string | null | undefined): number {
+  if (!a || !b) return 0
+  const aParts = a.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const bParts = b.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const length = Math.max(aParts.length, bParts.length)
+  for (let index = 0; index < length; index += 1) {
+    const diff = (aParts[index] ?? 0) - (bParts[index] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    Promise.resolve(promise)
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timer))
+  })
+}
+
 function mergeProfileSync(profile: Profile | null, sync: SyncState | null | undefined, updates: Partial<Profile> = {}): Profile | null {
   if (!profile) return profile
 
@@ -148,10 +169,25 @@ function sortPrivateShares(rows: PrivateShare[]): PrivateShare[] {
   })
 }
 
+function getPrivateShareSlotIndex(share: PrivateShare | null | undefined, baseDeviceId: string): number | null {
+  if (!share || share.base_device_id !== baseDeviceId) return null
+  if (Number.isInteger(share.slot_index)) return share.slot_index
+  if (share.device_id === baseDeviceId) return 0
+  const match = share.device_id.match(/^(.+)_slot_(\d+)$/)
+  if (!match || match[1] !== baseDeviceId) return null
+  const parsed = Number.parseInt(match[2], 10)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function hasPrivateShareSlot(rows: PrivateShare[], baseDeviceId: string, slotIndex: number): boolean {
+  return rows.some(row => getPrivateShareSlotIndex(row, baseDeviceId) === slotIndex)
+}
+
 function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceId: string, desktop: DesktopState | null): PrivateShare[] {
   const merged = new Map<string, PrivateShare>()
   const add = (share: PrivateShare | null | undefined) => {
     if (!share?.device_id) return
+    if (share.base_device_id !== baseDeviceId && share.device_id !== baseDeviceId) return
     const current = merged.get(share.device_id)
     merged.set(share.device_id, preferLatestSync(current, share) ?? share)
   }
@@ -177,8 +213,15 @@ function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceI
 
     for (let index = 0; index < configuredSlots; index++) {
       const slotDeviceId = `${baseDeviceId}_slot_${index}`
-      if (!merged.has(slotDeviceId)) {
+      if (!hasPrivateShareSlot([...merged.values()], baseDeviceId, index)) {
         merged.set(slotDeviceId, createDisabledPrivateShare(slotDeviceId, baseDeviceId, index))
+      }
+    }
+
+    for (const [deviceId, share] of merged) {
+      const slotIndex = getPrivateShareSlotIndex(share, baseDeviceId)
+      if (slotIndex !== null && slotIndex >= configuredSlots) {
+        merged.delete(deviceId)
       }
     }
   }
@@ -189,6 +232,33 @@ function mergePrivateShares(rows: PrivateShare[] | null | undefined, baseDeviceI
   }
 
   return sortPrivateShares([...merged.values()])
+}
+
+function summarizePrivateShareSlots(rows: PrivateShare[], baseDeviceId: string | null, configuredSlots: number): { publicCount: number; privateCount: number } {
+  const slotCount = Math.max(1, configuredSlots || 1)
+  const activeBySlot = new Map<number, boolean>()
+
+  for (let index = 0; index < slotCount; index++) {
+    activeBySlot.set(index, false)
+  }
+
+  if (baseDeviceId) {
+    for (const row of rows) {
+      const slotIndex = getPrivateShareSlotIndex(row, baseDeviceId)
+      if (slotIndex === null || slotIndex < 0 || slotIndex >= slotCount) continue
+      activeBySlot.set(slotIndex, (activeBySlot.get(slotIndex) ?? false) || !!row.active)
+    }
+  }
+
+  let privateCount = 0
+  for (const active of activeBySlot.values()) {
+    if (active) privateCount += 1
+  }
+
+  return {
+    publicCount: slotCount - privateCount,
+    privateCount,
+  }
 }
 
 function selectPrivateShare(rows: PrivateShare[], deviceId?: string | null, baseDeviceId?: string | null): PrivateShareState {
@@ -379,13 +449,25 @@ export default function Dashboard() {
     async function load() {
       try {
         // Use getSession first to avoid throwing on missing session
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        const { data: { session }, error: sessionError } = await withTimeout(
+          supabase.auth.getSession(),
+          8000,
+          'Could not verify session - please refresh',
+        )
         if (sessionError) throw new Error('Could not verify session – please refresh')
-        if (!session) { router.push('/auth?mode=login'); return }
+        if (!session) {
+          setLoading(false)
+          router.replace('/auth?mode=login')
+          return
+        }
 
         const user = session.user
 
-        const { data, error: profileError } = await supabase.from('profiles').select(PROFILE_SELECT_FIELDS).eq('id', user.id).single<Profile>()
+        const { data, error: profileError } = await withTimeout(
+          supabase.from('profiles').select(PROFILE_SELECT_FIELDS).eq('id', user.id).single<Profile>(),
+          10000,
+          'Could not load your profile - please refresh',
+        )
         if (profileError) throw new Error('Could not load your profile – please refresh')
         const nextProfile = data
 
@@ -1157,9 +1239,9 @@ export default function Dashboard() {
   const desktopRunningForUser = desktopRunning && helperOwnedByCurrentUser
   const cliRunningForUser = cliRunning && helperOwnedByCurrentUser
 
-  const desktopUpdateAvailable = !!(desktopRunning && latestDesktopVersion && desktopProcessVersion && latestDesktopVersion !== desktopProcessVersion)
-  const cliUpdateAvailable = !!(cliRunning && latestCliVersion && cliProcessVersion && latestCliVersion !== cliProcessVersion)
-  const extUpdateAvailable = !!(extInstalled && latestExtVersion && extVersion && latestExtVersion !== extVersion)
+  const desktopUpdateAvailable = !!(desktopRunning && latestDesktopVersion && desktopProcessVersion && compareVersions(latestDesktopVersion, desktopProcessVersion) > 0)
+  const cliUpdateAvailable = !!(cliRunning && latestCliVersion && cliProcessVersion && compareVersions(latestCliVersion, cliProcessVersion) > 0)
+  const extUpdateAvailable = !!(extInstalled && latestExtVersion && extVersion && compareVersions(latestExtVersion, extVersion) > 0)
   const showExtBanner = !extInstalled || extUpdateAvailable
   const helperBaseDeviceId = helperOwnedByCurrentUser ? (desktop?.baseDeviceId ?? desktop?.peer?.baseDeviceId ?? null) : null
   const helperSlots = helperOwnedByCurrentUser ? (desktop?.slots ?? desktop?.peer?.slots ?? null) : null
@@ -1522,8 +1604,7 @@ export default function Dashboard() {
                 ? 'Connecting...'
                 : displayIsSharing
                   ? (() => {
-                      const publicCount = privateShares.filter(s => !s.active).length
-                      const privateCount = privateShares.filter(s => s.active).length
+                      const { publicCount, privateCount } = summarizePrivateShareSlots(privateShares, helperBaseDeviceId, slotDisplayCount)
                       const modeLabel = publicCount > 0 && privateCount > 0
                         ? `${publicCount} 🌐 · ${privateCount} 🔒`
                         : privateCount > 0 ? '🔒 PRIVATE' : '🌐 PUBLIC'
@@ -1858,8 +1939,7 @@ export default function Dashboard() {
           )}
 
           {isSharing && (() => {
-            const publicCount = privateShares.filter(s => !s.active).length
-            const privateCount = privateShares.filter(s => s.active).length
+            const { publicCount, privateCount } = summarizePrivateShareSlots(privateShares, helperBaseDeviceId, slotDisplayCount)
             return (
               <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--muted)', fontFamily: 'var(--font-geist-mono)', background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: '6px', padding: '6px 10px' }}>
                 {publicCount > 0 && privateCount > 0

@@ -2,14 +2,26 @@ import { NextResponse } from 'next/server'
 import { readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 
+function compareVersions(a: string, b: string): number {
+  const aParts = a.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const bParts = b.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const length = Math.max(aParts.length, bParts.length)
+  for (let index = 0; index < length; index += 1) {
+    const diff = (aParts[index] ?? 0) - (bParts[index] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
 function getLatestDesktopVersion(): string | null {
   try {
     const files = readdirSync(join(process.cwd(), 'public'))
-    const exes = files.filter(f => f.startsWith('PeerMesh-Setup_') && f.endsWith('.exe'))
-    if (!exes.length) return null
-    exes.sort().reverse()
-    const match = exes[0].match(/PeerMesh-Setup_(.+)\.exe/)
-    return match?.[1] ?? null
+    const versions = files
+      .map(file => file.match(/^PeerMesh-Setup_(.+)\.exe$/)?.[1] ?? null)
+      .filter((version): version is string => !!version)
+    if (!versions.length) return null
+    versions.sort(compareVersions).reverse()
+    return versions[0] ?? null
   } catch { return null }
 }
 
