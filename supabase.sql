@@ -515,11 +515,12 @@ $$ language sql security definer;
 -- Auto-create profile on signup
 create or replace function handle_new_user() returns trigger as $$
 begin
-  insert into public.profiles (id, country_code, username)
+  insert into public.profiles (id, country_code, username, role)
   values (
     new.id,
     coalesce(new.raw_user_meta_data->>'country_code', 'RW'),
-    nullif(trim(coalesce(new.raw_user_meta_data->>'username', '')), '')
+    nullif(trim(coalesce(new.raw_user_meta_data->>'username', '')), ''),
+    'peer'
   )
   on conflict (id) do nothing;
   return new;
@@ -604,7 +605,8 @@ create policy "Users can view own api usage" on api_usage for select using (auth
 -- ================================
 -- Migrations (safe to run on existing DBs)
 -- ================================
-alter table profiles add column if not exists role text not null default 'client';
+alter table profiles add column if not exists role text not null default 'peer';
+update profiles set role = 'peer' where role = 'client';
 alter table profiles add column if not exists contribution_credits_bytes bigint not null default 0;
 alter table profiles add column if not exists wallet_balance_usd numeric(14,2) not null default 0;
 alter table profiles add column if not exists wallet_pending_payout_usd numeric(14,2) not null default 0;

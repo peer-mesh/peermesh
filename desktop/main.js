@@ -894,38 +894,45 @@ async function verifyStoredDesktopAuth() {
   }
 }
 
+let _refreshPromise = null
+
 async function tryRefreshDesktopToken() {
   if (!config.userId || !config.refreshToken || !config.deviceSessionId) return false
-  try {
-    const res = await fetch(`${API_BASE}/api/extension-auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceSessionId: config.deviceSessionId,
-        refreshToken: config.refreshToken,
-      }),
-      signal: AbortSignal.timeout(5000),
-    })
-    if (res.status === 403) {
-      const body = await res.json().catch(() => ({}))
-      if (body.revoked === true) {
-        log.warn('AUTH', 'desktop device revoked - clearing auth', { userId: config.userId })
-        await clearDesktopAuth('device_revoked')
+  // Deduplicate concurrent refresh calls — all callers share the same in-flight promise
+  if (_refreshPromise) return _refreshPromise
+  _refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/extension-auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceSessionId: config.deviceSessionId,
+          refreshToken: config.refreshToken,
+        }),
+        signal: AbortSignal.timeout(5000),
+      })
+      if (res.status === 403) {
+        const body = await res.json().catch(() => ({}))
+        if (body.revoked === true) {
+          log.warn('AUTH', 'desktop device revoked - clearing auth', { userId: config.userId })
+          await clearDesktopAuth('device_revoked')
+        }
+        return false
       }
-      return false
-    }
-    if (!res.ok) return false
-    const data = await res.json()
-    if (data.token && data.refreshToken && data.deviceSessionId) {
-      config.token = data.token
-      config.refreshToken = data.refreshToken
-      config.deviceSessionId = data.deviceSessionId
-      saveConfig()
-      log.info('AUTH', 'desktop token refreshed', { userId: config.userId, deviceSessionId: config.deviceSessionId })
-      return true
-    }
-  } catch {}
-  return false
+      if (!res.ok) return false
+      const data = await res.json()
+      if (data.token && data.refreshToken && data.deviceSessionId) {
+        config.token = data.token
+        config.refreshToken = data.refreshToken
+        config.deviceSessionId = data.deviceSessionId
+        saveConfig()
+        log.info('AUTH', 'desktop token refreshed', { userId: config.userId, deviceSessionId: config.deviceSessionId })
+        return true
+      }
+    } catch {}
+    return false
+  })().finally(() => { _refreshPromise = null })
+  return _refreshPromise
 }
 
 async function confirmDesktopAuthStillValid(context, status) {
@@ -1597,6 +1604,29 @@ function connectSlot(slot) {
         updateTray()
       } else if (msg.type === 'error') {
         log.error('RELAY', `${slotPrefix(slot)} relay error`, { message: msg.message })
+        // Fatal errors that should stop sharing entirely rather than reconnect
+        const isFatal = msg.message?.includes('cannot share bandwidth') ||
+          msg.message?.includes('Verify your phone') ||
+          msg.message?.includes('Accept the provider disclosure') ||
+          msg.message?.includes('Profile not found')
+        if (isFatal) {
+          log.warn('RELAY', `${slotPrefix(slot)} fatal provider error - stopping relay`, { message: msg.message })
+          slot.ws.removeAllListeners('close')
+          slot.ws.close(1000)
+          slot.ws = null
+          slot.running = false
+          slot.connectedAt = null
+          syncAggregateState()
+          // Stop all slots
+          if (config.shareEnabled) {
+            config.shareEnabled = false
+            saveConfig()
+            showNotification('PeerMesh', msg.message)
+            if (settingsWindow) settingsWindow.webContents.send('sharing-error', msg.message)
+          }
+          updateTray()
+          return
+        }
         if (msg.message?.includes('Replaced')) {
           slot.ws.removeAllListeners('close')
           slot.ws.close(1000)

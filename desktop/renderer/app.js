@@ -1361,6 +1361,13 @@ setInterval(() => {
   pollState().catch(() => {})
 }, 2000)
 
+if (window.peermesh?.onSharingError) {
+  window.peermesh.onSharingError((message) => {
+    showMainError(message)
+    pollState().catch(() => {})
+  })
+}
+
 setOffline(!navigator.onLine)
 renderPrivateShare()
 renderStartupPreferences(null)

@@ -656,7 +656,12 @@ export default function Dashboard() {
       const user = session?.user ?? null
       const desktopOwnedByOther = dt.available && dt.userId && user && dt.userId !== user.id
       if (dt.available && !desktopOwnedByOther) {
+        const wasStarting = desktop?.shareEnabled && !desktop?.running
         applyDesktopSnapshot(dt, user?.id ?? null)
+        // Detect unexpected stop: was starting/sharing, now stopped with no error
+        if (wasStarting && !dt.running && !dt.shareEnabled) {
+          setShareError('Sharing stopped — your account may need phone verification or a role change. Check the desktop app for details.')
+        }
         setShareError(prev => prev != null && prev.includes('signed in as a different user') ? null : prev)
       } else {
         setDesktop(dt)

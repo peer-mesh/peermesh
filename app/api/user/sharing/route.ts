@@ -646,7 +646,9 @@ export async function POST(req: Request) {
   if (body.acceptProviderTerms === true) {
     const userId = await resolveUserId(req)
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    // Set terms accepted; upgrade client → peer so they can share bandwidth
     await adminClient.from('profiles').update({ has_accepted_provider_terms: true }).eq('id', userId)
+    await adminClient.from('profiles').update({ role: 'peer' }).eq('id', userId).eq('role', 'client')
     return NextResponse.json({ ok: true })
   }
 
@@ -935,7 +937,14 @@ export async function PUT(req: Request) {
   }
 
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId))
+
+  const eligibilityProfile = await loadProviderEligibilityProfile(userId)
+  // Auto-upgrade client → peer if they have accepted provider terms
+  if (eligibilityProfile?.role === 'client' && eligibilityProfile?.has_accepted_provider_terms === true) {
+    await adminClient.from('profiles').update({ role: 'peer' }).eq('id', userId)
+    if (eligibilityProfile) eligibilityProfile.role = 'peer'
+  }
+  const providerError = getProviderEligibilityError(eligibilityProfile)
   if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
 
   // Detect country from the request IP

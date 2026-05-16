@@ -23,4 +23,5 @@ contextBridge.exposeInMainWorld('peermesh', {
   acceptProviderTerms: (opts) => ipcRenderer.invoke('accept-provider-terms', opts),
   requestDeviceCode: () => ipcRenderer.invoke('request-device-code'),
   pollDeviceCode: (device_code) => ipcRenderer.invoke('poll-device-code', { device_code }),
+  onSharingError: (cb) => ipcRenderer.on('sharing-error', (_, message) => cb(message)),
 })

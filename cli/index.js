@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.65'
+const VERSION     = '1.0.66'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -1092,6 +1092,18 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
             slot.ws.removeAllListeners('close')
             slot.ws.close(1000)
             slot.running = false
+            break
+          }
+          // Fatal errors — stop sharing entirely instead of reconnecting
+          if (
+            msg.message?.includes('cannot share bandwidth') ||
+            msg.message?.includes('Verify your phone') ||
+            msg.message?.includes('Accept the provider disclosure') ||
+            msg.message?.includes('Profile not found')
+          ) {
+            clog.warn('RELAY', `${slotPrefix(slot)} fatal provider error - stopping`, { message: msg.message })
+            console.log(`\n  x ${msg.message}\n`)
+            stopRelay()
           }
           break
 

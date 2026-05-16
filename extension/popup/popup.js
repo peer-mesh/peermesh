@@ -569,9 +569,14 @@ function startPeerPolling() {
 
   if (!statusPollInterval) {
     statusPollInterval = setInterval(async () => {
+      const prevHelper = state.helper
       await refreshRuntimeStatus()
       await loadPrivateShareState(ownedHelper()?.baseDeviceId ?? null)
       const desktopSharing = !!(state.helper?.available && !helperOwnerMismatch() && (state.helper?.running || state.helper?.shareEnabled))
+      // Detect unexpected stop: helper was starting (shareEnabled but not running), now fully stopped
+      if (prevHelper?.shareEnabled && !prevHelper?.running && state.helper?.available && !state.helper?.running && !state.helper?.shareEnabled) {
+        state.error = 'Sharing stopped unexpectedly. Your account may need phone verification. Check the desktop app for details.'
+      }
       if (state.isSharing !== desktopSharing) {
         state.isSharing = desktopSharing
         await chrome.storage.local.set({ isSharing: desktopSharing })
