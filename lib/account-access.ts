@@ -67,7 +67,7 @@ export function getConnectionAccessRequirement(
     return {
       ok: false,
       code: 'usage_access_required',
-      error: 'CLIENT MODE - Fund your USD wallet or spend contribution credits to connect publicly.',
+      error: 'Client mode can only connect publicly with a funded USD wallet or contribution credits. Switch to Peer and share, or fund your wallet.',
       nextStep: '/developers/billing',
     }
   }
@@ -76,7 +76,7 @@ export function getConnectionAccessRequirement(
     return {
       ok: false,
       code: 'usage_access_required',
-      error: 'FREE LAYER - Enable sharing to connect, or fund your USD wallet to browse without sharing.',
+      error: 'Public browsing requires an active Peer share, contribution credits, or a funded USD wallet. Private-code sessions are not restricted by this.',
       nextStep: '/developers/billing',
     }
   }

@@ -923,6 +923,10 @@ function scheduleProviderReconnect(reason) {
   log('warn', `[PROVIDER] reconnect scheduled in ${delay}ms (${reason})`)
 }
 
+function isProviderAuthError(message = '') {
+  return /auth|token|unauthorized|forbidden|client accounts cannot share|verify your phone|accept the provider disclosure|api keys cannot register/i.test(String(message))
+}
+
 async function connectStandaloneProvider() {
   await loadSharingContext()
   if (sharingMode !== 'extension' || !providerShareEnabled) return
@@ -985,6 +989,7 @@ async function connectStandaloneProvider() {
         supportsTunnel: false,
         deviceId,
         baseDeviceId,
+        authToken: token,
       }))
     }
 
@@ -1021,6 +1026,7 @@ async function connectStandaloneProvider() {
 
       if (msg.type === 'error') {
         log('warn', `[PROVIDER] relay error: ${msg.message}`)
+        settle(reject, new Error(msg.message || 'Relay rejected provider registration'))
         providerWs?.close(1000)
       }
     }
@@ -1063,6 +1069,11 @@ async function startStandaloneProvider() {
     const helper = await persistSharingState()
     return { success: true, helper }
   } catch (error) {
+    if (isProviderAuthError(error.message)) {
+      providerShareEnabled = false
+      const helper = await persistSharingState(await getStandaloneProviderStatus())
+      return { success: false, error: error.message, helper }
+    }
     scheduleProviderReconnect(error.message)
     const helper = await persistSharingState(await getStandaloneProviderStatus())
     return { success: true, helper }

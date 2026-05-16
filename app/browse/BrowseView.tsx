@@ -111,7 +111,7 @@ function buildTextDocument(body: string, finalUrl: string, status?: number): str
   </body></html>`
 }
 
-function rewriteLinks(html: string, baseUrl: string, accessToken: string): string {
+function rewriteLinks(html: string, baseUrl: string, accessToken: string, sessionId: string): string {
   try {
     const base = new URL(baseUrl)
     const origin = base.origin
@@ -121,9 +121,10 @@ function rewriteLinks(html: string, baseUrl: string, accessToken: string): strin
   var ORIGIN='${origin}';
   var PROXY='/api/proxy-fetch';
   var TOKEN='${accessToken}';
+  var SESSION_ID='${sessionId}';
   var _fetch=window.fetch.bind(window);
   function proxyFetch(url,method,headers,body){
-    return _fetch(PROXY,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:JSON.stringify({url:url,method:method||'GET',headers:headers||{},body:body||null})})
+    return _fetch(PROXY,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:JSON.stringify({url:url,method:method||'GET',headers:headers||{},body:body||null,sessionId:SESSION_ID})})
       .then(function(r){return r.json();})
       .then(function(d){return new Response(d.body||'',{status:d.status||200,headers:d.headers||{}});});
   }
@@ -201,10 +202,10 @@ function rewriteLinks(html: string, baseUrl: string, accessToken: string): strin
   }
 }
 
-function responseToDocument(response: ProxyResponse, finalUrl: string, accessToken: string): string {
+function responseToDocument(response: ProxyResponse, finalUrl: string, accessToken: string, sessionId: string): string {
   if (!response.body) return buildTextDocument('', finalUrl, response.status)
   if (isLikelyHtml(response.body, response.headers)) {
-    return rewriteLinks(response.body, finalUrl, accessToken)
+    return rewriteLinks(response.body, finalUrl, accessToken, sessionId)
   }
   return buildTextDocument(response.body, finalUrl, response.status)
 }
@@ -406,7 +407,7 @@ export default function BrowseView() {
 
       const actualUrl = response.finalUrl || normalizedUrl
       const token = await ensureAccessToken()
-      const rendered = responseToDocument(response, actualUrl, token)
+      const rendered = responseToDocument(response, actualUrl, token, dbSessionId)
       setCurrentUrl(actualUrl)
       setLastLoadedUrl(actualUrl)
       setContent(rendered)
@@ -424,7 +425,7 @@ export default function BrowseView() {
         setErrorMsg(message)
       }
     }
-  }, [ensureAccessToken])
+  }, [dbSessionId, ensureAccessToken])
 
   const handleRefresh = useCallback(async () => {
     const target = currentUrl || lastLoadedUrl || inputUrl

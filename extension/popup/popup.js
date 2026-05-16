@@ -1,7 +1,7 @@
-﻿// popup.js â€” PeerMesh Chrome Extension
+// popup.js - PeerMesh Chrome Extension
 const API = 'https://peermesh-beta.vercel.app'
 
-// Countries â€” loaded from DB with pagination, error handling and retry
+// Countries - loaded from DB with pagination, error handling and retry
 const COUNTRIES_PAGE_SIZE = 30
 let countriesData = []
 let countriesPage = 1
@@ -25,7 +25,7 @@ async function loadCountries(page = 1, search = '') {
     countriesTotalPages = data.pages ?? 1
     countriesPage = page
     // Auto-select IP-detected country on first load
-    // auto-select removed â€” let user choose their own country
+    // auto-select removed - let user choose their own country
   } catch {
     countriesError = true
   } finally {
@@ -36,14 +36,14 @@ async function loadCountries(page = 1, search = '') {
 
 function getFlagForCountry(code) {
   const found = countriesData.find(c => c.code === code)
-  return found?.flag ?? 'ðŸŒ'
+  return found?.flag ?? ''
 }
 
 function getHelperMismatchError(helper = state.helper) {
   const source = helper?.source === 'cli' ? 'CLI' : 'desktop app'
   return `This ${source} is signed in as a different user. Sign out of the ${source} first.`
 }
-const FREE_TIER_MESSAGE = 'FREE LAYER â€” Enable sharing above to connect publicly, or fund your USD wallet to browse without sharing.'
+const FREE_TIER_MESSAGE = 'FREE LAYER - Enable sharing above to connect publicly, or fund your USD wallet to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
 
 function withSharingHeaders(token, contentType = true) {
@@ -99,6 +99,29 @@ function getPendingEdit(key) {
   if (!entry) return null
   if (Date.now() - entry.ts > PENDING_EDIT_TTL) { delete _pendingEdits[key]; return null }
   return entry.value
+}
+
+const RESTORABLE_INPUT_IDS = new Set(['privateCodeInput', 'dailyLimitInput', 'slotDailyLimitInput'])
+
+function captureFocusedInput() {
+  const el = document.activeElement
+  if (!el || !RESTORABLE_INPUT_IDS.has(el.id)) return null
+  return {
+    id: el.id,
+    selectionStart: typeof el.selectionStart === 'number' ? el.selectionStart : null,
+    selectionEnd: typeof el.selectionEnd === 'number' ? el.selectionEnd : null,
+  }
+}
+
+function restoreFocusedInput(snapshot) {
+  if (!snapshot) return
+  const el = document.getElementById(snapshot.id)
+  if (!el) return
+  el.focus()
+  if (snapshot.selectionStart !== null && snapshot.selectionEnd !== null && typeof el.setSelectionRange === 'function') {
+    const max = el.value.length
+    el.setSelectionRange(Math.min(snapshot.selectionStart, max), Math.min(snapshot.selectionEnd, max))
+  }
 }
 
 window.addEventListener('online', () => { state.isOnline = true; render() })
@@ -200,7 +223,7 @@ function mergePrivateShares(rows, baseDeviceId, helper = ownedHelper()) {
   for (let index = 0; index < configuredSlots; index++) {
     if (!hasPrivateShareSlot(currentRows(), baseDeviceId, index)) {
       const deviceId = `${baseDeviceId}_slot_${index}`
-      // New slots always start clean — never inherit another slot's private share data
+      // New slots always start clean - never inherit another slot's private share data
       merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, index))
     }
   }
@@ -271,6 +294,11 @@ function mapSlotLimits(rows = []) {
 }
 
 function syncSlotDailyLimitInput() {
+  const pending = getPendingEdit('slotDailyLimitInput')
+  if (pending !== null) {
+    state.slotDailyLimitInput = pending
+    return
+  }
   const selectedDeviceId = state.selectedPrivateSlot || state.privateShare?.device_id || null
   const selected = selectedDeviceId ? state.slotLimits?.[selectedDeviceId] : null
   state.slotDailyLimitInput = selected?.daily_limit_mb != null ? String(selected.daily_limit_mb) : ''
@@ -288,7 +316,7 @@ async function handleAuthFailure(status, { preserveWhileSharing = false } = {}) 
   return true
 }
 
-// â”€â”€ Session expiry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Session expiry
 
 async function handleExpiredSession() {
   stopPeerPolling()
@@ -317,7 +345,7 @@ async function handleExpiredSession() {
   startAuthPolling()
 }
 
-// â”€â”€ Init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Init
 
 async function init() {
   const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'extId', 'supabaseToken', 'connectionType'])
@@ -355,7 +383,7 @@ async function init() {
         }
         return
       }
-    } catch {} // offline â€” allow through with cached credentials
+    } catch {} // offline - allow through with cached credentials
     // Fetch hasAcceptedProviderTerms from DB
     try {
       const res = await fetch(`${API}/api/user/sharing`, {
@@ -399,7 +427,7 @@ async function init() {
   loadCountries(1, '')
 }
 
-// â”€â”€ Auth polling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Auth polling
 
 let authPollInterval = null
 let peerPollInterval = null
@@ -581,7 +609,7 @@ function startPeerPolling() {
           dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
         }
       }
-      if (!state.dailyLimitSaving && shouldApplyProfileState) state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
+      if (!state.dailyLimitSaving && shouldApplyProfileState && getPendingEdit('dailyLimitInput') === null) state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
       if (data.has_accepted_provider_terms === true) state.hasAcceptedProviderTerms = true
       await chrome.storage.local.set({ user: state.user })
       document.querySelectorAll('.stat').forEach(el => {
@@ -621,10 +649,11 @@ function startAuthPolling() {
   }, 2000)
 }
 
-// â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Render
 
 function render() {
   const app = document.getElementById('app')
+  const focusedInput = captureFocusedInput()
 
   if (state.loading) {
     app.innerHTML = `<div class="loading"><div class="spinner"></div>LOADING...</div>`
@@ -637,11 +666,12 @@ function render() {
   }
 
   renderDashboard(app)
+  restoreFocusedInput(focusedInput)
 }
 
 function renderAuth(app) {
   const offlineBanner = !state.isOnline
-    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">âš  NO INTERNET â€” sign-in unavailable</div>`
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">NO INTERNET - sign-in unavailable</div>`
     : ''
   app.innerHTML = `
     <div class="header">
@@ -685,12 +715,12 @@ function renderDashboard(app) {
     ? 'Local desktop helper belongs to another user. Sign out there first.'
     : standaloneHelper
     ? (isSharing
-      ? 'Extension standalone sharing active â€” single-slot web mode.'
-      : 'Extension standalone ready â€” one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
+      ? 'Extension standalone sharing active - single-slot web mode.'
+      : 'Extension standalone ready - one slot. Desktop or CLI adds full-browser tunnels and up to 32 slots.')
     : sharePending
       ? 'Helper is starting sharing...'
     : helperReady
-      ? (isSharing ? `${helperSource} sharing active â€” earning credits.` : `${helperSource} helper detected â€” ready to share.`)
+      ? (isSharing ? `${helperSource} sharing active - earning credits.` : `${helperSource} helper detected - ready to share.`)
       : 'Sharing is unavailable right now.'
   const selectedSlotDeviceId = state.selectedPrivateSlot || state.privateShare?.device_id || (helperBaseDeviceId ? `${helperBaseDeviceId}_slot_0` : null)
   const selectedSlotLimit = selectedSlotDeviceId ? state.slotLimits?.[selectedSlotDeviceId] : null
@@ -700,12 +730,12 @@ function renderDashboard(app) {
   const slotLimitSyncLabel = formatSyncLabel(selectedSlotLimit)
 
   const offlineBanner = !state.isOnline
-    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">âš  NO INTERNET â€” features unavailable</div>`
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.35);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#ffaa00">NO INTERNET - features unavailable</div>`
     : ''
   const errorBanner = state.error
     ? `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-size:11px;color:#ff6060;line-height:1.5">
         <span>${state.error}</span>
-        <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0;flex-shrink:0">âœ•</button>
+        <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0;flex-shrink:0">x</button>
        </div>`
     : ''
 
@@ -761,9 +791,9 @@ function renderDashboard(app) {
              </div>
              ${countriesTotalPages > 1 ? `
              <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px">
-               <button id="countriesPrevBtn" ${countriesPage <= 1 ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage <= 1 ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage <= 1 ? 'not-allowed' : 'pointer'}">â† PREV</button>
+               <button id="countriesPrevBtn" ${countriesPage <= 1 ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage <= 1 ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage <= 1 ? 'not-allowed' : 'pointer'}">&lt; PREV</button>
                <span style="font-family:'Courier New',monospace;font-size:10px;color:var(--muted)">${countriesPage} / ${countriesTotalPages}</span>
-               <button id="countriesNextBtn" ${countriesPage >= countriesTotalPages ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage >= countriesTotalPages ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage >= countriesTotalPages ? 'not-allowed' : 'pointer'}">NEXT â†’</button>
+               <button id="countriesNextBtn" ${countriesPage >= countriesTotalPages ? 'disabled' : ''} style="background:none;border:1px solid var(--border);color:${countriesPage >= countriesTotalPages ? 'var(--muted)' : 'var(--text)'};border-radius:6px;padding:4px 10px;font-family:'Courier New',monospace;font-size:10px;cursor:${countriesPage >= countriesTotalPages ? 'not-allowed' : 'pointer'}">NEXT &gt;</button>
              </div>` : ''}`
       }
     </div>
@@ -795,7 +825,7 @@ function renderDashboard(app) {
 
     ${publicConnectBlocked && !session && selectedCountry
       ? `<div class="section" style="background:rgba(255,68,102,0.08);border-top:1px solid rgba(255,68,102,0.2);border-bottom:1px solid rgba(255,68,102,0.2);font-size:11px;color:#ff9090;line-height:1.5">
-           <span style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.5px">FREE TIER â€” </span>${FREE_TIER_MESSAGE.replace('FREE TIER â€” ', '')}
+           <span style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.5px">FREE TIER - </span>${FREE_TIER_MESSAGE.replace('FREE TIER - ', '')}
          </div>`
       : ''}
 
@@ -803,7 +833,7 @@ function renderDashboard(app) {
       <div class="share-row">
         <div class="share-info">
           <h4>Share my connection</h4>
-          <p>${isSharing ? 'Sharing active â€” earning credits' : helperLabel}</p>
+          <p>${isSharing ? 'Sharing active - earning credits' : helperLabel}</p>
           ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.privateShare?.active ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.privateShare?.active ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.privateShare?.active ? '#00ff88' : '#666680'}">${state.privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>` : ''}
           ${state.user?.dailyLimitMb != null ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
           <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
@@ -956,6 +986,7 @@ function renderDashboard(app) {
   document.getElementById('privateCodeInput')?.addEventListener('input', (e) => {
     state.privateCodeInput = e.target.value.replace(/\D/g, '').slice(0, 9)
     e.target.value = state.privateCodeInput
+    setPendingEdit('privateCodeInput', state.privateCodeInput)
     state.error = null
     chrome.storage.local.set({ privateCodeInput: state.privateCodeInput })
     const btn = document.getElementById('connectPrivateBtn')
@@ -1002,63 +1033,77 @@ function renderDashboard(app) {
   document.getElementById('dailyLimitInput')?.addEventListener('input', (e) => {
     state.dailyLimitInput = e.target.value.replace(/\D/g, '')
     e.target.value = state.dailyLimitInput
+    setPendingEdit('dailyLimitInput', state.dailyLimitInput)
     state.error = null
   })
   document.getElementById('dailyLimitInput')?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return
     e.preventDefault()
     const raw = (e.target.value || '').trim()
+    clearPendingEdit('dailyLimitInput')
     void saveDailyLimit(raw ? parseInt(raw, 10) : null)
   })
   document.getElementById('saveDailyLimitBtn')?.addEventListener('click', () => {
     const raw = (document.getElementById('dailyLimitInput')?.value || '').trim()
+    clearPendingEdit('dailyLimitInput')
     void saveDailyLimit(raw ? parseInt(raw, 10) : null)
   })
   document.getElementById('dailyLimit1gbBtn')?.addEventListener('click', () => {
     state.dailyLimitInput = '1024'
+    clearPendingEdit('dailyLimitInput')
     void saveDailyLimit(1024)
   })
   document.getElementById('dailyLimit2gbBtn')?.addEventListener('click', () => {
     state.dailyLimitInput = '2048'
+    clearPendingEdit('dailyLimitInput')
     void saveDailyLimit(2048)
   })
   document.getElementById('dailyLimit5gbBtn')?.addEventListener('click', () => {
     state.dailyLimitInput = '5120'
+    clearPendingEdit('dailyLimitInput')
     void saveDailyLimit(5120)
   })
   document.getElementById('dailyLimitNoneBtn')?.addEventListener('click', () => {
     state.dailyLimitInput = ''
+    clearPendingEdit('dailyLimitInput')
     void saveDailyLimit(null)
   })
   document.getElementById('slotDailyLimitInput')?.addEventListener('input', (e) => {
     state.slotDailyLimitInput = e.target.value.replace(/\D/g, '')
     e.target.value = state.slotDailyLimitInput
+    setPendingEdit('slotDailyLimitInput', state.slotDailyLimitInput)
     state.error = null
   })
   document.getElementById('slotDailyLimitInput')?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return
     e.preventDefault()
     const raw = (e.target.value || '').trim()
+    clearPendingEdit('slotDailyLimitInput')
     void saveSlotDailyLimit(raw ? parseInt(raw, 10) : null)
   })
   document.getElementById('saveSlotDailyLimitBtn')?.addEventListener('click', () => {
     const raw = (document.getElementById('slotDailyLimitInput')?.value || '').trim()
+    clearPendingEdit('slotDailyLimitInput')
     void saveSlotDailyLimit(raw ? parseInt(raw, 10) : null)
   })
   document.getElementById('slotLimit1gbBtn')?.addEventListener('click', () => {
     state.slotDailyLimitInput = '1024'
+    clearPendingEdit('slotDailyLimitInput')
     void saveSlotDailyLimit(1024)
   })
   document.getElementById('slotLimit2gbBtn')?.addEventListener('click', () => {
     state.slotDailyLimitInput = '2048'
+    clearPendingEdit('slotDailyLimitInput')
     void saveSlotDailyLimit(2048)
   })
   document.getElementById('slotLimit5gbBtn')?.addEventListener('click', () => {
     state.slotDailyLimitInput = '5120'
+    clearPendingEdit('slotDailyLimitInput')
     void saveSlotDailyLimit(5120)
   })
   document.getElementById('slotLimitNoneBtn')?.addEventListener('click', () => {
     state.slotDailyLimitInput = ''
+    clearPendingEdit('slotDailyLimitInput')
     void saveSlotDailyLimit(null)
   })
 
@@ -1072,18 +1117,18 @@ function renderDashboard(app) {
         <div style="font-family:'Courier New',monospace;font-size:10px;color:#00ff88;letter-spacing:1px;margin-bottom:10px">BEFORE YOU SHARE</div>
         <div style="font-size:14px;font-weight:600;margin-bottom:14px;line-height:1.3">What sharing your connection means</div>
         ${[
-          ['ðŸŒ', 'Your IP address will be used by other PeerMesh users to browse the web.'],
-          ['ðŸ”’', 'All sessions are logged with signed receipts.'],
-          ['ðŸš«', 'Blocked: .onion sites, SMTP/mail, torrents, private IPs.'],
-          ['âš¡', 'You can stop sharing at any time.'],
-          ['ðŸ’¸', 'Sharing earns you free browsing credits.'],
+          ['WEB', 'Your IP address will be used by other PeerMesh users to browse the web.'],
+          ['LOCK', 'All sessions are logged with signed receipts.'],
+          ['BLOCK', 'Blocked: .onion sites, SMTP/mail, torrents, private IPs.'],
+          ['STOP', 'You can stop sharing at any time.'],
+          ['CREDITS', 'Sharing earns you free browsing credits.'],
         ].map(([icon, text]) => `
           <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:#666680;line-height:1.5">
             <span style="flex-shrink:0">${icon}</span><span>${text}</span>
           </div>`).join('')}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px">
           <button id="pm-disclose-cancel" style="padding:10px;background:none;border:1px solid #1e1e2a;border-radius:8px;color:#666680;cursor:pointer;font-family:'Courier New',monospace;font-size:10px">CANCEL</button>
-          <button id="pm-disclose-accept" style="padding:10px;background:#00ff88;border:none;border-radius:8px;color:#000;cursor:pointer;font-family:'Courier New',monospace;font-size:10px;font-weight:700">I UNDERSTAND â€” SHARE</button>
+          <button id="pm-disclose-accept" style="padding:10px;background:#00ff88;border:none;border-radius:8px;color:#000;cursor:pointer;font-family:'Courier New',monospace;font-size:10px;font-weight:700">I UNDERSTAND - SHARE</button>
         </div>
       </div>`
     document.body.appendChild(overlay)
@@ -1110,7 +1155,7 @@ function renderDashboard(app) {
   }
 }
 
-// â”€â”€ Actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Actions
 
 async function connectSession() {
   const privateCode = (state.privateCodeInput || '').trim()
@@ -1123,7 +1168,7 @@ async function connectSession() {
   if ((!state.selectedCountry && !privateCode) || !state.user || state.connecting) return
 
   if (!state.isOnline) {
-    state.error = 'No internet connection â€” check your network and try again'
+    state.error = 'No internet connection - check your network and try again'
     render()
     return
   }
@@ -1167,7 +1212,7 @@ async function connectSession() {
     state.connectionType = isPrivateConnect ? 'private' : 'public'
     await chrome.storage.local.set({ session: state.session, connectionType: state.connectionType })
   } catch (err) {
-    state.error = err.message === 'Failed to fetch' ? 'Network error â€” could not reach server' : err.message
+    state.error = err.message === 'Failed to fetch' ? 'Network error - could not reach server' : err.message
   } finally {
     state.connecting = false
     render()
@@ -1208,7 +1253,7 @@ async function toggleSharing(on) {
     return
   }
 
-  // First-time share â€” show disclosure modal
+  // First-time share - show disclosure modal
   if (on && !state.hasAcceptedProviderTerms) {
     state.showDisclosure = true
     render()
@@ -1219,7 +1264,7 @@ async function toggleSharing(on) {
   render()
 
   if (on && !state.isOnline) {
-    state.error = 'No internet connection â€” sharing requires an active network'
+    state.error = 'No internet connection - sharing requires an active network'
     state.shareToggling = false
     render()
     return
@@ -1228,7 +1273,7 @@ async function toggleSharing(on) {
   if (on && !ownedHelper()?.available) {
     await refreshRuntimeStatus()
     if (!ownedHelper()?.available) {
-      state.error = 'Sharing is unavailable right now â€” retry in a few seconds'
+      state.error = 'Sharing is unavailable right now - retry in a few seconds'
       state.shareToggling = false
       render()
       return
@@ -1256,7 +1301,7 @@ async function toggleSharing(on) {
     state.helper = response?.helper || state.helper
     state.shareToggling = false
     state.error = response?.error === 'Failed to fetch'
-      ? 'Network error â€” could not reach the sharing service'
+      ? 'Network error - could not reach the sharing service'
       : (response?.error || 'Sharing could not be started')
     render()
     return
@@ -1353,6 +1398,7 @@ async function saveDailyLimit(limitMb) {
       dailyLimitMb: data.daily_share_limit_mb ?? null,
     }
     state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
+    clearPendingEdit('dailyLimitInput')
     await chrome.storage.local.set({ user: state.user })
   } catch (err) {
     state.error = err.message || 'Could not update daily limit'
@@ -1402,6 +1448,7 @@ async function saveSlotDailyLimit(limitMb) {
     if (!res.ok || data.error) throw new Error(data.error || 'Could not update slot daily limit')
 
     state.slotLimits = mapSlotLimits([...(data.slot_limits ?? []), ...Object.values(state.slotLimits ?? {})])
+    clearPendingEdit('slotDailyLimitInput')
     syncSlotDailyLimitInput()
   } catch (err) {
     state.error = err.message || 'Could not update slot daily limit'
@@ -1450,7 +1497,7 @@ async function signOut() {
   startAuthPolling()
 }
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Helpers
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`
@@ -1459,7 +1506,7 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`
 }
 
-// â”€â”€ Debug log panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Debug log panel
 
 const logEntries = []
 
@@ -1482,7 +1529,7 @@ async function initLogPanel() {
   } catch {}
 }
 
-// â”€â”€ Message listener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Message listener
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'LOG') appendLog(msg.entry)
@@ -1493,7 +1540,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     render()
   }
 
-  // Relay found a new provider transparently â€” update sessionId, no UI disruption
+  // Relay found a new provider transparently - update sessionId, no UI disruption
   if (msg.type === 'SESSION_RECONNECTED') {
     if (state.session) {
       state.session = { ...state.session, id: msg.sessionId }
@@ -1511,8 +1558,8 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'SESSION_ENDED') {
     state.session = null
     state.error = msg.reason
-      ? `Connection lost â€” ${msg.reason}. Select a country to reconnect.`
-      : 'Connection lost â€” your peer disconnected. Select a country to reconnect.'
+      ? `Connection lost - ${msg.reason}. Select a country to reconnect.`
+      : 'Connection lost - your peer disconnected. Select a country to reconnect.'
     chrome.storage.local.set({ session: null })
     render()
   }
@@ -1525,7 +1572,7 @@ function renderLogPanel() {
   panel.id = 'pm-log-panel'
   panel.innerHTML = `
     <div id="pm-log-toggle" style="padding:6px 16px;font-size:10px;color:#444;cursor:pointer;font-family:'Courier New',monospace;display:flex;justify-content:space-between;border-top:1px solid #1a1a2a">
-      <span>DEBUG LOGS</span><span id="pm-log-arrow">â–¼</span>
+      <span>DEBUG LOGS</span><span id="pm-log-arrow">v</span>
     </div>
     <div id="pm-log-body" style="display:none;max-height:160px;overflow-y:auto;padding:4px 16px 8px;font-size:10px;font-family:'Courier New',monospace;background:#050508"></div>
     <div style="padding:2px 16px 8px;display:flex;gap:6px">
@@ -1545,7 +1592,7 @@ function renderLogPanel() {
   document.getElementById('pm-log-toggle').onclick = () => {
     open = !open
     document.getElementById('pm-log-body').style.display = open ? 'block' : 'none'
-    document.getElementById('pm-log-arrow').textContent = open ? 'â–²' : 'â–¼'
+    document.getElementById('pm-log-arrow').textContent = open ? '^' : 'v'
     if (open) document.getElementById('pm-log-body').scrollTop = document.getElementById('pm-log-body').scrollHeight
   }
   document.getElementById('pm-log-copy').onclick = () => {

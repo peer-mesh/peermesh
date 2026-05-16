@@ -184,7 +184,7 @@ export async function POST(req: Request) {
     const monthlyUsage = Number(activeProfile.bandwidth_used_month ?? 0)
     if (monthlyUsage >= effectiveLimit && !hasPaidAccess(activeProfile)) {
       return NextResponse.json({
-        error: 'Monthly free allocation exhausted. Use contribution credits or fund your USD wallet for more usage.',
+        error: 'Monthly public browsing allocation exhausted. Use contribution credits, fund your USD wallet, or connect with a private share code.',
         code: 'usage_access_required',
         nextStep: '/developers/billing',
       }, { status: 403 })
