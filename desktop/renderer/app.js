@@ -524,6 +524,7 @@ function renderStartupPreferences(state) {
   const note = document.getElementById('startup-note')
   const signedIn = !!config.userId
   const accepted = !!config.hasAcceptedProviderTerms
+  const isCurrentlySharing = !!state?.running || !!state?.shareEnabled
 
   setToggleVisual(launchToggle, {
     on: !!config.launchOnStartup,
@@ -533,7 +534,7 @@ function renderStartupPreferences(state) {
   setToggleVisual(autoShareToggle, {
     on: !!config.autoShareOnLaunch,
     loading: startupBusy.autoShareOnLaunch,
-    disabled: !signedIn || !accepted || startupBusy.autoShareOnLaunch,
+    disabled: !signedIn || (!accepted && !isCurrentlySharing) || startupBusy.autoShareOnLaunch,
   })
 
   if (launchDesc) {

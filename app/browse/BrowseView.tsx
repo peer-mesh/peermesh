@@ -451,7 +451,7 @@ export default function BrowseView() {
   const canRefresh = !!(lastLoadedUrl || currentUrl)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg)' }}>
       <div style={{ background: 'linear-gradient(180deg, rgba(16,18,26,0.98), rgba(14,16,22,0.94))', borderBottom: '1px solid var(--border)', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '10px', position: 'sticky', top: 0, zIndex: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           <button
@@ -534,7 +534,7 @@ export default function BrowseView() {
         )}
       </div>
 
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
         {pageState === 'loading' && hasContent && (
           <div style={{ position: 'absolute', inset: '18px 18px auto 18px', zIndex: 12, display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', background: 'rgba(8,10,14,0.88)', border: '1px solid rgba(0,255,136,0.18)', borderRadius: '10px', backdropFilter: 'blur(12px)' }}>
             <span style={{ width: '12px', height: '12px', border: '2px solid rgba(255,255,255,0.15)', borderTopColor: 'var(--accent)', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />
