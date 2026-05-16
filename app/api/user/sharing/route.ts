@@ -687,7 +687,7 @@ export async function POST(req: Request) {
     }
 
     const refresh = body.privateSharing.refresh === true
-    const existing = selectPrivateShareRow(existingShares, deviceId, baseDeviceId)
+    const existing = existingShares.find(row => row.base_device_id === deviceId) ?? null
     const enabled = body.privateSharing.enabled ?? existing?.enabled ?? false
     const expiresAt = expiryHours !== undefined
       ? buildPrivateShareExpiry(expiryHours)

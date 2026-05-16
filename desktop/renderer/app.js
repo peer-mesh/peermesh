@@ -398,9 +398,10 @@ async function savePrivateShare(payload) {
     if (!result?.success) throw new Error(result?.error || 'Could not update private sharing')
     privateShares = mergePrivateShareRows(privateShares, Array.isArray(result.privateShares) ? result.privateShares : [])
     slotLimits = mapSlotLimits([...(result.slotLimits ?? []), ...Object.values(slotLimits)])
-    const nextDeviceId = result.privateShareDeviceId ?? privateShareDeviceId ?? result.privateShare?.device_id ?? null
-    if (nextDeviceId) {
-      privateShareDeviceId = nextDeviceId
+    // Keep selection on the slot that was just saved
+    const savedDeviceId = payload?.deviceId ?? privateShareDeviceId ?? result.privateShareDeviceId ?? result.privateShare?.device_id ?? null
+    if (savedDeviceId) {
+      privateShareDeviceId = savedDeviceId
       privateShareSelectionLocked = true
     }
     privateShare = preferLatestSync(
@@ -904,6 +905,19 @@ function updateUI(state) {
   if (!getPendingEdit('selectedSlotDeviceId') && !privateShareSelectionLocked) {
     if (state?.privateShareDeviceId) privateShareDeviceId = state.privateShareDeviceId
     else if (state?.privateShare?.device_id) privateShareDeviceId = state.privateShare.device_id
+  }
+
+  // Trim cached privateShares to the current configured slot count so the
+  // private sharing dropdown never shows more slots than are actually configured.
+  const currentConfiguredSlots = state?.slots?.configured ?? state?.connectionSlots ?? 1
+  const currentBaseDeviceId = state?.baseDeviceId ?? state?.config?.baseDeviceId ?? null
+  if (currentBaseDeviceId) {
+    privateShares = privateShares.filter(row => {
+      const match = row.device_id?.match(/^(.+)_slot_(\d+)$/)
+      if (!match) return true
+      if (match[1] !== currentBaseDeviceId) return true
+      return parseInt(match[2], 10) < currentConfiguredSlots
+    })
   }
 
   renderPrivateShare()

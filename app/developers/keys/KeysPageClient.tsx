@@ -203,7 +203,7 @@ export default function KeysPageClient() {
       {/* Keys table */}
       <div style={{ border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden' }}>
         {/* Table header */}
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto', gap: '0', padding: '10px 20px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 110px', gap: '0', padding: '10px 20px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
           {['Key', 'Tier', 'Created', 'Last used', ''].map(h => (
             <div key={h} style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>{h}</div>
           ))}
@@ -223,7 +223,7 @@ export default function KeysPageClient() {
             key={key.id}
             style={{
               display: 'grid',
-              gridTemplateColumns: '2fr 1fr 1fr 1fr auto',
+              gridTemplateColumns: '2fr 1fr 1fr 1fr 110px',
               gap: '0',
               padding: '14px 20px',
               alignItems: 'center',

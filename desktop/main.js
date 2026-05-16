@@ -505,9 +505,9 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
 
   const resolvedProfileSync = preferLatestSyncRow(previousProfileSync, data.profile_sync ?? null)
   const resolvedConnectionSlotsSync = preferLatestSyncRow(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
-  const shouldApplyConnectionSlots = resolvedConnectionSlotsSync
+  const shouldApplyConnectionSlots = (resolvedConnectionSlotsSync
     ? getSyncTimestamp(resolvedConnectionSlotsSync?.state_changed_at) >= getSyncTimestamp(previousConnectionSlotsSync?.state_changed_at)
-    : true
+    : true) && (Date.now() - _localSlotChangeAt > LOCAL_SLOT_CHANGE_GRACE_MS)
 
   config.profileSync = resolvedProfileSync
   config.connectionSlotsSync = resolvedConnectionSlotsSync
@@ -586,10 +586,26 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
       to: config.connectionSlots,
     })
     if (config.shareEnabled || activeSlotCount() > 0) {
-      stopRelay()
-      config.shareEnabled = true
-      saveConfig()
-      connectRelay()
+      // Stop only slots that are no longer needed (scale down) or add new ones (scale up)
+      // without a full stop/start cycle that causes a race where only 1 slot reconnects.
+      const desired = clampSlots(config.connectionSlots)
+      // Stop excess slots
+      for (let i = desired; i < slotStates.length; i++) {
+        const slot = slotStates[i]
+        if (slot.reconnectTimer) { clearTimeout(slot.reconnectTimer); slot.reconnectTimer = null }
+        stopHeartbeat(slot)
+        if (slot.ws) { slot.ws.removeAllListeners('close'); slot.ws.close(1000); slot.ws = null }
+        closeAllTunnels(slot, false)
+        slot.running = false
+        slot.connectedAt = null
+      }
+      ensureSlotStates()
+      // Connect any new slots
+      for (let i = previousConnectionSlots; i < desired; i++) {
+        if (slotStates[i]) connectSlot(slotStates[i])
+      }
+      syncAggregateState()
+      updateTray()
     } else {
       updateTray()
     }
@@ -684,6 +700,8 @@ function applyLaunchOnStartupPreference(enabled = config.launchOnStartup) {
 }
 
 let _savingDailyLimit = false
+let _localSlotChangeAt = 0
+const LOCAL_SLOT_CHANGE_GRACE_MS = 8000
 
 async function refreshSharingConfig() {
   if (!config.token) return null
@@ -1101,7 +1119,8 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
     ...(data.private_shares ?? (data.private_share ? [data.private_share] : [])),
     ...config.privateShares,
   ])
-  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? null
+  // Use targetDeviceId (the slot we just saved) not config.privateShareDeviceId (the previously selected slot)
+  config.privateShare = config.privateShares.find(r => r.device_id === targetDeviceId) ?? selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? null
   config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   saveConfig()
@@ -1179,6 +1198,7 @@ async function applyConnectionSlots(nextSlots, { syncPeer = true, actor = SHARIN
   const normalizedSlots = clampSlots(nextSlots)
   const shouldResumeLocal = !!config.shareEnabled
 
+  _localSlotChangeAt = Date.now()
   config.connectionSlots = normalizedSlots
   ensureSlotStates()
   saveConfig()

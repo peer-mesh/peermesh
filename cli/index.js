@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.55'
+const VERSION     = '1.0.56'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -626,6 +626,9 @@ function enforceLocalLimit(limitBytes) {
   }, msUntilMidnight)
 }
 
+let _localSlotChangeAt = 0
+const LOCAL_SLOT_CHANGE_GRACE_MS = 8000
+
 function applySharingProfileData(data, { source = 'remote' } = {}) {
   const previousPrivateShareEnabled = !!config.privateShare?.enabled
   const previousPrivateShareActive = !!config.privateShareActive
@@ -645,9 +648,9 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
 
   const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
   const resolvedConnectionSlotsSync = preferLatestSync(previousConnectionSlotsSync, data.connection_slots_sync ?? null)
-  const shouldApplyConnectionSlots = resolvedConnectionSlotsSync
+  const shouldApplyConnectionSlots = (resolvedConnectionSlotsSync
     ? getSyncTimestamp(resolvedConnectionSlotsSync?.state_changed_at) >= getSyncTimestamp(previousConnectionSlotsSync?.state_changed_at)
-    : true
+    : true) && (Date.now() - _localSlotChangeAt > LOCAL_SLOT_CHANGE_GRACE_MS)
 
   config.profileSync = resolvedProfileSync
   config.connectionSlotsSync = resolvedConnectionSlotsSync
@@ -844,7 +847,8 @@ async function updatePrivateShareState({ enabled, refresh = false, expiryHours, 
     ...(data.private_shares ?? (data.private_share ? [data.private_share] : [])),
     ...config.privateShares,
   ])
-  config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? null
+  // Use targetDeviceId (the slot we just saved) not config.privateShareDeviceId (the previously selected slot)
+  config.privateShare = config.privateShares.find(r => r.device_id === targetDeviceId) ?? selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? null
   config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
   saveConfig(config)
@@ -1233,6 +1237,7 @@ function applyConnectionSlots(nextSlots, { syncPeer = true, actor = SHARING_ACTO
   const normalizedSlots = clampSlots(nextSlots)
   const shouldResume = !!config.shareEnabled
 
+  _localSlotChangeAt = Date.now()
   config.connectionSlots = normalizedSlots
   ensureSlotStates()
   config.privateShares = hydratePrivateShareRows(config.privateShares)

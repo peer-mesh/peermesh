@@ -205,6 +205,15 @@ function mergePrivateShares(rows, baseDeviceId, helper = ownedHelper()) {
     }
   }
 
+  // Remove rows for slots beyond the current configured count to prevent stale
+  // slot entries from a previous higher slot count showing in the dropdown.
+  for (const [deviceId, row] of merged) {
+    if (!Number.isInteger(row.slot_index)) continue
+    if (row.base_device_id === baseDeviceId && row.slot_index >= configuredSlots) {
+      merged.delete(deviceId)
+    }
+  }
+
   if (merged.size === 0) {
     const deviceId = `${baseDeviceId}_slot_0`
     merged.set(deviceId, createDisabledPrivateShare(deviceId, baseDeviceId, 0))
