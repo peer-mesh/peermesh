@@ -519,6 +519,7 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
     ...config.slotLimits,
     ...(data.slot_limits ?? []),
   ])
+  if (data.has_accepted_provider_terms === true) config.hasAcceptedProviderTerms = true
   if (shouldApplyConnectionSlots && Number.isInteger(data.connection_slots)) {
     config.connectionSlots = clampSlots(data.connection_slots)
     ensureSlotStates()
@@ -2534,7 +2535,9 @@ ipcMain.handle('accept-provider-terms', async (_, { checkOnly } = {}) => {
       log.info('IPC', 'accept-provider-terms checkOnly result', { accepted: data?.has_accepted_provider_terms })
       return { success: true, accepted: data?.has_accepted_provider_terms === true }
     } catch {}
-    return { success: true, accepted: config.hasAcceptedProviderTerms ?? false }
+    // If refresh failed, fall back to local config — also treat currently sharing as accepted
+    const localAccepted = !!(config.hasAcceptedProviderTerms || config.shareEnabled || activeSlotCount() > 0)
+    return { success: true, accepted: localAccepted }
   }
   try {
     const res = await fetch(`${API_BASE}/api/user/sharing`, { method: 'POST', headers: withSharingAuthHeaders(), body: JSON.stringify({ acceptProviderTerms: true }) })
