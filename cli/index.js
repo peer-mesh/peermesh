@@ -30,7 +30,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.58'
+const VERSION     = '1.0.64'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -1650,7 +1650,34 @@ function printDocs() {
 }
 
 async function main() {
+  const installedVersion = config.installedVersion ?? null
+  const isNewInstall = !installedVersion
+  const isUpgrade = installedVersion && installedVersion !== VERSION
+  const showInstallMsg = (isNewInstall || isUpgrade) && !statusFlag && !docsFlag
+
+  if (showInstallMsg) {
+    config.installedVersion = VERSION
+    saveConfig(config)
+  }
+
   banner()
+
+  if (showInstallMsg) {
+    if (isUpgrade) {
+      console.log(`  ✓ PeerMesh Provider updated to v${VERSION}!`)
+    } else {
+      console.log('  ✓ PeerMesh Provider installed successfully!')
+    }
+    console.log('')
+    console.log('  Get started:')
+    console.log('    peermesh-provider              Start sharing')
+    console.log('    peermesh-provider --docs       View full documentation')
+    console.log('    peermesh-provider --status     Check current status')
+    console.log('')
+    console.log('  Share your connection. Stay free.')
+    console.log('')
+  }
+
   console.log(`  Logging to ${DEBUG_LOG}`)
 
   if (docsFlag) { printDocs(); process.exit(0) }

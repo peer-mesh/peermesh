@@ -955,9 +955,11 @@ function renderDashboard(app) {
 
   document.getElementById('privateCodeInput')?.addEventListener('input', (e) => {
     state.privateCodeInput = e.target.value.replace(/\D/g, '').slice(0, 9)
+    e.target.value = state.privateCodeInput
     state.error = null
     chrome.storage.local.set({ privateCodeInput: state.privateCodeInput })
-    render()
+    const btn = document.getElementById('connectPrivateBtn')
+    if (btn) btn.disabled = !state.privateCodeInput || !state.isOnline || state.connecting
   })
   document.getElementById('connectBtn')?.addEventListener('click', connectSession)
   document.getElementById('connectPrivateBtn')?.addEventListener('click', connectSession)
@@ -999,6 +1001,7 @@ function renderDashboard(app) {
   })
   document.getElementById('dailyLimitInput')?.addEventListener('input', (e) => {
     state.dailyLimitInput = e.target.value.replace(/\D/g, '')
+    e.target.value = state.dailyLimitInput
     state.error = null
   })
   document.getElementById('dailyLimitInput')?.addEventListener('keydown', (e) => {
@@ -1029,6 +1032,7 @@ function renderDashboard(app) {
   })
   document.getElementById('slotDailyLimitInput')?.addEventListener('input', (e) => {
     state.slotDailyLimitInput = e.target.value.replace(/\D/g, '')
+    e.target.value = state.slotDailyLimitInput
     state.error = null
   })
   document.getElementById('slotDailyLimitInput')?.addEventListener('keydown', (e) => {

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-const { existsSync } = require('fs')
-const { join } = require('path')
-const { homedir } = require('os')
+import { existsSync } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
 
 const configDir = join(homedir(), '.peermesh')
 const debugLog = join(homedir(), 'Desktop', 'peermesh-debug.log')

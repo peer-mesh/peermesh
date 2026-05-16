@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const { join } = require('path')
-const { homedir } = require('os')
+import { join } from 'path'
+import { homedir } from 'os'
 
 const debugLog = join(homedir(), 'Desktop', 'peermesh-debug.log')
 const configDir = join(homedir(), '.peermesh')

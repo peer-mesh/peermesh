@@ -1,10 +1,10 @@
 {
   "name": "@btcmaster1000/peermesh-provider",
-  "version": "1.0.58",
+  "version": "1.0.64",
   "description": "Share your connection with PeerMesh and earn free browsing credits",
   "type": "module",
   "bin": {
-    "peermesh-provider": "./index.js"
+    "peermesh-provider": "index.js"
   },
   "files": [
     "index.js",
