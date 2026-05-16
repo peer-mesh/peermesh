@@ -358,14 +358,13 @@ function showDisconnectOverlay(reason) {
   ].join(';')
   overlay.innerHTML = `
     <div style="font-size:10px;letter-spacing:1px;color:#ff8080;margin-bottom:8px">PEERMESH DISCONNECTED</div>
-    <div style="font-size:12px;line-height:1.6;color:#cfd3dc">${String(reason || 'Your routed connection dropped. Reconnect from the extension and reload this tab.')}</div>
+    <div style="font-size:12px;line-height:1.6;color:#cfd3dc">${String(reason || 'Your routed connection dropped.')}</div>
+    <div style="font-size:11px;line-height:1.5;color:#9090a8;margin-top:6px">Reconnect from the extension popup, then reload this tab.</div>
     <div style="display:flex;gap:8px;margin-top:12px">
-      <button id="peermesh-disconnect-reload" style="padding:8px 10px;border-radius:8px;border:none;background:#00ff88;color:#000;cursor:pointer;font:inherit;font-size:11px">RELOAD</button>
       <button id="peermesh-disconnect-close" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:transparent;color:#f5f5f8;cursor:pointer;font:inherit;font-size:11px">DISMISS</button>
     </div>
   `
   body.appendChild(overlay)
-  document.getElementById('peermesh-disconnect-reload')?.addEventListener('click', () => window.location.reload())
   document.getElementById('peermesh-disconnect-close')?.addEventListener('click', () => overlay.remove())
 }
 

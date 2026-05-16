@@ -17,7 +17,7 @@ const proxyClients = new Map()
 const peerAffinity = new Map()
 const providerShareStatusCache = new Map()
 
-const MAX_RECONNECT_ATTEMPTS = 3
+const MAX_RECONNECT_ATTEMPTS = 5
 
 function log(tag, msg, extra = '') {
   const ts = new Date().toISOString().slice(11, 23)
@@ -336,11 +336,12 @@ async function attemptReconnect(requesterWs, droppedSession) {
 
   if (!nextProvider) {
     log(requesterWs.peerId.slice(0,8), `RECONNECT no provider available in ${country} attempt=${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS}`)
-    // Retry after 2s
+    // Retry with backoff: 2s, 4s, 8s, 16s, 30s
+    const delay = Math.min(2000 * Math.pow(2, reconnectAttempts ?? 0), 30000)
     setTimeout(() => {
       if (requesterWs.readyState !== WebSocket.OPEN || requesterWs.sessionId) return
       attemptReconnect(requesterWs, { ...droppedSession, reconnectAttempts: (reconnectAttempts ?? 0) + 1 })
-    }, 2000)
+    }, delay)
     return
   }
 

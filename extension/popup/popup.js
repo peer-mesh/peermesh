@@ -1178,11 +1178,14 @@ async function connectSession() {
   render()
 
   try {
+    // Always prefer the long-lived desktop token for relay auth.
+    // supabaseToken is a short-lived Supabase JWT (1h) that may be stale in storage.
+    const authToken = state.user.token || state.supabaseToken
     const res = await fetch(`${API}/api/session/create`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.supabaseToken || state.user.token}`,
+        'Authorization': `Bearer ${authToken}`,
       },
       body: JSON.stringify(isPrivateConnect ? { privateCode } : { country: state.selectedCountry }),
     })
@@ -1203,7 +1206,7 @@ async function connectSession() {
       preferredProviderUserId: data.preferredProviderUserId ?? null,
       privateProviderUserId: data.privateProviderUserId ?? null,
       privateBaseDeviceId: data.privateBaseDeviceId ?? null,
-      token: state.supabaseToken || state.user.token,
+      token: authToken,
     })
 
     if (!response?.success) throw new Error(response?.error || 'Connection failed')

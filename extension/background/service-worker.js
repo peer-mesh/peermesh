@@ -1224,32 +1224,29 @@ async function getSharingStatus() {
   return { ...standaloneStatus, ownerMismatch: false }
 }
 
-async function connectToRelay(opts, attempt = 0, retries = 0) {
-  const serverFallbackList = opts.relayFallbackList ?? []
+async function connectToRelay(opts, attempt, retries) {
+  if (attempt === undefined) attempt = 0
+  if (retries === undefined) retries = 0
+  const serverFallbackList = opts.relayFallbackList || []
   const liveFallbackList = await getLiveRelays()
-  // Merge: server-ordered list first (health-aware), then any live relays not already included
-  const fallbackList = [...new Set([...serverFallbackList, ...liveFallbackList])]
+  const fallbackList = Array.from(new Set([...serverFallbackList, ...liveFallbackList]))
   if (attempt >= fallbackList.length) {
-    // Exhausted all relays Ã¢â‚¬â€ if providers exist but were all busy, retry up to 3 times
-    // with a short backoff. This handles the race where both users connect simultaneously
-    // and each provider slot is briefly occupied by the other user's session.
     if (retries < 3) {
-      log('warn', `[CONNECT] all relays exhausted, retry ${retries + 1}/3 in 3s`)
-      await new Promise(resolve => setTimeout(resolve, 3000))
+      log("warn", "[CONNECT] all relays exhausted, retry " + (retries + 1) + "/3 in 3s")
+      await new Promise(function(resolve) { setTimeout(resolve, 3000) })
       return connectToRelay(opts, 0, retries + 1)
     }
-    throw new Error('No peer available in ' + opts.country + ' Ã¢â‚¬â€ try again shortly')
+    throw new Error("No peer available in " + opts.country + " - try again shortly")
   }
   const relay = fallbackList[attempt]
   try {
-    return await connectOnce({ ...opts, relayEndpoint: relay })
+    return await connectOnce(Object.assign({}, opts, { relayEndpoint: relay }))
   } catch (error) {
     if (attempt < fallbackList.length - 1) {
-      log('warn', `[CONNECT] relay ${relay} failed (${error.message}), trying next fallback`)
-      await new Promise(resolve => setTimeout(resolve, 500))
+      log("warn", "[CONNECT] relay " + relay + " failed (" + error.message + "), trying next fallback")
+      await new Promise(function(resolve) { setTimeout(resolve, 500) })
       return connectToRelay(opts, attempt + 1, retries)
     }
-    // Last relay also failed Ã¢â‚¬â€ fall through to retry logic above
     return connectToRelay(opts, fallbackList.length, retries)
   }
 }
@@ -1362,12 +1359,14 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       }
 
       if (msg.type === 'session_ended') {
-        log('info', '[CONNECT] session_ended Ã¢â€ â€™ clearing proxy')
+        log('info', '[CONNECT] session_ended clearing proxy')
         clearProxy()
         currentSession = null
         relayWs = null
         agentSessionId = null
-        broadcastSessionEnded(msg.reason || 'Peer connection dropped').catch(() => {})
+        if (!_userInitiatedDisconnect) {
+          broadcastSessionEnded(msg.reason || 'Peer connection dropped').catch(() => {})
+        }
       }
     }
 
@@ -1384,7 +1383,9 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         currentSession = null
         relayWs = null
         agentSessionId = null
-        broadcastSessionEnded(e.reason || 'Peer connection dropped').catch(() => {})
+        if (!_userInitiatedDisconnect) {
+          broadcastSessionEnded(e.reason || 'Peer connection dropped').catch(() => {})
+        }
       }
       settle(reject, new Error('Connection closed before session was ready'))
     }
@@ -1603,7 +1604,10 @@ chrome.webRequest.onAuthRequired.addListener(
   ['asyncBlocking']
 )
 
+let _userInitiatedDisconnect = false
+
 async function disconnect() {
+  _userInitiatedDisconnect = true
   if (relayWs?.readyState === WebSocket.OPEN) {
     relayWs.send(JSON.stringify({ type: 'end_session' }))
     relayWs.close(1000)
@@ -1613,6 +1617,7 @@ async function disconnect() {
   agentSessionId = null
   clearProxy()
   fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, { method: 'DELETE' }).catch(() => {})
+  _userInitiatedDisconnect = false
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Lifecycle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
