@@ -553,19 +553,24 @@ function stopExtensionHeartbeat(removeDevice = true) {
 async function tryRefreshExtensionToken() {
   const stored = await chrome.storage.local.get(['user'])
   const userId = stored.user?.id ?? sharingUserId ?? null
-  const currentToken = stored.user?.token ?? desktopToken ?? supabaseToken ?? null
-  if (!userId || !currentToken) return false
+  const refreshToken = stored.user?.refreshToken ?? null
+  const deviceSessionId = stored.user?.deviceSessionId ?? null
+  if (!userId || !refreshToken || !deviceSessionId) return false
   try {
-    const res = await fetch(`${APP_URL}/api/extension-auth?refresh=1&userId=${encodeURIComponent(userId)}`, {
-      headers: { Authorization: `Bearer ${currentToken}` },
+    const res = await fetch(`${APP_URL}/api/extension-auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceSessionId, refreshToken }),
       signal: AbortSignal.timeout(5000),
     })
     if (!res.ok) return false
     const data = await res.json()
-    if (data.token) {
+    if (data.token && data.refreshToken && data.deviceSessionId) {
       supabaseToken = data.token
       desktopToken = data.token
-      await chrome.storage.local.set({ supabaseToken: data.token, desktopToken: data.token })
+      // Update stored user with new tokens
+      const updatedUser = { ...stored.user, token: data.token, refreshToken: data.refreshToken, deviceSessionId: data.deviceSessionId }
+      await chrome.storage.local.set({ supabaseToken: data.token, desktopToken: data.token, user: updatedUser })
       log('info', `[AUTH] extension token refreshed userId=${userId.slice(0,8)}`)
       return true
     }
@@ -1678,6 +1683,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'syncSharingState') return
 
   await loadSharingContext()
+
+  // Proactively refresh the token every ~10 minutes so it never expires mid-session.
+  // The access token TTL is 15 minutes — refresh at ~10 min to stay ahead of expiry.
+  const stored = await chrome.storage.local.get(['user', '_lastTokenRefresh'])
+  const lastRefresh = stored._lastTokenRefresh ?? 0
+  const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 1000
+  if (stored.user?.refreshToken && stored.user?.deviceSessionId && Date.now() - lastRefresh > TOKEN_REFRESH_INTERVAL_MS) {
+    const refreshed = await tryRefreshExtensionToken()
+    if (refreshed) await chrome.storage.local.set({ _lastTokenRefresh: Date.now() })
+  }
+
   if (sharingMode === 'extension' || providerShareEnabled) {
     await syncProviderPrivateShareState({ source: 'alarm' })
   }

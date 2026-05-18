@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 
 import { WebSocket } from 'ws'
 import { connect } from 'net'
@@ -30,11 +30,12 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.66'
+const VERSION     = '1.0.67'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
 const PEER_PORT = 7656
+const LOCAL_PROXY_PORT = 7655
 const SLOT_CAP = 32
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
@@ -1278,6 +1279,153 @@ function stopRelay() {
   if (config.token) persistSharingState(false)
 }
 
+let _proxySession = null
+
+function openTunnelWs(hostname, port, onOpen) {
+  if (!_proxySession?.sessionId) return null
+  const relayRaw = _proxySession.relayEndpoint
+  const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
+  const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
+  const tunnelWs = new WebSocket(proxyUrl)
+  tunnelWs.on('open', () => {
+    tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
+    if (onOpen) onOpen()
+  })
+  return tunnelWs
+}
+
+const localProxyServer = http.createServer((req, res) => {
+  if (!_proxySession?.sessionId) {
+    res.writeHead(503); res.end('No PeerMesh session'); return
+  }
+  const parsed = new URL(req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`)
+  const hostname = parsed.hostname
+  const port = parseInt(parsed.port) || 80
+
+  const chunks = []
+  req.on('data', c => chunks.push(c))
+  req.on('end', () => {
+    const body = Buffer.concat(chunks)
+    const relayRaw = _proxySession.relayEndpoint
+    const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
+    const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
+    const tunnelWs = new WebSocket(proxyUrl)
+    let ready = false
+    let responseData = Buffer.alloc(0)
+
+    tunnelWs.on('open', () => {
+      tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
+    })
+    tunnelWs.on('message', (data) => {
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      if (!ready) {
+        responseData = Buffer.concat([responseData, chunk])
+        const headerEnd = responseData.indexOf('\r\n\r\n')
+        if (headerEnd === -1) return
+        const firstLine = responseData.slice(0, responseData.indexOf('\r\n')).toString()
+        if (!firstLine.includes('200')) { res.writeHead(502); res.end('Bad Gateway'); tunnelWs.close(); return }
+        ready = true
+        const reqLine = `${req.method} ${parsed.pathname}${parsed.search} HTTP/1.1\r\n`
+        const hdrs = Object.entries(req.headers).map(([k, v]) => `${k}: ${v}`).join('\r\n')
+        tunnelWs.send(Buffer.from(`${reqLine}${hdrs}\r\n\r\n`))
+        if (body.length) tunnelWs.send(body)
+        responseData = responseData.slice(headerEnd + 4)
+        return
+      }
+      responseData = Buffer.concat([responseData, chunk])
+      if (!res.headersSent) {
+        const hEnd = responseData.indexOf('\r\n\r\n')
+        if (hEnd !== -1) {
+          const hStr = responseData.slice(0, hEnd).toString()
+          const hLines = hStr.split('\r\n')
+          const hMatch = hLines[0].match(/HTTP\/\S+ (\d+)/)
+          const hStatus = hMatch ? parseInt(hMatch[1]) : 200
+          const hHdrs = {}
+          for (const line of hLines.slice(1)) { const idx = line.indexOf(':'); if (idx > 0) hHdrs[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim() }
+          delete hHdrs['transfer-encoding']; delete hHdrs['content-encoding']
+          const contentLength = parseInt(hHdrs['content-length'] || '0')
+          const bodyData = responseData.slice(hEnd + 4)
+          if (hStatus >= 300 && hStatus < 400) { res.writeHead(hStatus, hHdrs); res.end(bodyData); tunnelWs.close() }
+          else if (contentLength > 0 && bodyData.length >= contentLength) { res.writeHead(hStatus, hHdrs); res.end(bodyData.slice(0, contentLength)); tunnelWs.close() }
+        }
+      }
+    })
+    tunnelWs.on('close', () => {
+      if (!res.headersSent && responseData.length) {
+        const headerEnd = responseData.indexOf('\r\n\r\n')
+        if (headerEnd !== -1) {
+          const headerStr = responseData.slice(0, headerEnd).toString()
+          const lines = headerStr.split('\r\n')
+          const statusMatch = lines[0].match(/HTTP\/\S+ (\d+)/)
+          const status = statusMatch ? parseInt(statusMatch[1]) : 200
+          const hdrs = {}
+          for (const line of lines.slice(1)) { const idx = line.indexOf(':'); if (idx > 0) hdrs[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim() }
+          delete hdrs['transfer-encoding']; delete hdrs['content-encoding']
+          res.writeHead(status, hdrs); res.end(responseData.slice(headerEnd + 4))
+        } else { res.writeHead(502); res.end('Bad Gateway') }
+      } else if (!res.headersSent) { res.writeHead(502); res.end('Bad Gateway') }
+    })
+    tunnelWs.on('error', () => { if (!res.headersSent) { res.writeHead(502); res.end('Bad Gateway') } })
+    setTimeout(() => { if (!res.headersSent) { tunnelWs.terminate(); res.writeHead(504); res.end('Timeout') } }, 30000)
+  })
+})
+
+localProxyServer.on('connect', (req, clientSocket, head) => {
+  const [hostname, portStr] = (req.url || '').split(':')
+  const port = parseInt(portStr) || 443
+  if (!_proxySession?.sessionId) {
+    clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    clientSocket.destroy(); return
+  }
+  const relayRaw = _proxySession.relayEndpoint
+  const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
+  const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
+  let opened = false
+  const tunnelWs = new WebSocket(proxyUrl)
+  tunnelWs.on('open', () => {
+    tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
+  })
+  tunnelWs.on('message', (data) => {
+    const text = Buffer.isBuffer(data) ? data.toString() : data
+    if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {
+      clientSocket._connectSent = true
+      opened = true
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      if (head?.length) tunnelWs.send(head)
+      clientSocket.on('data', (chunk) => { if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk) })
+      clientSocket.on('end', () => tunnelWs.close())
+      clientSocket.on('error', () => tunnelWs.close())
+      return
+    }
+    if (!clientSocket.destroyed) clientSocket.write(Buffer.isBuffer(data) ? data : Buffer.from(data))
+  })
+  tunnelWs.on('close', () => { if (!clientSocket.destroyed) clientSocket.destroy() })
+  tunnelWs.on('error', () => { if (!opened) clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n'); if (!clientSocket.destroyed) clientSocket.destroy() })
+  setTimeout(() => { if (!opened) { tunnelWs.terminate(); clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n'); clientSocket.destroy() } }, 30000)
+})
+
+let localProxyListenStarted = false
+
+function startLocalProxyServer() {
+  if (localProxyListenStarted || localProxyServer.listening) return
+  localProxyListenStarted = true
+  localProxyServer.listen(LOCAL_PROXY_PORT, '127.0.0.1', () => {
+    clog.info('CONTROL', `local proxy server on ${LOCAL_PROXY_PORT}`)
+  })
+}
+
+localProxyServer.on('error', (err) => {
+  localProxyListenStarted = false
+  if (err.code === 'EADDRINUSE') {
+    clog.warn('CONTROL', `local proxy port ${LOCAL_PROXY_PORT} already in use`)
+    return
+  }
+  clog.error('CONTROL', 'local proxy server error', { err: err.message })
+})
+
 function applyConnectionSlots(nextSlots, { syncPeer = true, actor = SHARING_ACTOR } = {}) {
   const normalizedSlots = clampSlots(nextSlots)
   const shouldResume = !!config.shareEnabled
@@ -1468,6 +1616,27 @@ function buildHandler(port) {
       return
     }
 
+    if (req.method === 'POST' && url.pathname === '/proxy-session') {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body)
+          _proxySession = data
+          clog.info('CONTROL', 'proxy-session SET', { sessionId: data.sessionId?.slice(0,8), relay: data.relayEndpoint })
+          res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }))
+        } catch (e) { res.writeHead(400); res.end() }
+      })
+      return
+    }
+
+    if (req.method === 'DELETE' && url.pathname === '/proxy-session') {
+      _proxySession = null
+      clog.info('CONTROL', 'proxy-session CLEARED')
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }))
+      return
+    }
+
     res.writeHead(404)
     res.end()
   })
@@ -1521,6 +1690,7 @@ function startControlServer() {
   primary.listen(CONTROL_PORT, '127.0.0.1', () => {
     myPort = CONTROL_PORT
     registerWithPeer(PEER_PORT)
+    startLocalProxyServer()
   })
   primary.on('error', err => {
     if (err.code !== 'EADDRINUSE') {
@@ -1532,6 +1702,7 @@ function startControlServer() {
     secondary.listen(PEER_PORT, '127.0.0.1', async () => {
       myPort = PEER_PORT
       registerWithPeer(CONTROL_PORT)
+      startLocalProxyServer()
       try {
         const res = await fetch(`http://127.0.0.1:${CONTROL_PORT}/native/state`, { signal: AbortSignal.timeout(1500) })
         if (res.ok) {
