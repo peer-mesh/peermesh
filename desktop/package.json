@@ -48,6 +48,7 @@
     },
     "files": [
       "main.js",
+      "hardware-clock.js",
       "preload.js",
       "renderer/**/*",
       "assets/**/*",

@@ -649,9 +649,11 @@ function renderStartupPreferences(state) {
     if (!signedIn) {
       scheduleDesc.textContent = 'Sign in before enabling scheduled sharing.'
     } else if (!schedule.enabled) {
-      scheduleDesc.textContent = 'Disabled. Manual sharing and auto-start settings still work.'
+      scheduleDesc.textContent = schedule.alwaysOn
+        ? 'Disabled. Enable this to use the default always-on 00:00-00:00 window.'
+        : 'Disabled. Manual sharing and auto-start settings still work.'
     } else if (schedule.alwaysOn) {
-      scheduleDesc.textContent = 'Always-on mode: PeerMesh shares whenever this PC is on.'
+      scheduleDesc.textContent = 'Always-on mode: PeerMesh shares whenever this device is on and signed in.'
     } else if (schedule.active) {
       scheduleDesc.textContent = `Active now. Sharing window ${schedule.startTime}-${schedule.endTime} (${schedule.timezone}).`
     } else {
@@ -665,13 +667,14 @@ function renderStartupPreferences(state) {
     } else if (!schedule.enabled) {
       scheduleWakeDesc.textContent = 'Enable scheduled sharing first.'
     } else if (!osWake.supported) {
-      scheduleWakeDesc.textContent = 'Automatic wake setup is currently available on Windows.'
+      scheduleWakeDesc.textContent = 'Automatic wake setup is not supported on this OS.'
     } else if (osWake.enabled && osWake.status?.error) {
       scheduleWakeDesc.textContent = osWake.status.error
     } else if (osWake.enabled) {
-      scheduleWakeDesc.textContent = 'Windows Task Scheduler will wake from sleep/hibernate and launch PeerMesh.'
+      const nextWake = osWake.status?.nextWakeAt ? ` Next wake: ${new Date(osWake.status.nextWakeAt).toLocaleString()}.` : ''
+      scheduleWakeDesc.textContent = `PeerMesh registered an OS wake event for this schedule.${nextWake}`
     } else {
-      scheduleWakeDesc.textContent = 'Optional: create a Windows wake task for the schedule start time.'
+      scheduleWakeDesc.textContent = 'Optional: create an OS wake event for the schedule start time.'
     }
   }
 

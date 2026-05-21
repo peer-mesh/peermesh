@@ -1,5 +1,10 @@
 const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification, powerSaveBlocker } = require('electron')
 const { WebSocket } = require('ws')
+const {
+  readBatteryStatus,
+  scheduleHardwareWake,
+  unregisterWindowsHardwareWakeTask,
+} = require('./hardware-clock')
 const path = require('path')
 const http = require('http')
 const net = require('net')
@@ -923,6 +928,17 @@ function isSharingScheduleAlwaysOn(schedule) {
   return schedule.enabled && schedule.startTime === schedule.endTime
 }
 
+function getNextScheduleStartDate(schedule, now = new Date()) {
+  const normalized = normalizeSharingSchedule(schedule)
+  const [hours, minutes] = normalized.startTime.split(':').map(part => Number.parseInt(part, 10))
+  const candidate = new Date(now)
+  candidate.setHours(hours, minutes, 0, 0)
+  if (candidate.getTime() <= now.getTime() + 120_000) {
+    candidate.setDate(candidate.getDate() + 1)
+  }
+  return candidate
+}
+
 function isInsideSharingSchedule(schedule, now = new Date()) {
   if (!schedule.enabled) return false
   if (isSharingScheduleAlwaysOn(schedule)) return true
@@ -954,7 +970,7 @@ function getWakeLaunchTarget() {
 function getScheduleWakePublicState() {
   return {
     enabled: !!config.scheduleWakeEnabled,
-    supported: process.platform === 'win32',
+    supported: ['win32', 'darwin', 'linux'].includes(process.platform),
     platform: process.platform,
     status: config.scheduleWakeStatus ?? null,
   }
@@ -1004,10 +1020,11 @@ async function applyScheduleWakeIntegration(reason = 'sync') {
 
   try {
     if (!config.scheduleWakeEnabled || !schedule.enabled) {
-      let disabledResult = { supported: process.platform === 'win32', message: 'OS wake disabled' }
+      let disabledResult = { supported: ['win32', 'darwin', 'linux'].includes(process.platform), message: 'OS wake disabled' }
       if (!schedule.enabled) config.scheduleWakeEnabled = false
       if (process.platform === 'win32') {
         try {
+          await unregisterWindowsHardwareWakeTask({ runProcess })
           disabledResult = await unregisterWindowsScheduleWakeTask()
         } catch (e) {
           disabledResult = { supported: true, error: e.message, message: 'Could not remove Windows wake task' }
@@ -1024,14 +1041,14 @@ async function applyScheduleWakeIntegration(reason = 'sync') {
       return config.scheduleWakeStatus
     }
 
-    if (process.platform !== 'win32') {
+    if (!['win32', 'darwin', 'linux'].includes(process.platform)) {
       config.scheduleWakeStatus = {
         enabled: false,
         supported: false,
         platform: process.platform,
         reason,
         updatedAt: now,
-        error: 'Automatic OS wake registration is currently implemented for Windows only.',
+        error: 'Automatic OS wake registration is not supported on this platform.',
       }
       config.scheduleWakeEnabled = false
       saveConfig()
@@ -1046,22 +1063,37 @@ async function applyScheduleWakeIntegration(reason = 'sync') {
         platform: process.platform,
         reason,
         updatedAt: now,
-        error: `Windows wake tasks use the OS timezone. Set the schedule timezone to ${systemTimezone} to enable OS wake.`,
+        error: `OS wake uses the system timezone. Set the schedule timezone to ${systemTimezone} to enable hardware wake.`,
       }
       config.scheduleWakeEnabled = false
       saveConfig()
       return config.scheduleWakeStatus
     }
 
-    const result = await registerWindowsScheduleWakeTask(schedule)
+    const wakeAt = getNextScheduleStartDate(schedule)
+    const battery = await readBatteryStatus({ platform: process.platform, runProcess })
+    const result = await scheduleHardwareWake({
+      wakeAt,
+      battery,
+      platform: process.platform,
+      launchTarget: getWakeLaunchTarget(),
+      runProcess,
+    })
+    if (!result.success) throw new Error(result.error || 'Could not register OS wake')
+    let recurringTaskResult = null
+    if (process.platform === 'win32') {
+      recurringTaskResult = await registerWindowsScheduleWakeTask(schedule)
+    }
     config.scheduleWakeStatus = {
       ...result,
+      recurringTask: recurringTaskResult,
       enabled: true,
       platform: process.platform,
       reason,
       startTime: schedule.startTime,
       endTime: schedule.endTime,
       timezone: schedule.timezone,
+      nextWakeAt: wakeAt.toISOString(),
       updatedAt: now,
     }
     saveConfig()
@@ -1069,7 +1101,7 @@ async function applyScheduleWakeIntegration(reason = 'sync') {
   } catch (e) {
     config.scheduleWakeStatus = {
       enabled: false,
-      supported: process.platform === 'win32',
+      supported: ['win32', 'darwin', 'linux'].includes(process.platform),
       platform: process.platform,
       reason,
       updatedAt: now,
