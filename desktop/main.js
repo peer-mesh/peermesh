@@ -120,7 +120,12 @@ let _sharingScheduleTimer = null
 let _sharingScheduleActionBusy = false
 let _lastScheduleInWindow = null
 let _scheduleWakeSyncBusy = false
+let _sharingScheduleCloudSyncBusy = false
+let _uptimeJobsTimer = null
+let _uptimeJobsBusy = false
+let _uptimeJobsInterval = 30_000
 const SHARING_CONFIG_SYNC_MAX = 30000
+const UPTIME_JOBS_SYNC_MAX = 120_000
 const AUTH_CLEAR_FAILURE_THRESHOLD = 3
 const WINDOWS_WAKE_TASK_NAME = 'PeerMesh Scheduled Wake'
 const _pendingBytesByDevice = new Map()
@@ -167,6 +172,7 @@ let config = {
   slotLimits: [],
   profileSync: null,
   connectionSlotsSync: null,
+  uptimeScheduleSync: null,
 }
 let stats = { bytesServed: 0, requestsHandled: 0, connectedAt: null }
 const activeTunnels = new Map()
@@ -247,6 +253,7 @@ async function clearDesktopAuth(reason, { rotateIdentity = false, revoke = true 
   const oldBaseDeviceId = config.baseDeviceId
   stopRelay()
   stopSharingConfigSync()
+  stopUptimeJobLoop()
   if (revoke && oldExtId) await revokeExtensionAuthToken(oldExtId)
   config = {
     ...config,
@@ -503,6 +510,7 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   const previousConnectionSlots = clampSlots(config.connectionSlots ?? 1)
   const previousProfileSync = config.profileSync ?? null
   const previousConnectionSlotsSync = config.connectionSlotsSync ?? null
+  const uptimeScheduleChanged = applyUptimeScheduleData(data.uptime_schedule, { source })
 
   const nextPrivateShare = data.private_share ?? null
   const nextPrivateShares = hydratePrivateShareRows([
@@ -541,6 +549,11 @@ function applySharingProfileData(data, { source = 'remote' } = {}) {
   saveConfig()
 
   if (limitHit && config.shareEnabled) enforceLocalLimit()
+  if (uptimeScheduleChanged) {
+    _lastScheduleInWindow = null
+    void runSharingScheduleTick('schedule_sync')
+    void applyScheduleWakeIntegration('schedule_sync')
+  }
 
   // Enforce per-slot daily limits and private share expiry
   if (config.shareEnabled || activeSlotCount() > 0) {
@@ -802,6 +815,49 @@ function normalizeSharingSchedule(raw = {}) {
   }
 }
 
+function normalizeRemoteSharingSchedule(raw = {}) {
+  return normalizeSharingSchedule({
+    enabled: raw?.enabled,
+    startTime: raw?.startTime ?? raw?.start_time,
+    endTime: raw?.endTime ?? raw?.end_time,
+    timezone: raw?.timezone,
+  })
+}
+
+function applyUptimeScheduleData(raw, { source = 'remote' } = {}) {
+  if (!raw || typeof raw !== 'object') return false
+  const incomingSync = {
+    state_actor: raw.state_actor ?? null,
+    state_changed_at: raw.state_changed_at ?? null,
+  }
+  const currentSync = config.uptimeScheduleSync ?? null
+  if (getSyncTimestamp(incomingSync.state_changed_at) < getSyncTimestamp(currentSync?.state_changed_at)) {
+    return false
+  }
+
+  const previousSchedule = normalizeSharingSchedule(config.sharingSchedule)
+  const nextSchedule = normalizeRemoteSharingSchedule(raw)
+  const wakeEnabled = raw.wakeEnabled ?? raw.wake_enabled
+  const nextWakeEnabled = typeof wakeEnabled === 'boolean' ? wakeEnabled : !!config.scheduleWakeEnabled
+  const scheduleChanged = JSON.stringify(previousSchedule) !== JSON.stringify(nextSchedule)
+  const wakeChanged = !!config.scheduleWakeEnabled !== !!nextWakeEnabled
+
+  config.sharingSchedule = nextSchedule
+  config.scheduleWakeEnabled = !!nextWakeEnabled
+  config.uptimeScheduleSync = preferLatestSyncRow(currentSync, incomingSync)
+  if (scheduleChanged || wakeChanged) {
+    log.info('SCHEDULE', 'uptime schedule synced', {
+      source,
+      enabled: nextSchedule.enabled,
+      startTime: nextSchedule.startTime,
+      endTime: nextSchedule.endTime,
+      timezone: nextSchedule.timezone,
+      wakeEnabled: !!config.scheduleWakeEnabled,
+    })
+  }
+  return scheduleChanged || wakeChanged
+}
+
 function quotePowerShellString(value) {
   return `'${String(value ?? '').replace(/'/g, "''")}'`
 }
@@ -1027,12 +1083,56 @@ async function applyScheduleWakeIntegration(reason = 'sync') {
   }
 }
 
+async function syncSharingScheduleToServer(reason = 'sync') {
+  if (_sharingScheduleCloudSyncBusy) return null
+  if (!config.token || !config.userId || !config.baseDeviceId) return null
+  _sharingScheduleCloudSyncBusy = true
+  const schedule = normalizeSharingSchedule(config.sharingSchedule)
+  config.sharingSchedule = schedule
+  const payload = {
+    baseDeviceId: config.baseDeviceId,
+    sharingSchedule: {
+      ...schedule,
+      wakeEnabled: !!config.scheduleWakeEnabled,
+      shutdownAfterWindow: false,
+    },
+  }
+
+  try {
+    logRequest('POST', `${API_BASE}/api/user/sharing`, { sharingSchedule: { ...payload.sharingSchedule, reason } })
+    const res = await fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'POST',
+      headers: withSharingAuthHeaders(),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(6000),
+    })
+    logResponse('POST', `${API_BASE}/api/user/sharing`, res.status)
+    const data = await res.json().catch(() => ({}))
+    if (res.status === 401 || res.status === 403) {
+      await confirmDesktopAuthStillValid('sync_sharing_schedule', res.status, { preserveWhileSharing: true })
+      return null
+    }
+    if (!res.ok || data.error) throw new Error(data.error || `status=${res.status}`)
+    if (data.uptime_schedule) {
+      applyUptimeScheduleData(data.uptime_schedule, { source: 'syncSharingScheduleToServer' })
+      saveConfig()
+    }
+    return data
+  } catch (e) {
+    log.warn('SCHEDULE', 'cloud schedule sync failed', { reason, err: e.message })
+    return null
+  } finally {
+    _sharingScheduleCloudSyncBusy = false
+  }
+}
+
 function setSharingSchedulePreference(nextSchedule = {}) {
   config.sharingSchedule = normalizeSharingSchedule({ ...config.sharingSchedule, ...nextSchedule })
   saveConfig()
   _lastScheduleInWindow = null
   void runSharingScheduleTick('schedule_changed')
   void applyScheduleWakeIntegration('schedule_changed')
+  void syncSharingScheduleToServer('schedule_changed')
   updateTray()
   return { success: true, sharingSchedule: getSharingSchedulePublicState(), state: getPublicState() }
 }
@@ -1050,6 +1150,7 @@ async function setScheduleWakeEnabledPreference(enabled) {
   config.scheduleWakeEnabled = !!enabled
   saveConfig()
   const status = await applyScheduleWakeIntegration('preference')
+  void syncSharingScheduleToServer('wake_preference')
   updateTray()
   if (enabled && status.error) {
     return { success: false, error: status.error, osWake: getScheduleWakePublicState(), state: getPublicState() }
@@ -1235,6 +1336,118 @@ function startSharingConfigSync() {
   scheduleTick()
 }
 
+async function completeUptimeJob(job, status, error = null) {
+  if (!config.token || !job?.id) return
+  try {
+    await fetch(`${API_BASE}/api/provider/uptime/jobs`, {
+      method: 'POST',
+      headers: withSharingAuthHeaders(),
+      body: JSON.stringify({
+        jobId: job.id,
+        baseDeviceId: config.baseDeviceId,
+        status,
+        error,
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch (e) {
+    log.warn('SCHEDULE', 'uptime job completion failed', { jobId: job.id, status, err: e.message })
+  }
+}
+
+async function processUptimeJob(job) {
+  const action = job?.action
+  if (!['wake', 'start', 'stop'].includes(action)) {
+    await completeUptimeJob(job, 'failed', `Unknown action: ${action}`)
+    return
+  }
+
+  if (action === 'wake') {
+    log.info('SCHEDULE', 'wake job observed while app is already running', { jobId: job.id, windowKey: job.windowKey })
+    await completeUptimeJob(job, 'completed')
+    return
+  }
+
+  if (action === 'start') {
+    if (config.shareEnabled || running || peerSharing) {
+      await completeUptimeJob(job, 'completed')
+      return
+    }
+    if (!shouldScheduleStartSharing()) {
+      const err = 'Provider is not ready to start scheduled sharing'
+      log.warn('SCHEDULE', err, {
+        jobId: job.id,
+        hasToken: !!config.token,
+        hasUserId: !!config.userId,
+        hasAcceptedProviderTerms: !!config.hasAcceptedProviderTerms,
+        limitHit,
+      })
+      await completeUptimeJob(job, 'failed', err)
+      return
+    }
+    log.info('SCHEDULE', 'starting sharing from uptime job', { jobId: job.id, windowKey: job.windowKey })
+    config.shareEnabled = true
+    saveConfig()
+    updateTray()
+    connectRelay()
+    await completeUptimeJob(job, 'completed')
+    return
+  }
+
+  log.info('SCHEDULE', 'stopping sharing from uptime job', { jobId: job.id, windowKey: job.windowKey })
+  if (config.shareEnabled || running || peerSharing) stopRelay()
+  await completeUptimeJob(job, 'completed')
+}
+
+async function pollUptimeJobs(reason = 'timer') {
+  if (_uptimeJobsBusy || !config.token || !config.userId || !config.baseDeviceId) return 0
+  _uptimeJobsBusy = true
+  try {
+    const res = await fetch(`${API_BASE}/api/provider/uptime/jobs?baseDeviceId=${encodeURIComponent(config.baseDeviceId)}`, {
+      headers: {
+        ...withSharingAuthHeaders(false),
+        'x-peermesh-device': config.baseDeviceId,
+      },
+      signal: AbortSignal.timeout(6000),
+    })
+    if (res.status === 401 || res.status === 403) {
+      await confirmDesktopAuthStillValid('poll_uptime_jobs', res.status, { preserveWhileSharing: true })
+      return 0
+    }
+    if (!res.ok) throw new Error(`status=${res.status}`)
+    const data = await res.json().catch(() => ({}))
+    const jobs = Array.isArray(data.jobs) ? data.jobs : []
+    if (jobs.length > 0) log.info('SCHEDULE', 'uptime jobs claimed', { reason, count: jobs.length })
+    for (const job of jobs) await processUptimeJob(job)
+    return jobs.length
+  } catch (e) {
+    log.warn('SCHEDULE', 'uptime job poll failed', { reason, err: e.message })
+    return 0
+  } finally {
+    _uptimeJobsBusy = false
+  }
+}
+
+function startUptimeJobLoop() {
+  stopUptimeJobLoop()
+  _uptimeJobsInterval = 30_000
+  if (!config.token || !config.userId) return
+
+  async function tick(reason = 'timer') {
+    const claimed = await pollUptimeJobs(reason)
+    _uptimeJobsInterval = claimed > 0 ? 30_000 : Math.min(_uptimeJobsInterval * 2, UPTIME_JOBS_SYNC_MAX)
+    _uptimeJobsTimer = setTimeout(() => tick('timer'), _uptimeJobsInterval)
+  }
+
+  void tick('startup')
+}
+
+function stopUptimeJobLoop() {
+  if (!_uptimeJobsTimer) return
+  clearTimeout(_uptimeJobsTimer)
+  _uptimeJobsTimer = null
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ Config Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function loadConfig() {
@@ -1284,6 +1497,7 @@ function loadConfig() {
   config.slotLimits = normalizeSlotLimitRows(config.slotLimits)
   config.profileSync = config.profileSync ?? null
   config.connectionSlotsSync = config.connectionSlotsSync ?? null
+  config.uptimeScheduleSync = config.uptimeScheduleSync ?? null
   config.privateShare = selectPrivateShareRow(config.privateShares, config.privateShareDeviceId) ?? config.privateShare ?? null
   config.privateShareDeviceId = config.privateShare?.device_id ?? config.privateShareDeviceId ?? null
   config.privateShareActive = !!(config.privateShare?.enabled && config.privateShare?.active)
@@ -1398,6 +1612,8 @@ async function initializeDesktopRuntime(reason) {
   }
   void applyScheduleWakeIntegration('startup')
   startSharingConfigSync()
+  void syncSharingScheduleToServer('startup')
+  startUptimeJobLoop()
 }
 
 function shutdownDesktopRuntime(reason = 'quit') {
@@ -1407,6 +1623,7 @@ function shutdownDesktopRuntime(reason = 'quit') {
   logState(`shutdown:${reason}`)
   stopSharingScheduleLoop()
   stopSharingConfigSync()
+  stopUptimeJobLoop()
   void flushPendingBytes()
   if (_cliWatchTimer) {
     clearInterval(_cliWatchTimer)
@@ -2469,6 +2686,8 @@ const controlServer = http.createServer((req, res) => {
           trust: data.trust ?? config.trust,
         }
         await pollTodayBytes()
+        void syncSharingScheduleToServer('native_auth')
+        startUptimeJobLoop()
         saveConfig(); updateTray()
         log.info('CONTROL', '/native/auth Ã¢â‚¬â€ config updated', { userId: config.userId, country: config.country })
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -3017,6 +3236,8 @@ ipcMain.handle('sign-in', async (_, { token, refreshToken, deviceSessionId, user
     await refreshSharingConfig()
   } catch {}
   startSharingConfigSync()
+  void syncSharingScheduleToServer('sign_in')
+  startUptimeJobLoop()
   saveConfig(); updateTray(); showWindow()
   log.info('IPC', 'sign-in success', { userId, country })
   return { success: true }

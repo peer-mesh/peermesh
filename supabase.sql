@@ -31,6 +31,9 @@ drop table if exists extension_auth_tokens cascade;
 drop table if exists abuse_reports cascade;
 drop table if exists session_accountability cascade;
 drop table if exists sessions cascade;
+drop table if exists provider_uptime_events cascade;
+drop table if exists provider_wake_jobs cascade;
+drop table if exists provider_uptime_schedules cascade;
 drop table if exists provider_devices cascade;
 drop table if exists provider_slot_limits cascade;
 drop table if exists private_share_devices cascade;
@@ -222,6 +225,71 @@ create table private_share_devices (
 
 create index on private_share_devices (user_id);
 create index on private_share_devices (share_code);
+
+-- Durable provider uptime schedules and wake/start/stop jobs
+create table provider_uptime_schedules (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  base_device_id text not null,
+  enabled boolean not null default false,
+  start_time text not null default '00:00',
+  end_time text not null default '00:00',
+  timezone text not null default 'UTC',
+  wake_enabled boolean not null default false,
+  shutdown_after_window boolean not null default false,
+  last_start_window_key text,
+  last_stop_window_key text,
+  last_wake_window_key text,
+  last_tick_at timestamptz,
+  state_actor text,
+  state_changed_at timestamptz default now(),
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  unique (user_id, base_device_id),
+  check (start_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+  check (end_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$')
+);
+
+create index on provider_uptime_schedules (enabled, updated_at);
+create index on provider_uptime_schedules (user_id, base_device_id);
+
+create table provider_wake_jobs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  base_device_id text not null,
+  action text not null check (action in ('wake','start','stop')),
+  status text not null default 'pending' check (status in ('pending','claimed','sent','completed','failed','expired')),
+  scheduled_for timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '2 hours'),
+  idempotency_key text not null unique,
+  window_key text not null,
+  attempts integer not null default 0 check (attempts >= 0),
+  claimed_at timestamptz,
+  claimed_by text,
+  sent_at timestamptz,
+  completed_at timestamptz,
+  failed_at timestamptz,
+  error text,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index on provider_wake_jobs (status, scheduled_for);
+create index on provider_wake_jobs (user_id, base_device_id, status);
+
+create table provider_uptime_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete set null,
+  base_device_id text,
+  job_id uuid references provider_wake_jobs(id) on delete set null,
+  event_kind text not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create index on provider_uptime_events (created_at desc);
+create index on provider_uptime_events (user_id, base_device_id, created_at desc);
 
 -- Device authorization codes (OAuth 2.0 Device Flow)
 create table device_codes (
@@ -605,6 +673,15 @@ create policy "Service role only private share devices" on private_share_devices
 alter table provider_slot_limits enable row level security;
 create policy "Service role only provider slot limits" on provider_slot_limits for all using (false);
 
+alter table provider_uptime_schedules enable row level security;
+create policy "Service role only uptime schedules" on provider_uptime_schedules for all using (false);
+
+alter table provider_wake_jobs enable row level security;
+create policy "Service role only wake jobs" on provider_wake_jobs for all using (false);
+
+alter table provider_uptime_events enable row level security;
+create policy "Service role only uptime events" on provider_uptime_events for all using (false);
+
 alter table wallet_ledger enable row level security;
 create policy "Users can view own wallet ledger" on wallet_ledger for select using (auth.uid() = user_id);
 
@@ -800,6 +877,103 @@ begin
       and policyname = 'Service role only private share devices'
   ) then
     create policy "Service role only private share devices" on private_share_devices for all using (false);
+  end if;
+end $$;
+
+create table if not exists provider_uptime_schedules (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  base_device_id text not null,
+  enabled boolean not null default false,
+  start_time text not null default '00:00',
+  end_time text not null default '00:00',
+  timezone text not null default 'UTC',
+  wake_enabled boolean not null default false,
+  shutdown_after_window boolean not null default false,
+  last_start_window_key text,
+  last_stop_window_key text,
+  last_wake_window_key text,
+  last_tick_at timestamptz,
+  state_actor text,
+  state_changed_at timestamptz default now(),
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  unique (user_id, base_device_id),
+  check (start_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+  check (end_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$')
+);
+create index if not exists provider_uptime_schedules_enabled_idx on provider_uptime_schedules (enabled, updated_at);
+create index if not exists provider_uptime_schedules_user_base_idx on provider_uptime_schedules (user_id, base_device_id);
+alter table provider_uptime_schedules enable row level security;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'provider_uptime_schedules'
+      and policyname = 'Service role only uptime schedules'
+  ) then
+    create policy "Service role only uptime schedules" on provider_uptime_schedules for all using (false);
+  end if;
+end $$;
+
+create table if not exists provider_wake_jobs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete cascade not null,
+  base_device_id text not null,
+  action text not null check (action in ('wake','start','stop')),
+  status text not null default 'pending' check (status in ('pending','claimed','sent','completed','failed','expired')),
+  scheduled_for timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '2 hours'),
+  idempotency_key text not null unique,
+  window_key text not null,
+  attempts integer not null default 0 check (attempts >= 0),
+  claimed_at timestamptz,
+  claimed_by text,
+  sent_at timestamptz,
+  completed_at timestamptz,
+  failed_at timestamptz,
+  error text,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+create index if not exists provider_wake_jobs_status_scheduled_idx on provider_wake_jobs (status, scheduled_for);
+create index if not exists provider_wake_jobs_user_base_status_idx on provider_wake_jobs (user_id, base_device_id, status);
+alter table provider_wake_jobs enable row level security;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'provider_wake_jobs'
+      and policyname = 'Service role only wake jobs'
+  ) then
+    create policy "Service role only wake jobs" on provider_wake_jobs for all using (false);
+  end if;
+end $$;
+
+create table if not exists provider_uptime_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id) on delete set null,
+  base_device_id text,
+  job_id uuid references provider_wake_jobs(id) on delete set null,
+  event_kind text not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+create index if not exists provider_uptime_events_created_idx on provider_uptime_events (created_at desc);
+create index if not exists provider_uptime_events_user_base_created_idx on provider_uptime_events (user_id, base_device_id, created_at desc);
+alter table provider_uptime_events enable row level security;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'provider_uptime_events'
+      and policyname = 'Service role only uptime events'
+  ) then
+    create policy "Service role only uptime events" on provider_uptime_events for all using (false);
   end if;
 end $$;
 

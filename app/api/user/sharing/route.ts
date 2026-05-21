@@ -10,6 +10,7 @@ import {
 } from '@/lib/private-sharing'
 import { getEffectiveBandwidthLimitBytes } from '@/lib/billing'
 import { canRoleProvideNetwork, getProviderRoleError } from '@/lib/roles'
+import { normalizeScheduleTime, normalizeScheduleTimezone } from '@/lib/uptime-scheduler'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 const SURFACE_ACTORS = new Set(['dashboard', 'desktop', 'cli', 'extension'])
@@ -118,6 +119,23 @@ type ProviderDeviceStateRow = {
   state_changed_at: string | null
 }
 
+type ProviderUptimeScheduleRow = {
+  user_id: string
+  base_device_id: string
+  enabled: boolean
+  start_time: string
+  end_time: string
+  timezone: string
+  wake_enabled: boolean
+  shutdown_after_window: boolean
+  last_start_window_key: string | null
+  last_stop_window_key: string | null
+  last_wake_window_key: string | null
+  last_tick_at: string | null
+  state_actor: string | null
+  state_changed_at: string | null
+}
+
 type ProfileStateRow = {
   role: string | null
   is_verified?: boolean | null
@@ -217,6 +235,24 @@ function serializeSlotLimit(row: SlotLimitRow | null) {
   }
 }
 
+function serializeUptimeSchedule(row: ProviderUptimeScheduleRow | null) {
+  if (!row) return null
+  return {
+    base_device_id: row.base_device_id,
+    enabled: row.enabled === true,
+    startTime: normalizeScheduleTime(row.start_time),
+    endTime: normalizeScheduleTime(row.end_time),
+    timezone: normalizeScheduleTimezone(row.timezone),
+    wakeEnabled: row.wake_enabled === true,
+    shutdownAfterWindow: row.shutdown_after_window === true,
+    lastStartWindowKey: row.last_start_window_key,
+    lastStopWindowKey: row.last_stop_window_key,
+    lastWakeWindowKey: row.last_wake_window_key,
+    lastTickAt: row.last_tick_at,
+    ...serializeSyncState(row),
+  }
+}
+
 function selectPrivateShareRow(
   rows: PrivateShareRow[],
   deviceId?: string | null,
@@ -299,6 +335,18 @@ async function loadProviderDeviceStates(userId: string, baseDeviceId: string): P
     if (heartbeatDiff !== 0) return heartbeatDiff
     return a.device_id.localeCompare(b.device_id)
   })
+}
+
+async function loadProviderUptimeSchedule(userId: string, baseDeviceId: string): Promise<ProviderUptimeScheduleRow | null> {
+  const { data, error } = await adminClient
+    .from('provider_uptime_schedules')
+    .select('user_id, base_device_id, enabled, start_time, end_time, timezone, wake_enabled, shutdown_after_window, last_start_window_key, last_stop_window_key, last_wake_window_key, last_tick_at, state_actor, state_changed_at')
+    .eq('user_id', userId)
+    .eq('base_device_id', baseDeviceId)
+    .maybeSingle<ProviderUptimeScheduleRow>()
+
+  if (error || !data) return null
+  return data
 }
 
 function selectSlotLimitRow(
@@ -519,12 +567,14 @@ export async function GET(req: Request) {
     let connection_slots = null
     let connection_slots_sync = null
     let live_slot_count = 0
+    let uptime_schedule = null
     const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
     if (deviceId || resolvedBaseDeviceId) {
-      const [rows, slotRows, providerRows] = await Promise.all([
+      const [rows, slotRows, providerRows, uptimeScheduleRow] = await Promise.all([
         resolvedBaseDeviceId ? loadPrivateShareDevices(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve([]),
         resolvedBaseDeviceId ? loadSlotLimitDevices(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve([]),
         resolvedBaseDeviceId ? loadProviderDeviceStates(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve([]),
+        resolvedBaseDeviceId ? loadProviderUptimeSchedule(relayProviderUserId, resolvedBaseDeviceId) : Promise.resolve(null),
       ])
       const selectedProviderRow = selectConnectionSlotState(providerRows, deviceId, resolvedBaseDeviceId)
       private_share = serializePrivateShare(selectPrivateShareRow(rows, deviceId, resolvedBaseDeviceId))
@@ -534,6 +584,7 @@ export async function GET(req: Request) {
       connection_slots = selectedProviderRow?.connection_slots ?? null
       connection_slots_sync = serializeSyncState(selectedProviderRow)
       live_slot_count = resolveLiveSlotCount(providerRows, resolvedBaseDeviceId)
+      uptime_schedule = serializeUptimeSchedule(uptimeScheduleRow)
       return NextResponse.json({
         ...getProviderShareStatus(data, selectSlotLimitRow(slotRows, deviceId, resolvedBaseDeviceId)),
         profile_sync: serializeSyncState(data),
@@ -544,6 +595,7 @@ export async function GET(req: Request) {
         connection_slots,
         connection_slots_sync,
         live_slot_count,
+        uptime_schedule,
       })
     }
     return NextResponse.json({
@@ -556,6 +608,7 @@ export async function GET(req: Request) {
       connection_slots,
       connection_slots_sync,
       live_slot_count,
+      uptime_schedule,
     })
   }
 
@@ -570,10 +623,11 @@ export async function GET(req: Request) {
 
   if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
-  const [privateShareRows, slotLimitRows, providerRows] = await Promise.all([
+  const [privateShareRows, slotLimitRows, providerRows, uptimeScheduleRow] = await Promise.all([
     resolvedBaseDeviceId ? loadPrivateShareDevices(userId, resolvedBaseDeviceId) : Promise.resolve([]),
     resolvedBaseDeviceId ? loadSlotLimitDevices(userId, resolvedBaseDeviceId) : Promise.resolve([]),
     resolvedBaseDeviceId ? loadProviderDeviceStates(userId, resolvedBaseDeviceId) : Promise.resolve([]),
+    resolvedBaseDeviceId ? loadProviderUptimeSchedule(userId, resolvedBaseDeviceId) : Promise.resolve(null),
   ])
   const privateShare = serializePrivateShare(selectPrivateShareRow(privateShareRows, deviceId, resolvedBaseDeviceId))
   const privateShares = privateShareRows.map(serializePrivateShare)
@@ -604,6 +658,7 @@ export async function GET(req: Request) {
     connection_slots: selectedProviderRow?.connection_slots ?? null,
     connection_slots_sync: serializeSyncState(selectedProviderRow),
     live_slot_count: resolveLiveSlotCount(providerRows, resolvedBaseDeviceId),
+    uptime_schedule: serializeUptimeSchedule(uptimeScheduleRow),
     ...getProviderShareStatus(data, selectedSlotLimit),
   })
 }
@@ -800,6 +855,47 @@ export async function POST(req: Request) {
       ok: true,
       daily_share_limit_mb: updatedProfile.daily_share_limit_mb ?? null,
       profile_sync: serializeSyncState(updatedProfile),
+    })
+  }
+
+  if (body.sharingSchedule && typeof body.sharingSchedule === 'object') {
+    const providerError = getProviderEligibilityError(await loadProviderEligibilityProfile(userId), { requireTerms: false })
+    if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
+
+    const scheduleInput = body.sharingSchedule as Record<string, unknown>
+    const baseDeviceId = String(body.baseDeviceId ?? scheduleInput.baseDeviceId ?? scheduleInput.base_device_id ?? '').trim()
+    if (!baseDeviceId) {
+      return NextResponse.json({ error: 'baseDeviceId is required' }, { status: 400 })
+    }
+
+    const nowIso = new Date().toISOString()
+    const payload = {
+      user_id: userId,
+      base_device_id: baseDeviceId,
+      enabled: scheduleInput.enabled === true,
+      start_time: normalizeScheduleTime(scheduleInput.startTime ?? scheduleInput.start_time),
+      end_time: normalizeScheduleTime(scheduleInput.endTime ?? scheduleInput.end_time),
+      timezone: normalizeScheduleTimezone(scheduleInput.timezone),
+      wake_enabled: scheduleInput.wakeEnabled === true || scheduleInput.wake_enabled === true,
+      shutdown_after_window: scheduleInput.shutdownAfterWindow === true || scheduleInput.shutdown_after_window === true,
+      state_actor: stateActor,
+      state_changed_at: stateChangedAt,
+      updated_at: nowIso,
+    }
+
+    const { data: uptimeSchedule, error: scheduleError } = await adminClient
+      .from('provider_uptime_schedules')
+      .upsert(payload, { onConflict: 'user_id,base_device_id' })
+      .select('user_id, base_device_id, enabled, start_time, end_time, timezone, wake_enabled, shutdown_after_window, last_start_window_key, last_stop_window_key, last_wake_window_key, last_tick_at, state_actor, state_changed_at')
+      .single<ProviderUptimeScheduleRow>()
+
+    if (scheduleError || !uptimeSchedule) {
+      return NextResponse.json({ error: scheduleError?.message ?? 'Could not update sharing schedule' }, { status: 500 })
+    }
+
+    return NextResponse.json({
+      ok: true,
+      uptime_schedule: serializeUptimeSchedule(uptimeSchedule),
     })
   }
 

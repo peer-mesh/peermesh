@@ -5,6 +5,8 @@ import { randomUUID } from 'crypto'
 const PORT        = parseInt(process.env.PORT ?? '8080')
 const API_BASE    = process.env.API_BASE ?? ''
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
+const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET ?? RELAY_SECRET
+const SCHEDULER_TICK_INTERVAL_MS = Math.max(0, parseInt(process.env.SCHEDULER_TICK_INTERVAL_MS ?? '60000', 10) || 0)
 
 const peers = new Map()
 const sessions = new Map()
@@ -1127,8 +1129,50 @@ const sessionWatchdog = setInterval(() => {
   }
 }, 30_000)
 
-wss.on('close', () => { clearInterval(heartbeat); clearInterval(sessionWatchdog) })
+let schedulerTickTimer = null
+let schedulerTickInFlight = false
+
+async function runSchedulerTick(reason = 'relay') {
+  if (!API_BASE || !SCHEDULER_SECRET || schedulerTickInFlight) return
+  schedulerTickInFlight = true
+  try {
+    const res = await fetch(`${API_BASE}/api/scheduler/tick?source=relay`, {
+      method: 'POST',
+      headers: {
+        'x-scheduler-secret': SCHEDULER_SECRET,
+        'x-relay-secret': RELAY_SECRET,
+      },
+      signal: AbortSignal.timeout(15000),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || `status=${res.status}`)
+    if ((data.created ?? 0) > 0 || (data.failed ?? 0) > 0) {
+      log('SCHEDULER', `tick reason=${reason} scanned=${data.scanned ?? 0} created=${data.created ?? 0} failed=${data.failed ?? 0}`)
+    }
+  } catch (err) {
+    logErr('SCHEDULER', `tick failed reason=${reason}`, err)
+  } finally {
+    schedulerTickInFlight = false
+  }
+}
+
+function startSchedulerTickLoop() {
+  if (!API_BASE || !SCHEDULER_SECRET || SCHEDULER_TICK_INTERVAL_MS <= 0) return
+  const tick = async (reason = 'timer') => {
+    await runSchedulerTick(reason)
+    schedulerTickTimer = setTimeout(() => tick('timer'), SCHEDULER_TICK_INTERVAL_MS)
+  }
+  schedulerTickTimer = setTimeout(() => tick('startup'), 5000)
+  log('SCHEDULER', `enabled intervalMs=${SCHEDULER_TICK_INTERVAL_MS}`)
+}
+
+wss.on('close', () => {
+  clearInterval(heartbeat)
+  clearInterval(sessionWatchdog)
+  if (schedulerTickTimer) clearTimeout(schedulerTickTimer)
+})
 
 server.listen(PORT, () => {
   log('RELAY', `PeerMesh relay on port ${PORT}`)
+  startSchedulerTickLoop()
 })
