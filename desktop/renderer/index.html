@@ -118,6 +118,38 @@
       line-height: 1.5;
       font-family: 'Courier New', monospace;
     }
+    .schedule-controls {
+      display: none;
+      padding: 12px;
+      margin: -2px 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0d0d14;
+    }
+    .schedule-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .schedule-field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: 10px;
+      color: var(--muted);
+      font-family: 'Courier New', monospace;
+    }
+    .schedule-field input {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #13131a;
+      color: var(--text);
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+    }
     .slots-card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -426,6 +458,34 @@
           <p id="prevent-sleep-desc">Keep the provider runtime awake while sharing is enabled.</p>
         </div>
         <button class="toggle" id="prevent-sleep-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
+      </div>
+      <div class="toggle-row compact">
+        <div class="toggle-info">
+          <h4>Scheduled sharing</h4>
+          <p id="sharing-schedule-desc">Start and stop sharing on a daily time window.</p>
+        </div>
+        <button class="toggle" id="sharing-schedule-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
+      </div>
+      <div class="schedule-controls" id="sharing-schedule-controls">
+        <div class="schedule-grid">
+          <label class="schedule-field">Start
+            <input id="sharing-schedule-start" type="time" value="00:00" />
+          </label>
+          <label class="schedule-field">End
+            <input id="sharing-schedule-end" type="time" value="00:00" />
+          </label>
+        </div>
+        <label class="schedule-field">Timezone
+          <input id="sharing-schedule-timezone" placeholder="Africa/Lagos" />
+        </label>
+        <button class="mini-btn" id="sharing-schedule-save" type="button" style="width:100%;margin-top:8px">Save schedule</button>
+      </div>
+      <div class="toggle-row compact">
+        <div class="toggle-info">
+          <h4>Wake PC for schedule</h4>
+          <p id="schedule-wake-desc">Use OS wake support to launch PeerMesh for scheduled sharing.</p>
+        </div>
+        <button class="toggle" id="schedule-wake-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
       </div>
       <div class="toggle-note" id="startup-note">These settings apply to this desktop only.</div>
     </div>

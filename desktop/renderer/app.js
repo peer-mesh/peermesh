@@ -4,6 +4,8 @@ const startupBusy = {
   launchOnStartup: false,
   autoShareOnLaunch: false,
   preventSleepWhileSharing: false,
+  sharingSchedule: false,
+  scheduleWakeEnabled: false,
 }
 
 let devicePollInterval = null
@@ -23,6 +25,7 @@ let slotLimits = {}
 let slotDailyLimitInput = ''
 let slotDailyLimitSaving = false
 let dailyLimitSaving = false
+let sharingScheduleSaving = false
 let slotUpdating = false
 let lastPrivateShareLoadAt = 0
 const PRIVATE_SHARE_REFRESH_TTL = 2500
@@ -43,6 +46,36 @@ function invoke(name, ...args) {
   const fn = api[name]
   if (typeof fn !== 'function') return Promise.resolve(null)
   return fn(...args)
+}
+
+function getBrowserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+function normalizeScheduleTime(value, fallback = '00:00') {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || '').trim())
+  if (!match) return fallback
+  const hours = parseInt(match[1], 10)
+  const minutes = parseInt(match[2], 10)
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return fallback
+  }
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+}
+
+function normalizeSharingSchedule(schedule = {}) {
+  return {
+    enabled: schedule.enabled === true,
+    startTime: normalizeScheduleTime(schedule.startTime),
+    endTime: normalizeScheduleTime(schedule.endTime),
+    timezone: String(schedule.timezone || getBrowserTimeZone()).trim() || getBrowserTimeZone(),
+    active: schedule.active === true,
+    alwaysOn: schedule.alwaysOn === true || (schedule.enabled === true && normalizeScheduleTime(schedule.startTime) === normalizeScheduleTime(schedule.endTime)),
+  }
 }
 
 function setVersion(version) {
@@ -528,13 +561,24 @@ function renderStartupPreferences(state) {
   const launchToggle = document.getElementById('launch-startup-toggle')
   const autoShareToggle = document.getElementById('auto-share-toggle')
   const preventSleepToggle = document.getElementById('prevent-sleep-toggle')
+  const scheduleToggle = document.getElementById('sharing-schedule-toggle')
+  const scheduleWakeToggle = document.getElementById('schedule-wake-toggle')
   const launchDesc = document.getElementById('launch-startup-desc')
   const autoShareDesc = document.getElementById('auto-share-desc')
   const preventSleepDesc = document.getElementById('prevent-sleep-desc')
+  const scheduleDesc = document.getElementById('sharing-schedule-desc')
+  const scheduleWakeDesc = document.getElementById('schedule-wake-desc')
+  const scheduleControls = document.getElementById('sharing-schedule-controls')
+  const scheduleStart = document.getElementById('sharing-schedule-start')
+  const scheduleEnd = document.getElementById('sharing-schedule-end')
+  const scheduleTimezone = document.getElementById('sharing-schedule-timezone')
+  const scheduleSave = document.getElementById('sharing-schedule-save')
   const note = document.getElementById('startup-note')
   const signedIn = !!config.userId
   const accepted = !!config.hasAcceptedProviderTerms
   const isCurrentlySharing = !!state?.running || !!state?.shareEnabled
+  const schedule = normalizeSharingSchedule(state?.sharingSchedule ?? config.sharingSchedule)
+  const osWake = state?.osWake ?? { enabled: !!config.scheduleWakeEnabled, supported: false, platform: 'unknown', status: null }
 
   setToggleVisual(launchToggle, {
     on: !!config.launchOnStartup,
@@ -551,6 +595,25 @@ function renderStartupPreferences(state) {
     loading: startupBusy.preventSleepWhileSharing,
     disabled: !signedIn || startupBusy.preventSleepWhileSharing,
   })
+  setToggleVisual(scheduleToggle, {
+    on: !!schedule.enabled,
+    loading: startupBusy.sharingSchedule || sharingScheduleSaving,
+    disabled: !signedIn || startupBusy.sharingSchedule || sharingScheduleSaving,
+  })
+  setToggleVisual(scheduleWakeToggle, {
+    on: !!osWake.enabled,
+    loading: startupBusy.scheduleWakeEnabled,
+    disabled: !signedIn || !schedule.enabled || !osWake.supported || startupBusy.scheduleWakeEnabled,
+  })
+
+  if (scheduleControls) scheduleControls.style.display = schedule.enabled ? 'block' : 'none'
+  if (scheduleStart && document.activeElement !== scheduleStart) scheduleStart.value = schedule.startTime
+  if (scheduleEnd && document.activeElement !== scheduleEnd) scheduleEnd.value = schedule.endTime
+  if (scheduleTimezone && document.activeElement !== scheduleTimezone) scheduleTimezone.value = schedule.timezone
+  if (scheduleSave) {
+    scheduleSave.disabled = !signedIn || sharingScheduleSaving
+    scheduleSave.textContent = sharingScheduleSaving ? 'Saving...' : 'Save schedule'
+  }
 
   if (launchDesc) {
     launchDesc.textContent = config.launchOnStartup
@@ -579,6 +642,36 @@ function renderStartupPreferences(state) {
       preventSleepDesc.textContent = 'The runtime will stay awake when sharing starts.'
     } else {
       preventSleepDesc.textContent = 'Allow the laptop to sleep normally when the OS decides.'
+    }
+  }
+
+  if (scheduleDesc) {
+    if (!signedIn) {
+      scheduleDesc.textContent = 'Sign in before enabling scheduled sharing.'
+    } else if (!schedule.enabled) {
+      scheduleDesc.textContent = 'Disabled. Manual sharing and auto-start settings still work.'
+    } else if (schedule.alwaysOn) {
+      scheduleDesc.textContent = 'Always-on mode: PeerMesh shares whenever this PC is on.'
+    } else if (schedule.active) {
+      scheduleDesc.textContent = `Active now. Sharing window ${schedule.startTime}-${schedule.endTime} (${schedule.timezone}).`
+    } else {
+      scheduleDesc.textContent = `Waiting for ${schedule.startTime}-${schedule.endTime} (${schedule.timezone}).`
+    }
+  }
+
+  if (scheduleWakeDesc) {
+    if (!signedIn) {
+      scheduleWakeDesc.textContent = 'Sign in before enabling OS wake.'
+    } else if (!schedule.enabled) {
+      scheduleWakeDesc.textContent = 'Enable scheduled sharing first.'
+    } else if (!osWake.supported) {
+      scheduleWakeDesc.textContent = 'Automatic wake setup is currently available on Windows.'
+    } else if (osWake.enabled && osWake.status?.error) {
+      scheduleWakeDesc.textContent = osWake.status.error
+    } else if (osWake.enabled) {
+      scheduleWakeDesc.textContent = 'Windows Task Scheduler will wake from sleep/hibernate and launch PeerMesh.'
+    } else {
+      scheduleWakeDesc.textContent = 'Optional: create a Windows wake task for the schedule start time.'
     }
   }
 
@@ -1094,6 +1187,42 @@ async function updateStartupPreference(key, enabled) {
   }
 }
 
+async function updateSharingSchedule(patch) {
+  const current = normalizeSharingSchedule(window.__lastPeerMeshState?.sharingSchedule ?? window.__lastPeerMeshState?.config?.sharingSchedule)
+  const next = normalizeSharingSchedule({ ...current, ...patch })
+  sharingScheduleSaving = true
+  startupBusy.sharingSchedule = true
+  renderStartupPreferences(window.__lastPeerMeshState || null)
+  clearMainError()
+  try {
+    const result = await invoke('setSharingSchedule', next)
+    if (!result?.success) throw new Error(result?.error || 'Could not update sharing schedule')
+    await pollState()
+  } catch (error) {
+    showMainError(error?.message || 'Could not update sharing schedule')
+  } finally {
+    sharingScheduleSaving = false
+    startupBusy.sharingSchedule = false
+    renderStartupPreferences(window.__lastPeerMeshState || null)
+  }
+}
+
+async function updateScheduleWake(enabled) {
+  startupBusy.scheduleWakeEnabled = true
+  renderStartupPreferences(window.__lastPeerMeshState || null)
+  clearMainError()
+  try {
+    const result = await invoke('setScheduleWakeEnabled', enabled)
+    if (!result?.success) throw new Error(result?.error || 'Could not update OS wake setting')
+    await pollState()
+  } catch (error) {
+    showMainError(error?.message || 'Could not update OS wake setting')
+  } finally {
+    startupBusy.scheduleWakeEnabled = false
+    renderStartupPreferences(window.__lastPeerMeshState || null)
+  }
+}
+
 document.getElementById('btn-open-browser').addEventListener('click', () => {
   stopDevicePoll()
   deviceFlowActive = false
@@ -1157,6 +1286,26 @@ document.getElementById('auto-share-toggle').addEventListener('click', async () 
 document.getElementById('prevent-sleep-toggle').addEventListener('click', async () => {
   const current = !!window.__lastPeerMeshState?.config?.preventSleepWhileSharing
   await updateStartupPreference('preventSleepWhileSharing', !current)
+})
+
+document.getElementById('sharing-schedule-toggle').addEventListener('click', async () => {
+  const current = normalizeSharingSchedule(window.__lastPeerMeshState?.sharingSchedule ?? window.__lastPeerMeshState?.config?.sharingSchedule)
+  await updateSharingSchedule({ enabled: !current.enabled })
+})
+
+document.getElementById('sharing-schedule-save').addEventListener('click', async () => {
+  const current = normalizeSharingSchedule(window.__lastPeerMeshState?.sharingSchedule ?? window.__lastPeerMeshState?.config?.sharingSchedule)
+  await updateSharingSchedule({
+    enabled: current.enabled,
+    startTime: document.getElementById('sharing-schedule-start')?.value || current.startTime,
+    endTime: document.getElementById('sharing-schedule-end')?.value || current.endTime,
+    timezone: document.getElementById('sharing-schedule-timezone')?.value || current.timezone,
+  })
+})
+
+document.getElementById('schedule-wake-toggle').addEventListener('click', async () => {
+  const current = !!window.__lastPeerMeshState?.osWake?.enabled
+  await updateScheduleWake(!current)
 })
 
 document.getElementById('btn-dashboard').addEventListener('click', async () => {

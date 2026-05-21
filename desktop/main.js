@@ -116,8 +116,13 @@ let _sharingConfigSyncBusy = false
 let _sharingConfigSyncInterval = 5000
 let _sharingConfigConsecutiveFailures = 0
 let _providerSleepBlockerId = null
+let _sharingScheduleTimer = null
+let _sharingScheduleActionBusy = false
+let _lastScheduleInWindow = null
+let _scheduleWakeSyncBusy = false
 const SHARING_CONFIG_SYNC_MAX = 30000
 const AUTH_CLEAR_FAILURE_THRESHOLD = 3
+const WINDOWS_WAKE_TASK_NAME = 'PeerMesh Scheduled Wake'
 const _pendingBytesByDevice = new Map()
 let _flushTimer = null
 
@@ -149,6 +154,9 @@ let config = {
   launchOnStartup: false,
   autoShareOnLaunch: false,
   preventSleepWhileSharing: false,
+  sharingSchedule: getDefaultSharingSchedule(),
+  scheduleWakeEnabled: false,
+  scheduleWakeStatus: null,
   todaySharedBytes: 0,
   todaySharedBytesDate: null,
   dailyShareLimitMb: null,
@@ -744,6 +752,385 @@ function setPreventSleepWhileSharingPreference(enabled) {
   return { enabled: config.preventSleepWhileSharing, active: isProviderSleepBlockerActive() }
 }
 
+function getSystemTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+function getDefaultSharingSchedule() {
+  return {
+    enabled: false,
+    startTime: '00:00',
+    endTime: '00:00',
+    timezone: getSystemTimeZone(),
+  }
+}
+
+function normalizeScheduleTime(value, fallback = '00:00') {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || '').trim())
+  if (!match) return fallback
+  const hours = Number.parseInt(match[1], 10)
+  const minutes = Number.parseInt(match[2], 10)
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return fallback
+  }
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+}
+
+function normalizeScheduleTimezone(value) {
+  const fallback = getSystemTimeZone()
+  const timezone = String(value || fallback).trim()
+  if (!timezone || timezone === 'local') return fallback
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date())
+    return timezone
+  } catch {
+    return fallback
+  }
+}
+
+function normalizeSharingSchedule(raw = {}) {
+  const defaults = getDefaultSharingSchedule()
+  return {
+    enabled: raw?.enabled === true,
+    startTime: normalizeScheduleTime(raw?.startTime, defaults.startTime),
+    endTime: normalizeScheduleTime(raw?.endTime, defaults.endTime),
+    timezone: normalizeScheduleTimezone(raw?.timezone ?? defaults.timezone),
+  }
+}
+
+function quotePowerShellString(value) {
+  return `'${String(value ?? '').replace(/'/g, "''")}'`
+}
+
+function runProcess(command, args, { timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill() } catch {}
+      reject(new Error(`${command} timed out`))
+    }, timeoutMs)
+
+    child.stdout?.on('data', chunk => { stdout += chunk.toString() })
+    child.stderr?.on('data', chunk => { stderr += chunk.toString() })
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (code === 0) {
+        resolve({ stdout, stderr })
+      } else {
+        reject(new Error((stderr || stdout || `${command} exited ${code}`).trim()))
+      }
+    })
+  })
+}
+
+function scheduleTimeToMinutes(timeValue) {
+  const normalized = normalizeScheduleTime(timeValue)
+  const [hours, minutes] = normalized.split(':').map(part => Number.parseInt(part, 10))
+  return hours * 60 + minutes
+}
+
+function getScheduleNowMinutes(schedule, now = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: schedule.timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(now)
+    const hours = Number.parseInt(parts.find(part => part.type === 'hour')?.value ?? '0', 10)
+    const minutes = Number.parseInt(parts.find(part => part.type === 'minute')?.value ?? '0', 10)
+    return hours * 60 + minutes
+  } catch {
+    const local = new Date(now)
+    return local.getHours() * 60 + local.getMinutes()
+  }
+}
+
+function isSharingScheduleAlwaysOn(schedule) {
+  return schedule.enabled && schedule.startTime === schedule.endTime
+}
+
+function isInsideSharingSchedule(schedule, now = new Date()) {
+  if (!schedule.enabled) return false
+  if (isSharingScheduleAlwaysOn(schedule)) return true
+  const start = scheduleTimeToMinutes(schedule.startTime)
+  const end = scheduleTimeToMinutes(schedule.endTime)
+  const current = getScheduleNowMinutes(schedule, now)
+  if (start < end) return current >= start && current < end
+  return current >= start || current < end
+}
+
+function getSharingSchedulePublicState() {
+  const schedule = normalizeSharingSchedule(config.sharingSchedule)
+  const active = isInsideSharingSchedule(schedule)
+  return {
+    ...schedule,
+    active,
+    alwaysOn: isSharingScheduleAlwaysOn(schedule),
+  }
+}
+
+function getWakeLaunchTarget() {
+  if (app.isPackaged) {
+    return { executable: process.execPath, args: '--background' }
+  }
+  const appPath = app.getAppPath().replace(/"/g, '\\"')
+  return { executable: process.execPath, args: `"${appPath}" --background` }
+}
+
+function getScheduleWakePublicState() {
+  return {
+    enabled: !!config.scheduleWakeEnabled,
+    supported: process.platform === 'win32',
+    platform: process.platform,
+    status: config.scheduleWakeStatus ?? null,
+  }
+}
+
+async function registerWindowsScheduleWakeTask(schedule) {
+  const launch = getWakeLaunchTarget()
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$taskName = ${quotePowerShellString(WINDOWS_WAKE_TASK_NAME)}`,
+    `$execute = ${quotePowerShellString(launch.executable)}`,
+    `$arguments = ${quotePowerShellString(launch.args)}`,
+    '$action = New-ScheduledTaskAction -Execute $execute -Argument $arguments',
+    `$trigger = New-ScheduledTaskTrigger -Daily -At ${quotePowerShellString(schedule.startTime)}`,
+    '$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries',
+    '$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel LeastPrivilege',
+    "Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Wakes this PC so PeerMesh can start scheduled sharing.' -Force | Out-Null",
+  ].join('; ')
+  await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script])
+  return {
+    supported: true,
+    taskName: WINDOWS_WAKE_TASK_NAME,
+    message: 'Windows Task Scheduler wake task registered',
+  }
+}
+
+async function unregisterWindowsScheduleWakeTask() {
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$taskName = ${quotePowerShellString(WINDOWS_WAKE_TASK_NAME)}`,
+    'Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null',
+  ].join('; ')
+  await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeoutMs: 10000 })
+  return {
+    supported: true,
+    taskName: WINDOWS_WAKE_TASK_NAME,
+    message: 'Windows Task Scheduler wake task removed',
+  }
+}
+
+async function applyScheduleWakeIntegration(reason = 'sync') {
+  if (_scheduleWakeSyncBusy) return config.scheduleWakeStatus ?? { platform: process.platform, skipped: true }
+  _scheduleWakeSyncBusy = true
+  const schedule = normalizeSharingSchedule(config.sharingSchedule)
+  config.sharingSchedule = schedule
+  const now = new Date().toISOString()
+
+  try {
+    if (!config.scheduleWakeEnabled || !schedule.enabled) {
+      let disabledResult = { supported: process.platform === 'win32', message: 'OS wake disabled' }
+      if (!schedule.enabled) config.scheduleWakeEnabled = false
+      if (process.platform === 'win32') {
+        try {
+          disabledResult = await unregisterWindowsScheduleWakeTask()
+        } catch (e) {
+          disabledResult = { supported: true, error: e.message, message: 'Could not remove Windows wake task' }
+        }
+      }
+      config.scheduleWakeStatus = {
+        ...disabledResult,
+        enabled: false,
+        platform: process.platform,
+        reason,
+        updatedAt: now,
+      }
+      saveConfig()
+      return config.scheduleWakeStatus
+    }
+
+    if (process.platform !== 'win32') {
+      config.scheduleWakeStatus = {
+        enabled: false,
+        supported: false,
+        platform: process.platform,
+        reason,
+        updatedAt: now,
+        error: 'Automatic OS wake registration is currently implemented for Windows only.',
+      }
+      config.scheduleWakeEnabled = false
+      saveConfig()
+      return config.scheduleWakeStatus
+    }
+
+    const systemTimezone = getSystemTimeZone()
+    if (schedule.timezone !== systemTimezone) {
+      config.scheduleWakeStatus = {
+        enabled: false,
+        supported: true,
+        platform: process.platform,
+        reason,
+        updatedAt: now,
+        error: `Windows wake tasks use the OS timezone. Set the schedule timezone to ${systemTimezone} to enable OS wake.`,
+      }
+      config.scheduleWakeEnabled = false
+      saveConfig()
+      return config.scheduleWakeStatus
+    }
+
+    const result = await registerWindowsScheduleWakeTask(schedule)
+    config.scheduleWakeStatus = {
+      ...result,
+      enabled: true,
+      platform: process.platform,
+      reason,
+      startTime: schedule.startTime,
+      endTime: schedule.endTime,
+      timezone: schedule.timezone,
+      updatedAt: now,
+    }
+    saveConfig()
+    return config.scheduleWakeStatus
+  } catch (e) {
+    config.scheduleWakeStatus = {
+      enabled: false,
+      supported: process.platform === 'win32',
+      platform: process.platform,
+      reason,
+      updatedAt: now,
+      error: e.message,
+    }
+    config.scheduleWakeEnabled = false
+    saveConfig()
+    return config.scheduleWakeStatus
+  } finally {
+    _scheduleWakeSyncBusy = false
+  }
+}
+
+function setSharingSchedulePreference(nextSchedule = {}) {
+  config.sharingSchedule = normalizeSharingSchedule({ ...config.sharingSchedule, ...nextSchedule })
+  saveConfig()
+  _lastScheduleInWindow = null
+  void runSharingScheduleTick('schedule_changed')
+  void applyScheduleWakeIntegration('schedule_changed')
+  updateTray()
+  return { success: true, sharingSchedule: getSharingSchedulePublicState(), state: getPublicState() }
+}
+
+async function setScheduleWakeEnabledPreference(enabled) {
+  if (enabled && !normalizeSharingSchedule(config.sharingSchedule).enabled) {
+    return {
+      success: false,
+      error: 'Enable scheduled sharing before enabling OS wake.',
+      osWake: getScheduleWakePublicState(),
+      state: getPublicState(),
+    }
+  }
+
+  config.scheduleWakeEnabled = !!enabled
+  saveConfig()
+  const status = await applyScheduleWakeIntegration('preference')
+  updateTray()
+  if (enabled && status.error) {
+    return { success: false, error: status.error, osWake: getScheduleWakePublicState(), state: getPublicState() }
+  }
+  return { success: true, osWake: getScheduleWakePublicState(), state: getPublicState() }
+}
+
+function shouldScheduleStartSharing() {
+  return !!(config.token && config.userId && config.hasAcceptedProviderTerms && !limitHit)
+}
+
+async function runSharingScheduleTick(reason = 'interval') {
+  if (_sharingScheduleActionBusy) return
+  const schedule = normalizeSharingSchedule(config.sharingSchedule)
+  config.sharingSchedule = schedule
+  if (!schedule.enabled) {
+    _lastScheduleInWindow = null
+    return
+  }
+
+  const inWindow = isInsideSharingSchedule(schedule)
+  const alwaysOn = isSharingScheduleAlwaysOn(schedule)
+  const enteredWindow = _lastScheduleInWindow !== true && inWindow
+  const exitedWindow = _lastScheduleInWindow !== false && !inWindow
+  _lastScheduleInWindow = inWindow
+
+  try {
+    _sharingScheduleActionBusy = true
+    if (inWindow && (enteredWindow || alwaysOn) && !config.shareEnabled && !running && !peerSharing) {
+      if (!shouldScheduleStartSharing()) {
+        log.warn('SCHEDULE', 'start skipped - provider is not ready', {
+          reason,
+          hasToken: !!config.token,
+          hasUserId: !!config.userId,
+          hasAcceptedProviderTerms: !!config.hasAcceptedProviderTerms,
+          limitHit,
+        })
+        return
+      }
+      log.info('SCHEDULE', 'starting scheduled sharing window', {
+        reason,
+        startTime: schedule.startTime,
+        endTime: schedule.endTime,
+        timezone: schedule.timezone,
+      })
+      config.shareEnabled = true
+      saveConfig()
+      updateTray()
+      connectRelay()
+      return
+    }
+
+    if (!inWindow && exitedWindow && (config.shareEnabled || running)) {
+      log.info('SCHEDULE', 'stopping scheduled sharing window', {
+        reason,
+        startTime: schedule.startTime,
+        endTime: schedule.endTime,
+        timezone: schedule.timezone,
+      })
+      stopRelay()
+    }
+  } finally {
+    _sharingScheduleActionBusy = false
+  }
+}
+
+function startSharingScheduleLoop() {
+  stopSharingScheduleLoop()
+  _lastScheduleInWindow = null
+  void runSharingScheduleTick('startup')
+  _sharingScheduleTimer = setInterval(() => {
+    void runSharingScheduleTick('timer')
+  }, 30_000)
+}
+
+function stopSharingScheduleLoop() {
+  if (!_sharingScheduleTimer) return
+  clearInterval(_sharingScheduleTimer)
+  _sharingScheduleTimer = null
+}
+
 let _savingDailyLimit = false
 let _localSlotChangeAt = 0
 const LOCAL_SLOT_CHANGE_GRACE_MS = 8000
@@ -887,6 +1274,9 @@ function loadConfig() {
   // Never derive it from shareEnabled (which is cleared to false on every shutdown by stopRelay).
   config.autoShareOnLaunch = typeof config.autoShareOnLaunch === 'boolean' ? config.autoShareOnLaunch : false
   config.preventSleepWhileSharing = typeof config.preventSleepWhileSharing === 'boolean' ? config.preventSleepWhileSharing : false
+  config.sharingSchedule = normalizeSharingSchedule(config.sharingSchedule)
+  config.scheduleWakeEnabled = typeof config.scheduleWakeEnabled === 'boolean' ? config.scheduleWakeEnabled : false
+  config.scheduleWakeStatus = config.scheduleWakeStatus ?? null
   config.privateShareActive = !!config.privateShareActive
   config.privateShare = config.privateShare ?? null
   config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
@@ -1006,6 +1396,7 @@ async function initializeDesktopRuntime(reason) {
   } catch (e) {
     log.warn('AUTH', 'startup auth verify failed', { err: e.message, reason })
   }
+  void applyScheduleWakeIntegration('startup')
   startSharingConfigSync()
 }
 
@@ -1014,6 +1405,7 @@ function shutdownDesktopRuntime(reason = 'quit') {
   _shutdownStarted = true
   log.info('PROCESS', 'shutdownDesktopRuntime', { reason })
   logState(`shutdown:${reason}`)
+  stopSharingScheduleLoop()
   stopSharingConfigSync()
   void flushPendingBytes()
   if (_cliWatchTimer) {
@@ -1046,6 +1438,8 @@ function getPublicState() {
     profileSync: config.profileSync ?? null,
     preventSleepWhileSharing: !!config.preventSleepWhileSharing,
     preventSleepWhileSharingActive: isProviderSleepBlockerActive(),
+    sharingSchedule: getSharingSchedulePublicState(),
+    osWake: getScheduleWakePublicState(),
     privateShareActive: !!(privateShare?.enabled && privateShare?.active),
     privateShare: privateShare,
     privateShareDeviceId: privateShare?.device_id ?? config.privateShareDeviceId ?? null,
@@ -2260,6 +2654,13 @@ function updateTray() {
   const slotSummary = getSlotSummary()
   const privateCount = slotSummary.filter(s => s.privateActive).length
   const publicCount = configuredSlots - privateCount
+  const scheduleState = getSharingSchedulePublicState()
+  const scheduleLabel = scheduleState.enabled
+    ? (scheduleState.alwaysOn
+      ? 'Scheduled sharing: Always on'
+      : `Scheduled sharing: ${scheduleState.startTime}-${scheduleState.endTime}`)
+    : 'Scheduled sharing'
+  const osWakeState = getScheduleWakePublicState()
   const privateBadge = running
     ? (privateCount === configuredSlots ? ' [ALL PRIVATE]'
       : privateCount > 0 ? ` [${publicCount} public, ${privateCount} private]`
@@ -2340,6 +2741,25 @@ function updateTray() {
       enabled: !!config.userId,
       click: (item) => {
         setPreventSleepWhileSharingPreference(item.checked)
+      },
+    },
+    {
+      type: 'checkbox',
+      label: scheduleLabel,
+      checked: !!scheduleState.enabled,
+      enabled: !!config.userId,
+      click: (item) => {
+        setSharingSchedulePreference({ enabled: item.checked })
+      },
+    },
+    {
+      type: 'checkbox',
+      label: 'Wake PC for schedule',
+      checked: !!osWakeState.enabled,
+      enabled: !!config.userId && !!scheduleState.enabled && osWakeState.supported,
+      click: async (item) => {
+        const result = await setScheduleWakeEnabledPreference(item.checked)
+        if (!result.success && result.error) showNotification('PeerMesh wake setup', result.error)
       },
     },
     { type: 'separator' },
@@ -2520,6 +2940,10 @@ ipcMain.handle('set-prevent-sleep-while-sharing', async (_, enabled) => {
   return { success: true, ...result, state: getPublicState() }
 })
 
+ipcMain.handle('set-sharing-schedule', async (_, schedule) => setSharingSchedulePreference(schedule))
+
+ipcMain.handle('set-schedule-wake-enabled', async (_, enabled) => setScheduleWakeEnabledPreference(enabled))
+
 ipcMain.handle('set-connection-slots', async (_, slots) => {
   return applyConnectionSlots(slots, { syncPeer: true })
 })
@@ -2696,6 +3120,10 @@ async function bootstrapDesktopApp() {
   if (process.platform === 'win32') app.setAppUserModelId('com.peermesh.desktop')
   await initializeDesktopRuntime('desktop_app')
   applyLaunchOnStartupPreference(config.launchOnStartup)
+  startSharingScheduleLoop()
+  app.on('resume', () => {
+    void runSharingScheduleTick('resume')
+  })
 
   tray = new Tray(createTrayIcon())
   tray.setToolTip('PeerMesh')
