@@ -82,14 +82,32 @@ function closeAllTunnels(notifyRelay = false) {
 }
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
-const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
+const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
+const PRIVATE = [
+  /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
+  /^(22[4-9]|23\d)\./, /^255\.255\.255\.255$/,
+  /^::1$/, /^fc[0-9a-f]{2}:/i, /^fd[0-9a-f]{2}:/i, /^fe[89ab][0-9a-f]:/i,
+  /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i,
+]
+
+function normalizeTargetHost(hostname) {
+  return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+}
+
+function isAllowedPort(port) {
+  return ALLOWED_TARGET_PORTS.has(Number(port))
+}
 
 function isAllowed(url) {
   try {
-    const { hostname, protocol } = new URL(url)
+    const parsed = new URL(url)
+    const { hostname, protocol } = parsed
+    const port = parsed.port ? Number(parsed.port) : (protocol === 'https:' ? 443 : 80)
     if (!['http:', 'https:'].includes(protocol)) return false
-    if (BLOCKED.some((p) => p.test(hostname))) return false
-    if (PRIVATE.some((p) => p.test(hostname))) return false
+    if (!isAllowedPort(port)) return false
+    if (BLOCKED.some((p) => p.test(normalizeTargetHost(hostname)))) return false
+    if (PRIVATE.some((p) => p.test(normalizeTargetHost(hostname)))) return false
     return true
   } catch {
     return false
@@ -98,7 +116,21 @@ function isAllowed(url) {
 
 function isAllowedHost(hostname) {
   if (!hostname) return false
-  return !BLOCKED.some((p) => p.test(hostname)) && !PRIVATE.some((p) => p.test(hostname))
+  const host = normalizeTargetHost(hostname)
+  return !BLOCKED.some((p) => p.test(host)) && !PRIVATE.some((p) => p.test(host))
+}
+
+function sanitizeFetchHeaders(headers = {}) {
+  const out = {}
+  for (const [rawKey, rawValue] of Object.entries(headers ?? {})) {
+    const key = String(rawKey).trim().toLowerCase()
+    if (!key) continue
+    if (['host', 'content-length', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding', 'cookie', 'origin', 'referer'].includes(key)) continue
+    if (key.startsWith('sec-')) continue
+    if (rawValue == null) continue
+    out[key] = Array.isArray(rawValue) ? rawValue.join(', ') : String(rawValue)
+  }
+  return out
 }
 
 async function handleFetch(request) {
@@ -113,11 +145,11 @@ async function handleFetch(request) {
     const res = await fetch(url, {
       method,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Cache-Control': 'no-cache',
-        ...headers,
+        ...sanitizeFetchHeaders(headers),
       },
       body: body ?? undefined,
       redirect: 'manual',
@@ -125,7 +157,7 @@ async function handleFetch(request) {
     })
 
     // Return redirects directly so the requester's browser follows each hop
-    // through the proxy independently — prevents redirect chains (e.g. email
+    // through the proxy independently â€” prevents redirect chains (e.g. email
     // tracking links) from consuming the entire fetch timeout in one shot.
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get('location')
@@ -193,6 +225,10 @@ async function handleMessage(msg) {
 
     case 'open_tunnel': {
       const { tunnelId, hostname, port } = msg
+      if (!isAllowedHost(hostname) || !isAllowedPort(port || 443)) {
+        sendRelayMessage({ type: 'tunnel_close', tunnelId })
+        break
+      }
       log(`  TUNNEL ${hostname}:${port}`)
       const socket = connect(port, hostname)
       socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
@@ -389,7 +425,7 @@ const proxyServer = createServer((req, res) => {
   const hostname = urlObj.hostname
   const port = parseInt(urlObj.port) || 80
 
-  if (!isAllowedHost(hostname)) {
+  if (!isAllowedHost(hostname) || !isAllowedPort(port)) {
     res.writeHead(403)
     res.end('Blocked')
     return
@@ -416,7 +452,7 @@ proxyServer.on('connect', (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
 
-  if (!isAllowedHost(hostname)) {
+  if (!isAllowedHost(hostname) || !isAllowedPort(port)) {
     clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
     clientSocket.destroy()
     return

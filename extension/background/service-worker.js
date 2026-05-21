@@ -1,11 +1,20 @@
-﻿// background/service-worker.js - PeerMesh Extension Service Worker
+// background/service-worker.js - PeerMesh Extension Service Worker
 const APP_URL = 'https://peermesh-beta.vercel.app'
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
-const PRIVATE_HOSTS = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
+const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
+const PRIVATE_HOSTS = [
+  /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
+  /^(22[4-9]|23\d)\./, /^255\.255\.255\.255$/,
+  /^::1$/, /^fc[0-9a-f]{2}:/i, /^fd[0-9a-f]{2}:/i, /^fe[89ab][0-9a-f]:/i,
+  /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i,
+]
 const FORBIDDEN_REQUEST_HEADERS = new Set(['host', 'content-length', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding'])
 const SHARING_ACTOR = 'extension'
+const MIN_CHROME_MAJOR = 148
+const CHROME_FULL_VERSION = '148.0.7778.179'
 const COUNTRY_DATA_MAP = globalThis.__PEERMESH_COUNTRY_DATA__ || {
   XX: { tz: 'UTC', lang: 'en-US', lat: 51.5074, lon: -0.1278, persona: 'desktop' },
 }
@@ -15,8 +24,8 @@ const PERSONA_POOL_MAP = globalThis.__PEERMESH_PERSONA_POOLS__ || {
       mobile: false,
       platform: 'Win32',
       platformLabel: 'Windows',
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      uaVersion: '124',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
+      uaVersion: '148',
       hardwareConcurrency: 8,
       deviceMemory: 8,
       maxTouchPoints: 0,
@@ -116,7 +125,22 @@ function normalizeCountry(country) {
 
 function getChromeFullVersion(userAgent, fallbackVersion) {
   const match = /Chrome\/([\d.]+)/.exec(userAgent || '')
-  return match?.[1] || (fallbackVersion ? `${fallbackVersion}.0.0.0` : '124.0.0.0')
+  return match?.[1] || (fallbackVersion ? getModernChromeFullVersion(fallbackVersion) : CHROME_FULL_VERSION)
+}
+
+function clampChromeMajor(version) {
+  const major = Number.parseInt(String(version || '').split('.')[0], 10)
+  return String(Number.isFinite(major) ? Math.max(major, MIN_CHROME_MAJOR) : MIN_CHROME_MAJOR)
+}
+
+function getModernChromeFullVersion(version) {
+  const major = clampChromeMajor(version)
+  return major === String(MIN_CHROME_MAJOR) ? CHROME_FULL_VERSION : `${major}.0.0.0`
+}
+
+function modernizeChromeUserAgent(userAgent, majorVersion) {
+  const fullVersion = getModernChromeFullVersion(majorVersion)
+  return String(userAgent || '').replace(/Chrome\/[\d.]+/g, `Chrome/${fullVersion}`)
 }
 
 function getDeviceModel(variant) {
@@ -149,16 +173,17 @@ function getPlatformVersion(variant) {
 }
 
 function normalizePersona(personaName, variant, variantIndex) {
-  const uaVersion = String(variant.uaVersion || (getChromeFullVersion(variant.userAgent).split('.')[0] || '124'))
-  const uaFullVersion = getChromeFullVersion(variant.userAgent, uaVersion)
+  const uaVersion = clampChromeMajor(variant.uaVersion || getChromeFullVersion(variant.userAgent).split('.')[0])
+  const uaFullVersion = getModernChromeFullVersion(uaVersion)
   const platformLabel = variant.platformLabel || (variant.mobile ? 'Android' : 'Windows')
+  const userAgent = modernizeChromeUserAgent(variant.userAgent, uaVersion)
 
   return {
     name: personaName,
     persona: personaName,
     variant: variantIndex,
     mobile: !!variant.mobile,
-    userAgent: variant.userAgent,
+    userAgent,
     uaVersion,
     uaFullVersion,
     deviceModel: getDeviceModel(variant),
@@ -222,13 +247,22 @@ function buildAcceptLanguage(profile) {
 }
 
 function buildSecChUa(profile) {
-  const version = String(profile?.uaVersion || '124')
+  const version = clampChromeMajor(profile?.uaVersion || MIN_CHROME_MAJOR)
   return `"Google Chrome";v="${version}", "Chromium";v="${version}", "Not-A.Brand";v="99"`
 }
 
 function isAllowedHost(hostname) {
-  return !BLOCKED_HOSTS.some((pattern) => pattern.test(hostname)) &&
-    !PRIVATE_HOSTS.some((pattern) => pattern.test(hostname))
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+  return !BLOCKED_HOSTS.some((pattern) => pattern.test(host)) &&
+    !PRIVATE_HOSTS.some((pattern) => pattern.test(host))
+}
+
+function getUrlPort(parsed) {
+  return parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+}
+
+function isAllowedPort(port) {
+  return ALLOWED_TARGET_PORTS.has(Number(port))
 }
 
 function getStandalonePrivateShares(baseDeviceId, deviceId) {
@@ -422,7 +456,7 @@ async function handleProviderFetch(sessionId, request) {
     if (!['http:', 'https:'].includes(parsed.protocol)) {
       return { requestId, status: 400, headers: {}, body: '', error: 'Unsupported protocol' }
     }
-    if (!isAllowedHost(parsed.hostname)) {
+    if (!isAllowedHost(parsed.hostname) || !isAllowedPort(getUrlPort(parsed))) {
       return { requestId, status: 403, headers: {}, body: '', error: 'Blocked host' }
     }
 
@@ -1303,19 +1337,24 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         currentSession = { ws, sessionId: agentSessionId, country, relayEndpoint, userId }
 
         const desktopStatus = await getDesktopHelperStatusHttp()
+        let desktopProxyReady = false
         if (desktopStatus?.available) {
           try {
-            await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
+            const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
             })
-            log('info', '[CONNECT] proxy-session sent to desktop Ã¢Å“â€œ')
+            desktopProxyReady = response.ok
+            log(desktopProxyReady ? 'info' : 'warn', `[CONNECT] proxy-session desktop status=${response.status}`)
           } catch (e) {
             log('error', `[CONNECT] proxy-session failed: ${e.message}`)
           }
+        }
+        if (desktopProxyReady) {
           setProxyDesktop(agentSessionId, country)
         } else {
+          if (desktopStatus?.available) log('warn', '[CONNECT] desktop helper unavailable for session - using relay proxy fallback')
           setProxyRelay(relayEndpoint, agentSessionId, country)
         }
         settle(resolve, undefined)
@@ -1372,6 +1411,27 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         if (!_userInitiatedDisconnect) {
           broadcastSessionEnded(msg.reason || 'Peer connection dropped').catch(() => {})
         }
+      }
+
+      if (msg.type === 'session_quality') {
+        const quality = {
+          avgMbps: Number(msg.avgMbps) || 0,
+          currentMbps: Number(msg.currentMbps) || 0,
+          transferredBytes: Number(msg.transferredBytes) || 0,
+          sampleWindowMs: Number(msg.sampleWindowMs) || 0,
+          providerKind: msg.providerKind || null,
+          providerDeviceId: msg.providerDeviceId || null,
+        }
+        if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
+          currentSession.quality = quality
+        }
+        chrome.storage.local.get(['session']).then(({ session }) => {
+          if (!session) return
+          const storedSessionId = session.id || session.sessionId
+          if (msg.sessionId && storedSessionId && storedSessionId !== msg.sessionId) return
+          chrome.storage.local.set({ session: { ...session, quality } })
+        }).catch(() => {})
+        chrome.runtime.sendMessage({ type: 'SESSION_QUALITY', sessionId: msg.sessionId, quality }).catch(() => {})
       }
     }
 

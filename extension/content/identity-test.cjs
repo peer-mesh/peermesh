@@ -29,8 +29,8 @@ const P = {
   persona:          PERSONA,
   mobile:           IS_MOB,
   userAgent: IS_MOB
-    ? 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36'
-    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    ? 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Mobile Safari/537.36'
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
   platform:         IS_MOB ? 'Linux armv8l'   : 'Win32',
   platformLabel:    IS_MOB ? 'Android'         : 'Windows',
   platformVersion:  IS_MOB ? '14.0.0'          : '10.0.0',

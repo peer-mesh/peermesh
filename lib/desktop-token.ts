@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'crypto'
 
-const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000
+const ACCESS_TOKEN_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
 export type DesktopTokenPayload = {
   sub: string

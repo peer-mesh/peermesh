@@ -124,6 +124,9 @@ create table sessions (
   relay_endpoint text,
   status         text default 'pending' check (status in ('pending','active','ended','flagged')),
   bytes_used     bigint default 0,
+  provider_avg_mbps numeric(10,3) not null default 0,
+  provider_last_mbps numeric(10,3) not null default 0,
+  connection_quality jsonb not null default '{}'::jsonb,
   signed_receipt text,                                                      -- HMAC accountability receipt
   disconnect_reason text,
   started_at     timestamptz default now(),
@@ -457,7 +460,8 @@ begin
   do update set
     last_heartbeat = now(),
     country_code   = p_country,
-    relay_url      = coalesce(p_relay_url, provider_devices.relay_url);
+    relay_url      = coalesce(p_relay_url, provider_devices.relay_url),
+    updated_at     = now();
 
   update profiles set is_sharing = true, updated_at = now() where id = p_user_id;
 end;
@@ -653,6 +657,9 @@ alter table sessions add column if not exists provider_device_id text;
 alter table sessions add column if not exists provider_base_device_id text;
 alter table sessions add column if not exists target_host text;
 alter table sessions add column if not exists target_hosts text[] default '{}';
+alter table sessions add column if not exists provider_avg_mbps numeric(10,3) not null default 0;
+alter table sessions add column if not exists provider_last_mbps numeric(10,3) not null default 0;
+alter table sessions add column if not exists connection_quality jsonb not null default '{}'::jsonb;
 alter table sessions add column if not exists signed_receipt text;
 alter table sessions add column if not exists disconnect_reason text;
 alter table sessions add column if not exists request_access_mode text not null default 'public';

@@ -896,7 +896,7 @@ function updateUI(state) {
     : (desktopSlots ?? { configured: configuredSlots, active: 0, statuses: [] })
 
   const slotStatuses = desktopSlots?.statuses ?? []
-  const privateSlotCount = desktopSlots?.privateCount ?? slotStatuses.filter(s => s.privateEnabled).length
+  const privateSlotCount = desktopSlots?.privateCount ?? slotStatuses.filter(s => s.privateActive).length
   const publicSlotCount = configuredSlots - privateSlotCount
   const privateBadge = running
     ? (privateSlotCount === configuredSlots ? ' [ALL PRIVATE]'

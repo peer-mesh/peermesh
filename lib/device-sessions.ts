@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto'
 import { issueDesktopToken, verifyDesktopToken } from '@/lib/desktop-token'
 import { adminClient } from '@/lib/supabase/admin'
 
-const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000
+const DEVICE_SESSION_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
 type DeviceSessionRow = {
   id: string
@@ -81,7 +81,7 @@ export async function createDeviceSession(input: {
   actor?: DeviceSessionActor
 }): Promise<DeviceSessionIssueResult> {
   const refreshToken = issueRefreshToken()
-  const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString()
+  const refreshExpiresAt = new Date(Date.now() + DEVICE_SESSION_TTL_MS).toISOString()
 
   const { data, error } = await adminClient
     .from('device_sessions')
@@ -141,12 +141,10 @@ export async function refreshDeviceSession(input: {
     return { ok: false, reason: 'invalid' }
   }
 
-  const nextRefreshToken = issueRefreshToken()
-  const nextRefreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString()
+  const nextRefreshExpiresAt = new Date(Date.now() + DEVICE_SESSION_TTL_MS).toISOString()
   const { error } = await adminClient
     .from('device_sessions')
     .update({
-      refresh_token_hash: hashRefreshToken(nextRefreshToken),
       refresh_expires_at: nextRefreshExpiresAt,
       last_used_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -162,7 +160,7 @@ export async function refreshDeviceSession(input: {
     userId: session.user_id,
     deviceSessionId: session.id,
     token: issueDesktopToken(session.user_id, session.id),
-    refreshToken: nextRefreshToken,
+    refreshToken: input.refreshToken,
     refreshExpiresAt: nextRefreshExpiresAt,
   }
 }

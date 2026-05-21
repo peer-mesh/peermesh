@@ -39,7 +39,14 @@ const LOCAL_PROXY_PORT = 7655
 const SLOT_CAP = 32
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
-const PRIVATE = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
+const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
+const PRIVATE = [
+  /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
+  /^(22[4-9]|23\d)\./, /^255\.255\.255\.255$/,
+  /^::1$/, /^fc[0-9a-f]{2}:/i, /^fd[0-9a-f]{2}:/i, /^fe[89ab][0-9a-f]:/i,
+  /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i,
+]
 
 const args = process.argv.slice(2)
 const limitIdx = args.indexOf('--limit')
@@ -582,11 +589,35 @@ function getStatePayload() {
   }
 }
 
-function isAllowed(hostname) {
-  const blocked = BLOCKED.some(pattern => pattern.test(hostname))
-  const private_ = PRIVATE.some(pattern => pattern.test(hostname))
+function normalizeTargetHost(hostname) {
+  return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+}
+
+function getUrlPort(parsed) {
+  return parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+}
+
+function isAllowed(hostname, port = 443) {
+  const host = normalizeTargetHost(hostname)
+  const blocked = BLOCKED.some(pattern => pattern.test(host))
+  const private_ = PRIVATE.some(pattern => pattern.test(host))
+  const badPort = !ALLOWED_TARGET_PORTS.has(Number(port))
   if (blocked || private_) clog.warn('FILTER', 'hostname blocked', { hostname, reason: blocked ? 'blocklist' : 'private' })
-  return !blocked && !private_
+  if (badPort) clog.warn('FILTER', 'port blocked', { hostname, port })
+  return !blocked && !private_ && !badPort
+}
+
+function sanitizeFetchHeaders(headers = {}) {
+  const out = {}
+  for (const [rawKey, rawValue] of Object.entries(headers ?? {})) {
+    const key = String(rawKey).trim().toLowerCase()
+    if (!key) continue
+    if (['host', 'content-length', 'connection', 'proxy-authorization', 'proxy-connection', 'transfer-encoding', 'cookie', 'origin', 'referer'].includes(key)) continue
+    if (key.startsWith('sec-')) continue
+    if (rawValue == null) continue
+    out[key] = Array.isArray(rawValue) ? rawValue.join(', ') : String(rawValue)
+  }
+  return out
 }
 
 async function persistSharingState(isSharing) {
@@ -998,17 +1029,17 @@ async function handleFetch(slot, request, limitBytes) {
   clog.info('PROXY', `${slotPrefix(slot)} fetch request`, { requestId: requestId?.slice(0, 8), method, url })
   try {
     const parsed = new URL(url)
-    if (!isAllowed(parsed.hostname)) return { requestId, status: 403, headers: {}, body: '', error: 'Blocked' }
+    if (!['http:', 'https:'].includes(parsed.protocol) || !isAllowed(parsed.hostname, getUrlPort(parsed))) return { requestId, status: 403, headers: {}, body: '', error: 'Blocked' }
     const res = await fetch(url, {
       method,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
-        ...headers,
+        ...sanitizeFetchHeaders(headers),
       },
       body: body ?? undefined,
-      redirect: 'follow',
+      redirect: 'manual',
       signal: AbortSignal.timeout(20000),
     })
     const responseBody = await res.text()
@@ -1124,7 +1155,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
 
         case 'open_tunnel': {
           const { tunnelId, hostname, port } = msg
-          if (!isAllowed(hostname)) {
+          if (!isAllowed(hostname, Number(port) || 443)) {
             sendMsg(slot, { type: 'tunnel_close', tunnelId })
             break
           }
@@ -1302,6 +1333,9 @@ const localProxyServer = http.createServer((req, res) => {
   const parsed = new URL(req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`)
   const hostname = parsed.hostname
   const port = parseInt(parsed.port) || 80
+  if (!isAllowed(hostname, port)) {
+    res.writeHead(403); res.end('Target not allowed'); return
+  }
 
   const chunks = []
   req.on('data', c => chunks.push(c))
@@ -1377,6 +1411,10 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
   const port = parseInt(portStr) || 443
   if (!_proxySession?.sessionId) {
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    clientSocket.destroy(); return
+  }
+  if (!isAllowed(hostname, port)) {
+    clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
     clientSocket.destroy(); return
   }
   const relayRaw = _proxySession.relayEndpoint
@@ -1484,7 +1522,7 @@ function printStatus(limitBytes) {
     ? `${formatBytes(totalToday)} / ${formatBytes(limitBytes)} today`
     : `${formatBytes(totalToday)} today (no limit)`
   const slotSummary = getSlotSummary()
-  const privateCount = slotSummary.filter(s => s.privateEnabled).length
+  const privateCount = slotSummary.filter(s => s.privateActive).length
   const privBadge = privateCount === configured
     ? '\uD83D\uDD12 ALL PRIVATE'
     : privateCount > 0

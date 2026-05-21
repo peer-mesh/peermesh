@@ -1,4 +1,4 @@
-﻿const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
+const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
 const { WebSocket } = require('ws')
 const path = require('path')
 const http = require('http')
@@ -976,17 +976,10 @@ function shutdownDesktopRuntime(reason = 'quit') {
     _cliWatchTimer = null
     log.info('PROCESS', '_cliWatchTimer cleared on shutdown')
   }
-  try { stopRelay() } catch (e) { log.warn('PROCESS', 'stopRelay during shutdown failed', { err: e.message }) }
+  try { suspendRelayForShutdown(reason) } catch (e) { log.warn('PROCESS', 'suspendRelayForShutdown failed', { err: e.message }) }
   try { closeAllSlotTunnels(false) } catch (e) { log.warn('PROCESS', 'closeAllSlotTunnels during shutdown failed', { err: e.message }) }
   try { controlServer.close(); log.debug('PROCESS', 'controlServer closed') } catch {}
   try { localProxyServer.close(); log.debug('PROCESS', 'localProxyServer closed') } catch {}
-  if (config.token && config.userId) {
-    fetch(`${API_BASE}/api/user/sharing`, {
-      method: 'POST',
-      headers: withSharingAuthHeaders(),
-      body: JSON.stringify({ isSharing: false }),
-    }).catch(() => {})
-  }
 }
 
 function getPublicState() {
@@ -1014,7 +1007,7 @@ function getPublicState() {
       active: activeSlotCount(),
       statuses: getSlotSummary(),
       warning: getSlotWarning(clampSlots(config.connectionSlots ?? 1)),
-      privateCount: getSlotSummary().filter(s => s.privateEnabled).length,
+      privateCount: getSlotSummary().filter(s => s.privateActive).length,
     },
     stats,
     version: DESKTOP_VERSION,
@@ -1380,13 +1373,26 @@ function runNativeHostMode() {
 // Ã¢â€â‚¬Ã¢â€â‚¬ Abuse filter Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
 const PRIVATE = [
-  /^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./,
+  /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
+  /^(22[4-9]|23\d)\./, /^255\.255\.255\.255$/,
   /^::1$/, /^fc[0-9a-f]{2}:/i, /^fd[0-9a-f]{2}:/i, /^fe[89ab][0-9a-f]:/i,
+  /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i,
 ]
 
-function isAllowed(hostname) {
-  return !BLOCKED.some(p => p.test(hostname)) && !PRIVATE.some(p => p.test(hostname))
+function normalizeTargetHost(hostname) {
+  return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+}
+
+function getUrlPort(parsed) {
+  return parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80)
+}
+
+function isAllowed(hostname, port = 443) {
+  const host = normalizeTargetHost(hostname)
+  return ALLOWED_TARGET_PORTS.has(Number(port)) && !BLOCKED.some(p => p.test(host)) && !PRIVATE.some(p => p.test(host))
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Fetch handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -1404,8 +1410,8 @@ async function handleFetch(slot, request) {
   log.info('PROXY', `${slotPrefix(slot)} fetch request`, { requestId: requestId?.slice(0,8), method, url })
   try {
     const parsed = new URL(url)
-    if (!isAllowed(parsed.hostname)) {
-      log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, requestId: requestId?.slice(0,8), slot: slot.index })
+    if (!['http:', 'https:'].includes(parsed.protocol) || !isAllowed(parsed.hostname, getUrlPort(parsed))) {
+      log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, port: getUrlPort(parsed), requestId: requestId?.slice(0,8), slot: slot.index })
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
     // HTTP-only requester traffic must not depend on a local proxy session.
@@ -1424,7 +1430,7 @@ async function handleFetch(slot, request) {
     const res = await fetch(url, {
       method,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Cache-Control': 'no-cache',
@@ -1651,6 +1657,11 @@ function connectSlot(slot) {
       } else if (msg.type === 'open_tunnel') {
         slot.requestsHandled++
         syncAggregateState()
+        if (!isAllowed(msg.hostname, Number(msg.port) || 443)) {
+          log.warn('TUNNEL', 'blocked tunnel target', { hostname: msg.hostname, port: msg.port, slot: slot.index })
+          sendRelayMessage(slot, { type: 'tunnel_close', tunnelId: msg.tunnelId })
+          return
+        }
         const socket = net.connect(msg.port, msg.hostname)
         socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
         const tunnel = { socket, closed: false, sessionId: msg.sessionId ?? null, slotIndex: slot.index }
@@ -1748,6 +1759,22 @@ function restartRelayForConfigChange(reason, notificationBody = null) {
   return true
 }
 
+function suspendRelayForShutdown(reason = 'shutdown') {
+  log.info('RELAY', 'suspending relay for process shutdown', { reason, shareEnabled: config.shareEnabled })
+  _userStopped = true
+  for (const slot of slotStates) {
+    if (slot.reconnectTimer) { clearTimeout(slot.reconnectTimer); slot.reconnectTimer = null }
+    if (slot.heartbeatTimer) { clearInterval(slot.heartbeatTimer); slot.heartbeatTimer = null }
+    if (slot.ws) { slot.ws.removeAllListeners('close'); slot.ws.close(1000); slot.ws = null }
+    closeAllTunnels(slot, false)
+    slot.running = false
+    slot.connectedAt = null
+  }
+  syncAggregateState()
+  logState('post-suspend')
+  updateTray()
+}
+
 function stopRelay() {
   log.info('RELAY', 'stopRelay called')
   logState('pre-stop')
@@ -1795,6 +1822,10 @@ const localProxyServer = http.createServer((req, res) => {
   const hostname = parsed.hostname
   const port = parseInt(parsed.port) || 80
   log.info('LOCAL-PROXY', `HTTP ${req.method}`, { target: `${hostname}:${port}`, url: parsed.href.slice(0, 80) })
+  if (!isAllowed(hostname, port)) {
+    log.warn('LOCAL-PROXY', 'HTTP rejected - blocked target', { target: `${hostname}:${port}` })
+    res.writeHead(403); res.end('Target not allowed'); return
+  }
 
   const chunks = []
   req.on('data', c => chunks.push(c))
@@ -1893,6 +1924,11 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
   if (!proxySession?.sessionId) {
     log.warn('LOCAL-PROXY', 'CONNECT rejected Ã¢â‚¬â€ no proxySession', { target: `${hostname}:${port}` })
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    clientSocket.destroy(); return
+  }
+  if (!isAllowed(hostname, port)) {
+    log.warn('LOCAL-PROXY', 'CONNECT rejected - blocked target', { target: `${hostname}:${port}` })
+    clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
     clientSocket.destroy(); return
   }
 
@@ -2174,7 +2210,7 @@ function updateTray() {
   const slotWarning = getSlotWarning(configuredSlots)
   const starting = !!config.shareEnabled && !running && !peerSharing
   const slotSummary = getSlotSummary()
-  const privateCount = slotSummary.filter(s => s.privateEnabled).length
+  const privateCount = slotSummary.filter(s => s.privateActive).length
   const publicCount = configuredSlots - privateCount
   const privateBadge = running
     ? (privateCount === configuredSlots ? ' [ALL PRIVATE]'
@@ -2279,7 +2315,8 @@ function showWindow() {
   settingsWindow.on('close', (e) => {
     if (_quitRequested) return
     e.preventDefault()
-    setTimeout(() => requestAppQuit('window-close'), 0)
+    settingsWindow.hide()
+    updateTray()
   })
   settingsWindow.on('closed', () => {
     settingsWindow = null
@@ -2779,7 +2816,7 @@ async function bootstrapDesktopApp() {
           }
         } catch (e) { log.debug('PORT', 'no CLI on PEER_PORT at startup', { err: e.message }) }
 
-        const shouldAutoShare = !cliAlreadySharing && !!(config.token && config.userId && config.autoShareOnLaunch && config.hasAcceptedProviderTerms)
+        const shouldAutoShare = !cliAlreadySharing && !!(config.token && config.userId && (config.autoShareOnLaunch || config.shareEnabled) && config.hasAcceptedProviderTerms)
         log.info('PORT', 'startup check complete', {
           cliAlreadySharing,
           hasToken: !!config.token,

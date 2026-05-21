@@ -10,6 +10,27 @@ const peers = new Map()
 const sessions = new Map()
 const proxyClients = new Map()
 
+const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
+const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const PRIVATE_HOSTS = [
+  /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
+  /^(22[4-9]|23\d)\./, /^255\.255\.255\.255$/,
+  /^::1$/, /^fc[0-9a-f]{2}:/i, /^fd[0-9a-f]{2}:/i, /^fe[89ab][0-9a-f]:/i,
+  /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i,
+]
+
+function normalizeTargetHost(hostname) {
+  return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+}
+
+function isAllowedTarget(hostname, port) {
+  const host = normalizeTargetHost(hostname)
+  return ALLOWED_TARGET_PORTS.has(Number(port)) &&
+    !BLOCKED_HOSTS.some((pattern) => pattern.test(host)) &&
+    !PRIVATE_HOSTS.some((pattern) => pattern.test(host))
+}
+
 
 // peerAffinity: requesterUserId → Map(country → providerUserId)
 // In-memory cache — seeded from DB via request_session msg, updated on session end.
@@ -219,6 +240,12 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     startTime: Date.now(),
     bytesRequester: 0,
     bytesProvider: 0,
+    providerAvgMbps: 0,
+    providerLastMbps: 0,
+    connectionQuality: {},
+    lastQualitySentAt: 0,
+    lastQualityBytes: 0,
+    lastQualityTime: Date.now(),
     dbSessionId: dbSessionId ?? null,
     relayEndpoint: requesterWs.relayUrl ?? null,
     targetHost: null,
@@ -271,6 +298,9 @@ function syncSessionMetadata(session, reason = 'update') {
     targetHost:     session.targetHost ?? null,
     targetHosts:    session.targetHosts ? [...session.targetHosts] : [],
     disconnectReason: session.disconnectReason ?? null,
+    providerAvgMbps: session.providerAvgMbps ?? null,
+    providerLastMbps: session.providerLastMbps ?? null,
+    connectionQuality: session.connectionQuality ?? null,
   }
 
   fetch(`${API_BASE}/api/session/end`, {
@@ -308,6 +338,54 @@ function recordSessionHost(session, hostname, reason = 'target_host') {
 
   if (hadHost) return
   syncSessionMetadata(session, reason)
+}
+
+function buildSessionQuality(session, now = Date.now()) {
+  const totalBytes = Math.max(0, Number(session.bytesProvider) || 0)
+  const elapsedMs = Math.max(1, now - (session.startTime || now))
+  const previousTime = session.lastQualityTime || session.startTime || now
+  const previousBytes = Math.max(0, Number(session.lastQualityBytes) || 0)
+  const sampleWindowMs = Math.max(1, now - previousTime)
+  const sampleBytes = Math.max(0, totalBytes - previousBytes)
+  const avgMbps = (totalBytes * 8) / elapsedMs / 1000
+  const currentMbps = (sampleBytes * 8) / sampleWindowMs / 1000
+  return {
+    avgMbps: Number(avgMbps.toFixed(3)),
+    currentMbps: Number(currentMbps.toFixed(3)),
+    transferredBytes: totalBytes,
+    sampleWindowMs,
+    measuredAt: new Date(now).toISOString(),
+    providerKind: session.providerKind ?? null,
+    providerDeviceId: session.providerDeviceId ?? null,
+    country: session.country ?? null,
+  }
+}
+
+function sendSessionQuality(session, reason = 'traffic', force = false) {
+  if (!session) return
+  const now = Date.now()
+  if (!force && now - (session.lastQualitySentAt || 0) < 3000) return
+  const quality = buildSessionQuality(session, now)
+  session.providerAvgMbps = quality.avgMbps
+  session.providerLastMbps = quality.currentMbps
+  session.connectionQuality = quality
+  session.lastQualitySentAt = now
+  session.lastQualityBytes = quality.transferredBytes
+  session.lastQualityTime = now
+  const requester = peers.get(session.requesterId)
+  if (!requester || requester.readyState !== WebSocket.OPEN) return
+  send(requester, {
+    type: 'session_quality',
+    sessionId: requester.sessionId,
+    reason,
+    avgMbps: quality.avgMbps,
+    currentMbps: quality.currentMbps,
+    transferredBytes: quality.transferredBytes,
+    sampleWindowMs: quality.sampleWindowMs,
+    providerKind: quality.providerKind,
+    providerDeviceId: quality.providerDeviceId,
+    country: quality.country,
+  })
 }
 
 // ── Auto-reconnect — called when provider drops while requester is still live ─
@@ -481,6 +559,12 @@ server.on('connect', (req, clientSocket, head) => {
     return
   }
 
+  if (!isAllowedTarget(hostname, port)) {
+    clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+    clientSocket.destroy()
+    return
+  }
+
   // Record hostname
   if (hostname) {
     recordSessionHost(session, hostname, 'target_host')
@@ -550,6 +634,10 @@ proxyWss.on('connection', (ws, req) => {
       if (match) {
         const [hostname, portStr] = match[1].split(':')
         const port = parseInt(portStr) || 443
+        if (!isAllowedTarget(hostname, port)) {
+          ws.close(1008, 'Target not allowed')
+          return
+        }
         tunnelOpen = true
         send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
         const sess = sessions.get(sessionId)
@@ -805,6 +893,7 @@ async function handleMessage(ws, msg) {
       agentSession.relayEndpoint = requester?.relayUrl ?? agentSession.relayEndpoint ?? null
       agentSession.disconnectReason = null
       syncSessionMetadata(agentSession, 'provider_assign')
+      sendSessionQuality(agentSession, 'provider_assign', true)
       break
     }
 
@@ -835,6 +924,7 @@ async function handleMessage(ws, msg) {
       respSession.bytesRequester = (respSession.bytesRequester ?? 0) + respBytes
       respSession.bytesProvider = (respSession.bytesProvider ?? 0) + respBytes
       send(requester, { type: 'proxy_response', sessionId: msg.sessionId, response: msg.response })
+      sendSessionQuality(respSession, 'proxy_response')
       break
     }
 
@@ -864,6 +954,7 @@ async function handleMessage(ws, msg) {
         tunnelSession.lastActivity = Date.now()
         tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + chunk.length
         tunnelSession.bytesRequester = (tunnelSession.bytesRequester ?? 0) + chunk.length
+        sendSessionQuality(tunnelSession, 'tunnel_data')
       }
       if (proxyClient.readyState !== undefined) {
         // WS-based client
@@ -946,6 +1037,9 @@ function reportSessionEnd(session, sessionId) {
       providerBaseDeviceId: session.providerBaseDeviceId ?? null,
       relayEndpoint:   session.relayEndpoint ?? null,
       disconnectReason: session.disconnectReason ?? null,
+      providerAvgMbps: session.providerAvgMbps ?? null,
+      providerLastMbps: session.providerLastMbps ?? null,
+      connectionQuality: session.connectionQuality ?? null,
     }),
   })
     .then(async (r) => {
@@ -984,6 +1078,10 @@ function cleanupSession(ws) {
     log('AFFINITY', `SAVED requester=${session.requesterUserId.slice(0,8)} → provider=${session.providerUserId.slice(0,8)} country=${session.country}`)
   }
 
+  if (!session.disconnectReason) {
+    session.disconnectReason = ws.role === 'provider' ? 'provider_disconnected' : 'peer_disconnected'
+  }
+
   reportSessionEnd(session, sessionId)
   sessions.delete(sessionId)
   log(ws.peerId.slice(0,8), `SESSION_CLEANED id=${sessionId.slice(0,8)} bytes=${session.bytesRequester ?? 0}`)
@@ -993,11 +1091,9 @@ function cleanupSession(ws) {
 
   // Auto-reconnect — only when provider dropped and requester is still connected
   if (ws.role === 'provider' && other.readyState === WebSocket.OPEN) {
-    session.disconnectReason = 'provider_disconnected'
     log(other.peerId.slice(0,8), `PROVIDER_DROPPED — attempting auto-reconnect country=${session.country}`)
     attemptReconnect(other, session)
   } else {
-    session.disconnectReason = 'peer_disconnected'
     send(other, { type: 'session_ended', reason: 'peer_disconnected' })
   }
 }

@@ -33,12 +33,18 @@ export async function PATCH(req: Request) {
     targetHost,
     targetHosts,
     disconnectReason,
+    providerAvgMbps,
+    providerLastMbps,
+    connectionQuality,
   } = await req.json().catch(() => ({}))
 
   const resolvedId = dbSessionId ?? sessionId ?? null
   const hasPatchField = !!providerUserId || !!providerKind || !!providerDeviceId || !!providerBaseDeviceId || !!relayEndpoint || !!targetHost
     || (Array.isArray(targetHosts) && targetHosts.length > 0)
     || !!disconnectReason
+    || typeof providerAvgMbps === 'number'
+    || typeof providerLastMbps === 'number'
+    || !!connectionQuality
     || typeof status === 'string'
 
   if (!resolvedId || !hasPatchField) {
@@ -57,6 +63,9 @@ export async function PATCH(req: Request) {
   if (targetHost) patch.target_host = targetHost
   if (Array.isArray(targetHosts) && targetHosts.length > 0) patch.target_hosts = targetHosts
   if (disconnectReason) patch.disconnect_reason = disconnectReason
+  if (typeof providerAvgMbps === 'number') patch.provider_avg_mbps = providerAvgMbps
+  if (typeof providerLastMbps === 'number') patch.provider_last_mbps = providerLastMbps
+  if (connectionQuality && typeof connectionQuality === 'object') patch.connection_quality = connectionQuality
   if (typeof status === 'string') patch.status = status
 
   const { error, count } = await adminClient
@@ -104,6 +113,9 @@ export async function POST(req: Request) {
     providerBaseDeviceId,
     relayEndpoint,
     disconnectReason,
+    providerAvgMbps,
+    providerLastMbps,
+    connectionQuality,
   } = await req.json().catch(() => ({}))
 
   if (!sessionId) return NextResponse.json({ error: 'sessionId is required' }, { status: 400 })
@@ -111,7 +123,7 @@ export async function POST(req: Request) {
   // Load current session to fill in any fields the caller did not provide.
   const { data: existing, error: lookupError } = await adminClient
     .from('sessions')
-    .select('provider_id, provider_kind, provider_device_id, provider_base_device_id, relay_endpoint, target_country, target_host, target_hosts, user_id, status, bytes_used, disconnect_reason, request_auth_kind, api_key_id, request_id, pricing_tier, requested_rpm, requested_period_hours, requested_session_mode, started_at')
+    .select('provider_id, provider_kind, provider_device_id, provider_base_device_id, relay_endpoint, target_country, target_host, target_hosts, user_id, status, bytes_used, disconnect_reason, provider_avg_mbps, provider_last_mbps, connection_quality, request_auth_kind, api_key_id, request_id, pricing_tier, requested_rpm, requested_period_hours, requested_session_mode, started_at')
     .eq('id', sessionId)
     .maybeSingle()
 
@@ -136,6 +148,11 @@ export async function POST(req: Request) {
   const finalRelayEndpoint = relayEndpoint ?? existing?.relay_endpoint ?? null
   const finalTargetHost = targetHost ?? existing?.target_host ?? null
   const finalDisconnectReason = disconnectReason ?? existing?.disconnect_reason ?? null
+  const finalProviderAvgMbps = typeof providerAvgMbps === 'number' ? providerAvgMbps : existing?.provider_avg_mbps ?? 0
+  const finalProviderLastMbps = typeof providerLastMbps === 'number' ? providerLastMbps : existing?.provider_last_mbps ?? 0
+  const finalConnectionQuality = connectionQuality && typeof connectionQuality === 'object'
+    ? connectionQuality
+    : existing?.connection_quality ?? {}
   const relayObservedBytes = Math.max(0, Number(existing?.bytes_used) || 0)
   const clientReportedBytes = Math.max(0, Number(bytesUsed) || 0)
   const finalBytes = isRelay
@@ -164,6 +181,9 @@ export async function POST(req: Request) {
         target_host: finalTargetHost,
         target_hosts: mergedHosts,
         disconnect_reason: finalDisconnectReason,
+        provider_avg_mbps: finalProviderAvgMbps,
+        provider_last_mbps: finalProviderLastMbps,
+        connection_quality: finalConnectionQuality,
       })
       .eq('id', sessionId)
       .in('status', ['pending', 'active', 'ended'])
@@ -206,6 +226,9 @@ export async function POST(req: Request) {
       target_host: finalTargetHost,
       target_hosts: mergedHosts,
       disconnect_reason: finalDisconnectReason,
+      provider_avg_mbps: finalProviderAvgMbps,
+      provider_last_mbps: finalProviderLastMbps,
+      connection_quality: finalConnectionQuality,
     }, { count: 'exact' })
     .eq('id', sessionId)
     .in('status', ['pending', 'active'])
@@ -229,6 +252,9 @@ export async function POST(req: Request) {
         target_hosts: mergedHosts,
         bytes_used: finalBytes,
         disconnect_reason: finalDisconnectReason,
+        provider_avg_mbps: finalProviderAvgMbps,
+        provider_last_mbps: finalProviderLastMbps,
+        connection_quality: finalConnectionQuality,
       })
       .eq('id', sessionId)
   }

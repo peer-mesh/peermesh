@@ -1,20 +1,16 @@
 import { NextResponse } from 'next/server'
+import { isRequestAllowed } from '@/lib/traffic-filter'
 
-// Blocked to prevent SSRF
-const BLOCKED_HOSTS = [
-  /^localhost$/i,
-  /^127\./,
-  /^10\./,
-  /^192\.168\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-]
+function getPort(url: URL): number {
+  return url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80)
+}
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   let target = searchParams.get('url')
   if (!target) return new NextResponse('Missing url', { status: 400 })
 
-  // Decode HTML entities in URL (e.g. &amp; → &)
+  // Decode HTML entities in URL (e.g. &amp; â†’ &)
   target = target.replace(/&amp;/g, '&')
 
   // Fix double-encoding: unwrap nested proxy-asset URLs
@@ -35,19 +31,19 @@ export async function GET(req: Request) {
       return new NextResponse('Protocol not allowed', { status: 403 })
     }
 
-    if (BLOCKED_HOSTS.some(p => p.test(url.hostname))) {
+    if (!isRequestAllowed(url.hostname, getPort(url))) {
       return new NextResponse('Host not allowed', { status: 403 })
     }
 
     const res = await fetch(target, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.5',
         'Referer': url.origin,
         'Origin': url.origin,
       },
-      redirect: 'follow',
+      redirect: 'manual',
     })
 
     const contentType = res.headers.get('content-type') ?? 'application/octet-stream'

@@ -7,6 +7,8 @@ const PROFILE_ATTR = 'data-peermesh-profile'
 const PROFILE_EVENT = 'peermesh:profile'
 const EARLY_IDENTITY_ATTR = 'data-peermesh-identity-loader'
 const EARLY_IDENTITY_HOSTS = ['browserleaks.com', 'abrahamjuliot.github.io', 'creepjs.vercel.app']
+const MIN_CHROME_MAJOR = 148
+const CHROME_FULL_VERSION = '148.0.7778.179'
 
 const COUNTRY_DATA_MAP = globalThis.__PEERMESH_COUNTRY_DATA__ || {
   XX: { tz: 'UTC', lang: 'en-US', lat: 51.5074, lon: -0.1278, persona: 'desktop' },
@@ -18,8 +20,8 @@ const PERSONA_POOL_MAP = globalThis.__PEERMESH_PERSONA_POOLS__ || {
       mobile: false,
       platform: 'Win32',
       platformLabel: 'Windows',
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      uaVersion: '124',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
+      uaVersion: '148',
       screen: { w: 1920, h: 1080, aw: 1920, ah: 1040, iw: 1920, ih: 947 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
@@ -71,7 +73,22 @@ function normalizeCountry(country) {
 
 function getChromeFullVersion(userAgent, fallbackVersion) {
   const match = /Chrome\/([\d.]+)/.exec(userAgent || '')
-  return match?.[1] || (fallbackVersion ? `${fallbackVersion}.0.0.0` : '124.0.0.0')
+  return match?.[1] || (fallbackVersion ? getModernChromeFullVersion(fallbackVersion) : CHROME_FULL_VERSION)
+}
+
+function clampChromeMajor(version) {
+  const major = Number.parseInt(String(version || '').split('.')[0], 10)
+  return String(Number.isFinite(major) ? Math.max(major, MIN_CHROME_MAJOR) : MIN_CHROME_MAJOR)
+}
+
+function getModernChromeFullVersion(version) {
+  const major = clampChromeMajor(version)
+  return major === String(MIN_CHROME_MAJOR) ? CHROME_FULL_VERSION : `${major}.0.0.0`
+}
+
+function modernizeChromeUserAgent(userAgent, majorVersion) {
+  const fullVersion = getModernChromeFullVersion(majorVersion)
+  return String(userAgent || '').replace(/Chrome\/[\d.]+/g, `Chrome/${fullVersion}`)
 }
 
 function getDeviceModel(variant) {
@@ -115,16 +132,17 @@ function normalizeScreen(screen = {}) {
 }
 
 function normalizePersona(personaName, variant, variantIndex) {
-  const uaVersion = String(variant.uaVersion || (getChromeFullVersion(variant.userAgent).split('.')[0] || '124'))
-  const uaFullVersion = getChromeFullVersion(variant.userAgent, uaVersion)
+  const uaVersion = clampChromeMajor(variant.uaVersion || getChromeFullVersion(variant.userAgent).split('.')[0])
+  const uaFullVersion = getModernChromeFullVersion(uaVersion)
   const platformLabel = variant.platformLabel || (variant.mobile ? 'Android' : 'Windows')
+  const userAgent = modernizeChromeUserAgent(variant.userAgent, uaVersion)
 
   return {
     name: personaName,
     persona: personaName,
     variant: variantIndex,
     mobile: !!variant.mobile,
-    userAgent: variant.userAgent,
+    userAgent,
     uaVersion,
     uaFullVersion,
     deviceModel: getDeviceModel(variant),
@@ -156,7 +174,7 @@ function selectPersonaVariant(country, personaName, pool, session) {
   }
 
   // Seed from stable identity: userId + country only.
-  // Session ID, relay endpoint, and timestamp are intentionally excluded —
+  // Session ID, relay endpoint, and timestamp are intentionally excluded â€”
   // they change every connection. userId + country is permanent, so the same
   // user always gets the same device fingerprint for a given country across
   // disconnects, reconnects, and provider changes.
@@ -209,14 +227,14 @@ function withDocumentRoot(callback) {
   document.addEventListener('DOMContentLoaded', retry)
 }
 
-// Pattern-based frame skip — covers Cloudflare, hCaptcha, reCAPTCHA, Turnstile,
+// Pattern-based frame skip â€” covers Cloudflare, hCaptcha, reCAPTCHA, Turnstile,
 // DataDome, PerimeterX, Akamai, Stripe, PayPal, and any other challenge/payment
 // iframe that uses strict CSP / TrustedTypes / sandboxing.
 // Rules (all must match to skip):
 //   1. We are inside a cross-origin iframe (window !== window.top)
 //   2. The frame's hostname matches a known challenge/payment pattern
-// Rule 1 alone is not enough — legitimate proxy iframes also need spoofing.
-// Rule 2 alone is not enough — some challenge providers share domains with real pages.
+// Rule 1 alone is not enough â€” legitimate proxy iframes also need spoofing.
+// Rule 2 alone is not enough â€” some challenge providers share domains with real pages.
 const CHALLENGE_HOSTNAME_PATTERNS = [
   // Cloudflare
   /^challenges\.cloudflare\.com$/,
@@ -225,7 +243,7 @@ const CHALLENGE_HOSTNAME_PATTERNS = [
   /^(?:newassets|assets)\.hcaptcha\.com$/,
   /^hcaptcha\.com$/,
   // Google reCAPTCHA
-  /^(?:www\.)?google\.com$/, // only when in iframe — rule 1 guards this
+  /^(?:www\.)?google\.com$/, // only when in iframe â€” rule 1 guards this
   /^recaptcha\.google\.com$/,
   /^[\w-]+\.recaptcha\.net$/,
   // DataDome
@@ -253,9 +271,9 @@ const CHALLENGE_HOSTNAME_PATTERNS = [
 
 function shouldSkipFrame() {
   try {
-    if (window === window.top) return false // top-level page — always spoof
+    if (window === window.top) return false // top-level page â€” always spoof
   } catch {
-    // Cross-origin top access throws — we are in a sandboxed cross-origin iframe
+    // Cross-origin top access throws â€” we are in a sandboxed cross-origin iframe
     // Fall through to hostname check
   }
 

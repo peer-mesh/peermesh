@@ -1,27 +1,53 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { checkRateLimit } from '@/lib/traffic-filter'
+import { checkRateLimit, isRequestAllowed } from '@/lib/traffic-filter'
 import { adminClient } from '@/lib/supabase/admin'
 import { getConnectionAccessRequirement } from '@/lib/account-access'
 
-const BLOCKED_PATTERNS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
-const BLOCKED_HOSTS = [/^localhost$/i, /^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./]
-
 const FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.5',
   'Cache-Control': 'no-cache',
 }
 
-function isBlocked(hostname: string): boolean {
-  return BLOCKED_PATTERNS.some(p => p.test(hostname)) || BLOCKED_HOSTS.some(p => p.test(hostname))
+const FORBIDDEN_REQUEST_HEADERS = new Set([
+  'host',
+  'content-length',
+  'connection',
+  'proxy-authorization',
+  'proxy-connection',
+  'transfer-encoding',
+  'cookie',
+  'origin',
+  'referer',
+])
+
+function getPort(url: URL): number {
+  return url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80)
+}
+
+function sanitizeRequestHeaders(headers: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [rawKey, rawValue] of Object.entries(headers ?? {})) {
+    const key = rawKey.trim().toLowerCase()
+    if (!key || FORBIDDEN_REQUEST_HEADERS.has(key) || key.startsWith('sec-')) continue
+    if (rawValue == null) continue
+    out[key] = Array.isArray(rawValue) ? rawValue.join(', ') : String(rawValue)
+  }
+  return out
+}
+
+function validateTarget(url: URL): boolean {
+  return ['http:', 'https:'].includes(url.protocol) && isRequestAllowed(url.hostname, getPort(url))
 }
 
 // Fetch a sub-resource and return its text, or null on failure
 async function fetchSubResource(url: string): Promise<string | null> {
   try {
-    const res = await fetch(url, { headers: FETCH_HEADERS, redirect: 'follow' })
+    const parsed = new URL(url)
+    if (!validateTarget(parsed)) return null
+    const res = await fetch(url, { headers: FETCH_HEADERS, redirect: 'manual' })
     if (!res.ok) return null
     return await res.text()
   } catch {
@@ -135,16 +161,16 @@ export async function POST(req: Request) {
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     return NextResponse.json({ error: 'Protocol not allowed' }, { status: 403 })
   }
-  if (isBlocked(parsed.hostname)) {
+  if (!isRequestAllowed(parsed.hostname, getPort(parsed))) {
     return NextResponse.json({ error: 'Host not allowed' }, { status: 403 })
   }
 
   try {
     const res = await fetch(url, {
       method,
-      headers: { ...FETCH_HEADERS, ...reqHeaders },
+      headers: { ...FETCH_HEADERS, ...sanitizeRequestHeaders(reqHeaders) },
       body: body ?? undefined,
-      redirect: 'follow',
+      redirect: 'manual',
     })
 
     let responseBody = await res.text()
