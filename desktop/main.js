@@ -166,6 +166,7 @@ let config = {
   preventSleepWhileSharing: false,
   sharingSchedule: getDefaultSharingSchedule(),
   scheduleWakeEnabled: false,
+  allowOnDemandWake: false,
   scheduleWakeStatus: null,
   todaySharedBytes: 0,
   todaySharedBytesDate: null,
@@ -844,13 +845,17 @@ function applyUptimeScheduleData(raw, { source = 'remote' } = {}) {
   const nextSchedule = normalizeRemoteSharingSchedule(raw)
   const wakeEnabled = raw.wakeEnabled ?? raw.wake_enabled
   const nextWakeEnabled = typeof wakeEnabled === 'boolean' ? wakeEnabled : !!config.scheduleWakeEnabled
+  const allowOnDemandWake = raw.allowOnDemandWake ?? raw.allow_on_demand_wake
+  const nextAllowOnDemandWake = typeof allowOnDemandWake === 'boolean' ? allowOnDemandWake : !!config.allowOnDemandWake
   const scheduleChanged = JSON.stringify(previousSchedule) !== JSON.stringify(nextSchedule)
   const wakeChanged = !!config.scheduleWakeEnabled !== !!nextWakeEnabled
+  const onDemandChanged = !!config.allowOnDemandWake !== !!nextAllowOnDemandWake
 
   config.sharingSchedule = nextSchedule
   config.scheduleWakeEnabled = !!nextWakeEnabled
+  config.allowOnDemandWake = !!nextAllowOnDemandWake
   config.uptimeScheduleSync = preferLatestSyncRow(currentSync, incomingSync)
-  if (scheduleChanged || wakeChanged) {
+  if (scheduleChanged || wakeChanged || onDemandChanged) {
     log.info('SCHEDULE', 'uptime schedule synced', {
       source,
       enabled: nextSchedule.enabled,
@@ -858,9 +863,10 @@ function applyUptimeScheduleData(raw, { source = 'remote' } = {}) {
       endTime: nextSchedule.endTime,
       timezone: nextSchedule.timezone,
       wakeEnabled: !!config.scheduleWakeEnabled,
+      allowOnDemandWake: !!config.allowOnDemandWake,
     })
   }
-  return scheduleChanged || wakeChanged
+  return scheduleChanged || wakeChanged || onDemandChanged
 }
 
 function quotePowerShellString(value) {
@@ -1126,6 +1132,7 @@ async function syncSharingScheduleToServer(reason = 'sync') {
     sharingSchedule: {
       ...schedule,
       wakeEnabled: !!config.scheduleWakeEnabled,
+      allowOnDemandWake: !!config.allowOnDemandWake,
       shutdownAfterWindow: false,
     },
   }
@@ -1188,6 +1195,14 @@ async function setScheduleWakeEnabledPreference(enabled) {
     return { success: false, error: status.error, osWake: getScheduleWakePublicState(), state: getPublicState() }
   }
   return { success: true, osWake: getScheduleWakePublicState(), state: getPublicState() }
+}
+
+async function setOnDemandWakeEnabledPreference(enabled) {
+  config.allowOnDemandWake = !!enabled
+  saveConfig()
+  void syncSharingScheduleToServer('on_demand_wake_preference')
+  updateTray()
+  return { success: true, allowOnDemandWake: !!config.allowOnDemandWake, state: getPublicState() }
 }
 
 function shouldScheduleStartSharing() {
@@ -1521,6 +1536,7 @@ function loadConfig() {
   config.preventSleepWhileSharing = typeof config.preventSleepWhileSharing === 'boolean' ? config.preventSleepWhileSharing : false
   config.sharingSchedule = normalizeSharingSchedule(config.sharingSchedule)
   config.scheduleWakeEnabled = typeof config.scheduleWakeEnabled === 'boolean' ? config.scheduleWakeEnabled : false
+  config.allowOnDemandWake = typeof config.allowOnDemandWake === 'boolean' ? config.allowOnDemandWake : false
   config.scheduleWakeStatus = config.scheduleWakeStatus ?? null
   config.privateShareActive = !!config.privateShareActive
   config.privateShare = config.privateShare ?? null
@@ -3194,6 +3210,8 @@ ipcMain.handle('set-prevent-sleep-while-sharing', async (_, enabled) => {
 ipcMain.handle('set-sharing-schedule', async (_, schedule) => setSharingSchedulePreference(schedule))
 
 ipcMain.handle('set-schedule-wake-enabled', async (_, enabled) => setScheduleWakeEnabledPreference(enabled))
+
+ipcMain.handle('set-on-demand-wake-enabled', async (_, enabled) => setOnDemandWakeEnabledPreference(enabled))
 
 ipcMain.handle('set-connection-slots', async (_, slots) => {
   return applyConnectionSlots(slots, { syncPeer: true })

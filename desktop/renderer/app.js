@@ -6,6 +6,7 @@ const startupBusy = {
   preventSleepWhileSharing: false,
   sharingSchedule: false,
   scheduleWakeEnabled: false,
+  onDemandWake: false,
 }
 
 let devicePollInterval = null
@@ -563,11 +564,13 @@ function renderStartupPreferences(state) {
   const preventSleepToggle = document.getElementById('prevent-sleep-toggle')
   const scheduleToggle = document.getElementById('sharing-schedule-toggle')
   const scheduleWakeToggle = document.getElementById('schedule-wake-toggle')
+  const onDemandWakeToggle = document.getElementById('on-demand-wake-toggle')
   const launchDesc = document.getElementById('launch-startup-desc')
   const autoShareDesc = document.getElementById('auto-share-desc')
   const preventSleepDesc = document.getElementById('prevent-sleep-desc')
   const scheduleDesc = document.getElementById('sharing-schedule-desc')
   const scheduleWakeDesc = document.getElementById('schedule-wake-desc')
+  const onDemandWakeDesc = document.getElementById('on-demand-wake-desc')
   const scheduleControls = document.getElementById('sharing-schedule-controls')
   const scheduleStart = document.getElementById('sharing-schedule-start')
   const scheduleEnd = document.getElementById('sharing-schedule-end')
@@ -604,6 +607,11 @@ function renderStartupPreferences(state) {
     on: !!osWake.enabled,
     loading: startupBusy.scheduleWakeEnabled,
     disabled: !signedIn || !schedule.enabled || !osWake.supported || startupBusy.scheduleWakeEnabled,
+  })
+  setToggleVisual(onDemandWakeToggle, {
+    on: !!config.allowOnDemandWake,
+    loading: startupBusy.onDemandWake,
+    disabled: !signedIn || startupBusy.onDemandWake,
   })
 
   if (scheduleControls) scheduleControls.style.display = schedule.enabled ? 'block' : 'none'
@@ -675,6 +683,16 @@ function renderStartupPreferences(state) {
       scheduleWakeDesc.textContent = `PeerMesh registered an OS wake event for this schedule.${nextWake}`
     } else {
       scheduleWakeDesc.textContent = 'Optional: create an OS wake event for the schedule start time.'
+    }
+  }
+
+  if (onDemandWakeDesc) {
+    if (!signedIn) {
+      onDemandWakeDesc.textContent = 'Sign in before allowing requester wake calls.'
+    } else if (config.allowOnDemandWake) {
+      onDemandWakeDesc.textContent = 'Known private-share requesters can queue a wake/start request when this provider is offline.'
+    } else {
+      onDemandWakeDesc.textContent = 'Off by default. Private requesters cannot queue wake/start requests for this provider.'
     }
   }
 
@@ -1226,6 +1244,22 @@ async function updateScheduleWake(enabled) {
   }
 }
 
+async function updateOnDemandWake(enabled) {
+  startupBusy.onDemandWake = true
+  renderStartupPreferences(window.__lastPeerMeshState || null)
+  clearMainError()
+  try {
+    const result = await invoke('setOnDemandWakeEnabled', enabled)
+    if (!result?.success) throw new Error(result?.error || 'Could not update on-demand wake setting')
+    await pollState()
+  } catch (error) {
+    showMainError(error?.message || 'Could not update on-demand wake setting')
+  } finally {
+    startupBusy.onDemandWake = false
+    renderStartupPreferences(window.__lastPeerMeshState || null)
+  }
+}
+
 document.getElementById('btn-open-browser').addEventListener('click', () => {
   stopDevicePoll()
   deviceFlowActive = false
@@ -1309,6 +1343,11 @@ document.getElementById('sharing-schedule-save').addEventListener('click', async
 document.getElementById('schedule-wake-toggle').addEventListener('click', async () => {
   const current = !!window.__lastPeerMeshState?.osWake?.enabled
   await updateScheduleWake(!current)
+})
+
+document.getElementById('on-demand-wake-toggle').addEventListener('click', async () => {
+  const current = !!window.__lastPeerMeshState?.config?.allowOnDemandWake
+  await updateOnDemandWake(!current)
 })
 
 document.getElementById('btn-dashboard').addEventListener('click', async () => {

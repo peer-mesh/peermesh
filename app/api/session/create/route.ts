@@ -3,6 +3,7 @@ import { adminClient } from '@/lib/supabase/admin'
 import { isUserTrusted } from '@/lib/traffic-filter'
 import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
+import { queueOnDemandPrivateWake } from '@/lib/on-demand-wake-server'
 import { getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
 import {
   buildOccupiedProviderDeviceSet,
@@ -312,7 +313,18 @@ export async function POST(req: Request) {
     }))
 
     if (onlineRelays.length === 0) {
-      return NextResponse.json({ error: 'Private share is currently offline' }, { status: 409 })
+      const wakeResult = await queueOnDemandPrivateWake({
+        privateCode,
+        requesterUserId: userId,
+        source: `session_create:${auth.kind}`,
+      })
+      return NextResponse.json({
+        error: wakeResult.ok
+          ? 'Private share is currently offline. A wake request was queued for this provider.'
+          : 'Private share is currently offline',
+        wakeQueued: wakeResult.ok,
+        retryAfterSeconds: wakeResult.ok ? 60 : undefined,
+      }, { status: 409 })
     }
 
     if (relayCountry) country = relayCountry

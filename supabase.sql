@@ -236,6 +236,7 @@ create table provider_uptime_schedules (
   end_time text not null default '00:00',
   timezone text not null default 'UTC',
   wake_enabled boolean not null default false,
+  allow_on_demand_wake boolean not null default false,
   shutdown_after_window boolean not null default false,
   last_start_window_key text,
   last_stop_window_key text,
@@ -252,6 +253,7 @@ create table provider_uptime_schedules (
 
 create index on provider_uptime_schedules (enabled, updated_at);
 create index on provider_uptime_schedules (user_id, base_device_id);
+create index provider_uptime_schedules_on_demand_idx on provider_uptime_schedules (allow_on_demand_wake, user_id, base_device_id);
 
 create table provider_wake_jobs (
   id uuid primary key default gen_random_uuid(),
@@ -889,6 +891,7 @@ create table if not exists provider_uptime_schedules (
   end_time text not null default '00:00',
   timezone text not null default 'UTC',
   wake_enabled boolean not null default false,
+  allow_on_demand_wake boolean not null default false,
   shutdown_after_window boolean not null default false,
   last_start_window_key text,
   last_stop_window_key text,
@@ -916,6 +919,10 @@ begin
     create policy "Service role only uptime schedules" on provider_uptime_schedules for all using (false);
   end if;
 end $$;
+
+alter table provider_uptime_schedules
+  add column if not exists allow_on_demand_wake boolean not null default false;
+create index if not exists provider_uptime_schedules_on_demand_idx on provider_uptime_schedules (allow_on_demand_wake, user_id, base_device_id);
 
 create table if not exists provider_wake_jobs (
   id uuid primary key default gen_random_uuid(),
