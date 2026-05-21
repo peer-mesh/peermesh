@@ -163,12 +163,12 @@ create table extension_auth_tokens (
   created_at timestamptz default now()
 );
 
--- Active provider devices (one row per sharing device, heartbeat-based)
+-- Active provider devices (one row per active sharing slot, heartbeat-based)
 create table provider_devices (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references profiles(id) on delete cascade not null,
   device_id text not null,
-  connection_slots integer not null default 1,
+  connection_slots integer not null default 1, -- desired client setting, not live capacity count
   country_code text not null,
   relay_url text default null,         -- relay the device is currently connected to
   last_heartbeat timestamptz not null default now(),
@@ -386,10 +386,26 @@ create view peer_availability as
     count(*)::int as count
   from provider_devices pd
   join profiles p on p.id = pd.user_id
-  left join sessions s on s.provider_device_id = pd.device_id and s.status = 'active'
+  left join sessions s on s.status = 'active' and s.provider_id = pd.user_id and (
+    s.provider_device_id = pd.device_id
+    or (
+      s.provider_device_id !~ '_slot_[0-9]+$'
+      and pd.device_id ~ '_slot_[0-9]+$'
+      and left(pd.device_id, length(s.provider_device_id) + 6) = s.provider_device_id || '_slot_'
+    )
+  )
   where pd.last_heartbeat > now() - interval '45 seconds'
     and p.is_verified = true
     and s.id is null
+    and not exists (
+      select 1
+      from provider_devices slot_pd
+      where slot_pd.user_id = pd.user_id
+        and pd.device_id !~ '_slot_[0-9]+$'
+        and slot_pd.device_id ~ '_slot_[0-9]+$'
+        and left(slot_pd.device_id, length(pd.device_id) + 6) = pd.device_id || '_slot_'
+        and slot_pd.last_heartbeat > now() - interval '45 seconds'
+    )
   group by pd.country_code;
 
 -- ================================
@@ -972,8 +988,24 @@ create or replace view peer_availability as
     count(*)::int as count
   from provider_devices pd
   join profiles p on p.id = pd.user_id
-  left join sessions s on s.provider_device_id = pd.device_id and s.status = 'active'
+  left join sessions s on s.status = 'active' and s.provider_id = pd.user_id and (
+    s.provider_device_id = pd.device_id
+    or (
+      s.provider_device_id !~ '_slot_[0-9]+$'
+      and pd.device_id ~ '_slot_[0-9]+$'
+      and left(pd.device_id, length(s.provider_device_id) + 6) = s.provider_device_id || '_slot_'
+    )
+  )
   where pd.last_heartbeat > now() - interval '45 seconds'
     and p.is_verified = true
     and s.id is null
+    and not exists (
+      select 1
+      from provider_devices slot_pd
+      where slot_pd.user_id = pd.user_id
+        and pd.device_id !~ '_slot_[0-9]+$'
+        and slot_pd.device_id ~ '_slot_[0-9]+$'
+        and left(slot_pd.device_id, length(pd.device_id) + 6) = pd.device_id || '_slot_'
+        and slot_pd.last_heartbeat > now() - interval '45 seconds'
+    )
   group by pd.country_code;

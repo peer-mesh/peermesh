@@ -4,7 +4,11 @@ import { isUserTrusted } from '@/lib/traffic-filter'
 import { createHmac } from 'crypto'
 import { isPrivateShareActive, normalizePrivateShareCode } from '@/lib/private-sharing'
 import { getRelayFallbackList, relayHttpUrl, RELAY_ENDPOINTS } from '@/lib/relay-endpoints'
-import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
+import {
+  buildOccupiedProviderDeviceSet,
+  buildProviderDeviceOccupancyLookupKeys,
+  filterAvailableProviderDevices,
+} from '@/lib/provider-capacity'
 import { getConnectionAccessRequirement, hasPaidAccess } from '@/lib/account-access'
 import { getEffectiveBandwidthLimitBytes, quoteApiUsage } from '@/lib/billing'
 import { touchApiKeyLastUsed } from '@/lib/api-keys'
@@ -234,11 +238,11 @@ export async function POST(req: Request) {
       })
     }
 
-    const publicDeviceIds = publicProviders.map((row) => row.device_id).filter(Boolean)
+    const publicDeviceIds = buildProviderDeviceOccupancyLookupKeys(publicProviders)
     if (publicDeviceIds.length > 0) {
       const { data: activeSessions } = await adminClient
         .from('sessions')
-        .select('provider_device_id')
+        .select('provider_id, provider_device_id')
         .eq('status', 'active')
         .in('provider_device_id', publicDeviceIds)
       const occupiedDevices = buildOccupiedProviderDeviceSet(activeSessions)

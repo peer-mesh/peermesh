@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('peermesh', {
   toggleSharing: () => ipcRenderer.invoke('toggle-sharing'),
   setLaunchOnStartup: (enabled) => ipcRenderer.invoke('set-launch-on-startup', enabled),
   setAutoShareOnLaunch: (enabled) => ipcRenderer.invoke('set-auto-share-on-launch', enabled),
+  setPreventSleepWhileSharing: (enabled) => ipcRenderer.invoke('set-prevent-sleep-while-sharing', enabled),
   setConnectionSlots: (slots) => ipcRenderer.invoke('set-connection-slots', slots),
   setDailyShareLimit: (limitMb) => ipcRenderer.invoke('set-daily-share-limit', limitMb),
   setSlotDailyLimit: (payload) => ipcRenderer.invoke('set-slot-daily-limit', payload),

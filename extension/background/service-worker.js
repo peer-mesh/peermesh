@@ -68,6 +68,7 @@ const CONTROL_PORT = 7654
 let relayWs = null
 let currentSession = null
 let agentSessionId = null
+let proxyFailClosed = false
 let supabaseToken = null
 let desktopToken = null
 let sharingUserId = null
@@ -416,6 +417,11 @@ function isHelperOwnedByUser(helper, userId) {
 }
 
 function syncActionBadge() {
+  if (proxyFailClosed) {
+    chrome.action.setBadgeText({ text: 'ERR' })
+    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' })
+    return
+  }
   if (currentSession) {
     chrome.action.setBadgeText({ text: 'ON' })
     chrome.action.setBadgeBackgroundColor({ color: '#00ff88' })
@@ -1403,13 +1409,15 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       }
 
       if (msg.type === 'session_ended') {
-        log('info', '[CONNECT] session_ended clearing proxy')
-        clearProxy()
+        const reason = msg.reason || 'Peer connection dropped'
+        log('info', `[CONNECT] session_ended reason=${reason}`)
+        if (_userInitiatedDisconnect) clearProxy()
+        else setProxyFailClosed(reason)
         currentSession = null
         relayWs = null
         agentSessionId = null
         if (!_userInitiatedDisconnect) {
-          broadcastSessionEnded(msg.reason || 'Peer connection dropped').catch(() => {})
+          broadcastSessionEnded(reason).catch(() => {})
         }
       }
 
@@ -1444,12 +1452,14 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       log('warn', `[CONNECT] WS closed code=${e.code} reason=${e.reason || 'none'}`)
       clearInterval(keepaliveTimer)
       if (currentSession) {
-        clearProxy()
+        const reason = e.reason || 'Peer connection dropped'
+        if (_userInitiatedDisconnect) clearProxy()
+        else setProxyFailClosed(reason)
         currentSession = null
         relayWs = null
         agentSessionId = null
         if (!_userInitiatedDisconnect) {
-          broadcastSessionEnded(e.reason || 'Peer connection dropped').catch(() => {})
+          broadcastSessionEnded(reason).catch(() => {})
         }
       }
       settle(reject, new Error('Connection closed before session was ready'))
@@ -1593,6 +1603,7 @@ function restoreWebRTC() {
 }
 
 function setProxyDesktop(sessionId, country) {
+  proxyFailClosed = false
   chrome.proxy.settings.set(
     {
       value: {
@@ -1612,6 +1623,7 @@ function setProxyDesktop(sessionId, country) {
       }
     }
   )
+  chrome.storage.session.remove(['proxyFailClosed', 'proxyFailClosedReason'])
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: '127.0.0.1', proxyPort: 7655 })
   syncActionBadge()
   blockWebRTC()
@@ -1619,6 +1631,7 @@ function setProxyDesktop(sessionId, country) {
 }
 
 function setProxyRelay(relayEndpoint, sessionId, country) {
+  proxyFailClosed = false
   const relayUrl = relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
   const relayHost = new URL(relayUrl).hostname
   // Port 8080 is the relay's actual HTTP port Ã¢â‚¬â€ it handles both WS upgrades
@@ -1636,16 +1649,39 @@ function setProxyRelay(relayEndpoint, sessionId, country) {
       else log('info', `[PROXY] PAC active Ã¢â€ â€™ ${relayHost}:8080 Ã¢Å“â€œ`)
     }
   )
+  chrome.storage.session.remove(['proxyFailClosed', 'proxyFailClosedReason'])
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: relayHost, proxyPort: 8080 })
   syncActionBadge()
   blockWebRTC()
   if (country) applyHeaderRules({ country, userId: currentSession?.userId || '' })
 }
 
+function setProxyFailClosed(reason = 'Peer connection dropped') {
+  proxyFailClosed = true
+  const pacScript = `
+    function FindProxyForURL(url, host) {
+      if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) return 'DIRECT';
+      return 'PROXY 127.0.0.1:9';
+    }
+  `
+  chrome.proxy.settings.set(
+    { value: { mode: 'pac_script', pacScript: { data: pacScript } }, scope: 'regular' },
+    () => {
+      if (chrome.runtime.lastError) log('error', `[PROXY] fail-closed error: ${chrome.runtime.lastError.message}`)
+      else log('warn', `[PROXY] fail-closed active: ${reason}`)
+    }
+  )
+  chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
+  chrome.storage.session.set({ proxyFailClosed: true, proxyFailClosedReason: reason })
+  syncActionBadge()
+  blockWebRTC()
+}
+
 function clearProxy() {
+  proxyFailClosed = false
   log('info', 'proxy cleared')
   chrome.proxy.settings.clear({ scope: 'regular' })
-  chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
+  chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort', 'proxyFailClosed', 'proxyFailClosedReason'])
   syncActionBadge()
   restoreWebRTC()
   clearHeaderRules()

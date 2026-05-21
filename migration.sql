@@ -33,3 +33,44 @@ begin
   update profiles set is_sharing = true, updated_at = now() where id = p_user_id;
 end;
 $$ language plpgsql security definer;
+
+-- provider_devices rows are the live slot source of truth. connection_slots is
+-- only a desired configuration value, so old base-device rows must not inflate
+-- availability when slot rows already exist for that same base device.
+delete from provider_devices base_pd
+where base_pd.device_id !~ '_slot_[0-9]+$'
+  and exists (
+    select 1
+    from provider_devices slot_pd
+    where slot_pd.user_id = base_pd.user_id
+      and slot_pd.device_id ~ '_slot_[0-9]+$'
+      and left(slot_pd.device_id, length(base_pd.device_id) + 6) = base_pd.device_id || '_slot_'
+  );
+
+create or replace view peer_availability as
+  select
+    pd.country_code as country,
+    count(*)::int as count
+  from provider_devices pd
+  join profiles p on p.id = pd.user_id
+  left join sessions s on s.status = 'active' and s.provider_id = pd.user_id and (
+    s.provider_device_id = pd.device_id
+    or (
+      s.provider_device_id !~ '_slot_[0-9]+$'
+      and pd.device_id ~ '_slot_[0-9]+$'
+      and left(pd.device_id, length(s.provider_device_id) + 6) = s.provider_device_id || '_slot_'
+    )
+  )
+  where pd.last_heartbeat > now() - interval '45 seconds'
+    and p.is_verified = true
+    and s.id is null
+    and not exists (
+      select 1
+      from provider_devices slot_pd
+      where slot_pd.user_id = pd.user_id
+        and pd.device_id !~ '_slot_[0-9]+$'
+        and slot_pd.device_id ~ '_slot_[0-9]+$'
+        and left(slot_pd.device_id, length(pd.device_id) + 6) = pd.device_id || '_slot_'
+        and slot_pd.last_heartbeat > now() - interval '45 seconds'
+    )
+  group by pd.country_code;

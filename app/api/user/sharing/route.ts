@@ -245,6 +245,17 @@ function resolveConfiguredSlots(rows: ProviderDeviceStateRow[], fallback = 1): n
   return Math.max(1, highest || fallback)
 }
 
+function resolveLiveSlotCount(rows: ProviderDeviceStateRow[], baseDeviceId?: string | null): number {
+  if (rows.length === 0) return 0
+  const slotRows = rows.filter((row) => getSlotIndex(row.device_id, baseDeviceId || toBaseDeviceId(row.device_id)) != null)
+  return slotRows.length > 0 ? slotRows.length : rows.length
+}
+
+function resolveProviderSlotCount(rows: ProviderDeviceStateRow[], baseDeviceId?: string | null, fallback = 1): number {
+  const liveSlotCount = resolveLiveSlotCount(rows, baseDeviceId)
+  return Math.max(1, liveSlotCount || resolveConfiguredSlots(rows, fallback))
+}
+
 function isMatchingPrivateShareKey(deviceKey: string, baseDeviceId: string): boolean {
   return deviceKey === baseDeviceId || deviceKey.startsWith(`${baseDeviceId}_slot_`)
 }
@@ -507,6 +518,7 @@ export async function GET(req: Request) {
     let slot_limits = null
     let connection_slots = null
     let connection_slots_sync = null
+    let live_slot_count = 0
     const resolvedBaseDeviceId = baseDeviceId || (deviceId ? toBaseDeviceId(deviceId) : null)
     if (deviceId || resolvedBaseDeviceId) {
       const [rows, slotRows, providerRows] = await Promise.all([
@@ -521,6 +533,7 @@ export async function GET(req: Request) {
       slot_limits = slotRows.map(serializeSlotLimit)
       connection_slots = selectedProviderRow?.connection_slots ?? null
       connection_slots_sync = serializeSyncState(selectedProviderRow)
+      live_slot_count = resolveLiveSlotCount(providerRows, resolvedBaseDeviceId)
       return NextResponse.json({
         ...getProviderShareStatus(data, selectSlotLimitRow(slotRows, deviceId, resolvedBaseDeviceId)),
         profile_sync: serializeSyncState(data),
@@ -530,6 +543,7 @@ export async function GET(req: Request) {
         slot_limits,
         connection_slots,
         connection_slots_sync,
+        live_slot_count,
       })
     }
     return NextResponse.json({
@@ -541,6 +555,7 @@ export async function GET(req: Request) {
       slot_limits,
       connection_slots,
       connection_slots_sync,
+      live_slot_count,
     })
   }
 
@@ -588,6 +603,7 @@ export async function GET(req: Request) {
     slot_limits: slotLimits,
     connection_slots: selectedProviderRow?.connection_slots ?? null,
     connection_slots_sync: serializeSyncState(selectedProviderRow),
+    live_slot_count: resolveLiveSlotCount(providerRows, resolvedBaseDeviceId),
     ...getProviderShareStatus(data, selectedSlotLimit),
   })
 }
@@ -737,7 +753,7 @@ export async function POST(req: Request) {
     // Clean up stale slots only when we have live provider state to determine the real slot count.
     // If providerRows is empty (desktop offline), skip cleanup to avoid deleting freshly-written rows.
     const providerRows = await loadProviderDeviceStates(userId, baseDeviceId)
-    const configuredSlots = resolveConfiguredSlots(providerRows)
+    const configuredSlots = resolveProviderSlotCount(providerRows, baseDeviceId)
     console.log(`[slot] privateSharing post-write cleanup configuredSlots=${configuredSlots} providerRows=${providerRows.length}`)
     if (providerRows.length > 0) {
       await cleanupStalePrivateShareSlots(userId, baseDeviceId, configuredSlots)
@@ -882,6 +898,7 @@ export async function POST(req: Request) {
         ok: true,
         connection_slots: selectedProviderRow?.connection_slots ?? normalizedSlots,
         connection_slots_sync: serializeSyncState(selectedProviderRow),
+        live_slot_count: resolveLiveSlotCount(providerRows, baseDeviceId),
       })
     }
     return NextResponse.json({ ok: true })

@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
-import { buildOccupiedProviderDeviceSet, filterAvailableProviderDevices } from '@/lib/provider-capacity'
+import {
+  buildOccupiedProviderDeviceSet,
+  buildProviderDeviceOccupancyLookupKeys,
+  filterAvailableProviderDevices,
+} from '@/lib/provider-capacity'
 
 export async function GET(req: Request) {
   // Try cookie-based auth first, then Bearer token - both optional.
@@ -25,11 +29,11 @@ export async function GET(req: Request) {
 
   if (error || !data) return NextResponse.json({ peers: [] })
 
-  const candidateDeviceIds = data.map((row) => row.device_id).filter(Boolean)
+  const candidateDeviceIds = buildProviderDeviceOccupancyLookupKeys(data)
   const { data: activeSessions } = candidateDeviceIds.length > 0
     ? await adminClient
         .from('sessions')
-        .select('provider_device_id')
+        .select('provider_id, provider_device_id')
         .eq('status', 'active')
         .in('provider_device_id', candidateDeviceIds)
     : { data: [] as Array<{ provider_device_id: string | null }> }

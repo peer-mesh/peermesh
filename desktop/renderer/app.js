@@ -3,6 +3,7 @@ const api = window.peermesh || {}
 const startupBusy = {
   launchOnStartup: false,
   autoShareOnLaunch: false,
+  preventSleepWhileSharing: false,
 }
 
 let devicePollInterval = null
@@ -526,8 +527,10 @@ function renderStartupPreferences(state) {
   const config = state?.config ?? {}
   const launchToggle = document.getElementById('launch-startup-toggle')
   const autoShareToggle = document.getElementById('auto-share-toggle')
+  const preventSleepToggle = document.getElementById('prevent-sleep-toggle')
   const launchDesc = document.getElementById('launch-startup-desc')
   const autoShareDesc = document.getElementById('auto-share-desc')
+  const preventSleepDesc = document.getElementById('prevent-sleep-desc')
   const note = document.getElementById('startup-note')
   const signedIn = !!config.userId
   const accepted = !!config.hasAcceptedProviderTerms
@@ -542,6 +545,11 @@ function renderStartupPreferences(state) {
     on: !!config.autoShareOnLaunch,
     loading: startupBusy.autoShareOnLaunch,
     disabled: !signedIn || (!accepted && !isCurrentlySharing) || startupBusy.autoShareOnLaunch,
+  })
+  setToggleVisual(preventSleepToggle, {
+    on: !!config.preventSleepWhileSharing,
+    loading: startupBusy.preventSleepWhileSharing,
+    disabled: !signedIn || startupBusy.preventSleepWhileSharing,
   })
 
   if (launchDesc) {
@@ -559,6 +567,18 @@ function renderStartupPreferences(state) {
       autoShareDesc.textContent = 'When PeerMesh launches, sharing will start automatically for this signed-in account.'
     } else {
       autoShareDesc.textContent = 'Requires prior disclosure acceptance. Sharing stays manual until you enable this.'
+    }
+  }
+
+  if (preventSleepDesc) {
+    if (!signedIn) {
+      preventSleepDesc.textContent = 'Sign in before enabling provider uptime protection.'
+    } else if (config.preventSleepWhileSharing && state?.preventSleepWhileSharingActive) {
+      preventSleepDesc.textContent = 'PeerMesh is keeping the provider runtime awake while sharing is enabled.'
+    } else if (config.preventSleepWhileSharing) {
+      preventSleepDesc.textContent = 'The runtime will stay awake when sharing starts.'
+    } else {
+      preventSleepDesc.textContent = 'Allow the laptop to sleep normally when the OS decides.'
     }
   }
 
@@ -1054,7 +1074,11 @@ async function pollState() {
 }
 
 async function updateStartupPreference(key, enabled) {
-  const toggleId = key === 'launchOnStartup' ? 'setLaunchOnStartup' : 'setAutoShareOnLaunch'
+  const toggleId = key === 'launchOnStartup'
+    ? 'setLaunchOnStartup'
+    : key === 'preventSleepWhileSharing'
+      ? 'setPreventSleepWhileSharing'
+      : 'setAutoShareOnLaunch'
   startupBusy[key] = true
   renderStartupPreferences(window.__lastPeerMeshState || null)
   clearMainError()
@@ -1128,6 +1152,11 @@ document.getElementById('launch-startup-toggle').addEventListener('click', async
 document.getElementById('auto-share-toggle').addEventListener('click', async () => {
   const current = !!window.__lastPeerMeshState?.config?.autoShareOnLaunch
   await updateStartupPreference('autoShareOnLaunch', !current)
+})
+
+document.getElementById('prevent-sleep-toggle').addEventListener('click', async () => {
+  const current = !!window.__lastPeerMeshState?.config?.preventSleepWhileSharing
+  await updateStartupPreference('preventSleepWhileSharing', !current)
 })
 
 document.getElementById('btn-dashboard').addEventListener('click', async () => {

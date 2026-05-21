@@ -1,4 +1,4 @@
-const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification } = require('electron')
+const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification, powerSaveBlocker } = require('electron')
 const { WebSocket } = require('ws')
 const path = require('path')
 const http = require('http')
@@ -115,6 +115,7 @@ let _sharingConfigSyncTimer = null
 let _sharingConfigSyncBusy = false
 let _sharingConfigSyncInterval = 5000
 let _sharingConfigConsecutiveFailures = 0
+let _providerSleepBlockerId = null
 const SHARING_CONFIG_SYNC_MAX = 30000
 const AUTH_CLEAR_FAILURE_THRESHOLD = 3
 const _pendingBytesByDevice = new Map()
@@ -147,6 +148,7 @@ let config = {
   connectionSlots: 1,
   launchOnStartup: false,
   autoShareOnLaunch: false,
+  preventSleepWhileSharing: false,
   todaySharedBytes: 0,
   todaySharedBytesDate: null,
   dailyShareLimitMb: null,
@@ -341,6 +343,7 @@ function syncAggregateState() {
     requestsHandled: aggregate.requestsHandled,
     connectedAt: slotStates.find(slot => slot.connectedAt)?.connectedAt ?? null,
   }
+  updateProviderSleepBlocker()
 }
 
 function getSlotWarning(slots) {
@@ -700,6 +703,47 @@ function applyLaunchOnStartupPreference(enabled = config.launchOnStartup) {
   }
 }
 
+function isProviderSleepBlockerActive() {
+  return _providerSleepBlockerId !== null && powerSaveBlocker.isStarted(_providerSleepBlockerId)
+}
+
+function stopProviderSleepBlocker() {
+  if (_providerSleepBlockerId === null) return
+  try {
+    if (powerSaveBlocker.isStarted(_providerSleepBlockerId)) {
+      powerSaveBlocker.stop(_providerSleepBlockerId)
+    }
+    log.info('POWER', 'provider sleep blocker stopped')
+  } catch (e) {
+    log.warn('POWER', 'provider sleep blocker stop failed', { err: e.message })
+  }
+  _providerSleepBlockerId = null
+}
+
+function updateProviderSleepBlocker() {
+  const shouldBlock = !!config.preventSleepWhileSharing && (!!config.shareEnabled || running || peerSharing)
+  if (shouldBlock && !isProviderSleepBlockerActive()) {
+    try {
+      _providerSleepBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+      log.info('POWER', 'provider sleep blocker started', { id: _providerSleepBlockerId })
+    } catch (e) {
+      _providerSleepBlockerId = null
+      log.warn('POWER', 'provider sleep blocker start failed', { err: e.message })
+    }
+    return
+  }
+
+  if (!shouldBlock) stopProviderSleepBlocker()
+}
+
+function setPreventSleepWhileSharingPreference(enabled) {
+  config.preventSleepWhileSharing = !!enabled
+  saveConfig()
+  updateProviderSleepBlocker()
+  updateTray()
+  return { enabled: config.preventSleepWhileSharing, active: isProviderSleepBlockerActive() }
+}
+
 let _savingDailyLimit = false
 let _localSlotChangeAt = 0
 const LOCAL_SLOT_CHANGE_GRACE_MS = 8000
@@ -842,6 +886,7 @@ function loadConfig() {
   // autoShareOnLaunch is an explicit user preference — read it directly from saved config.
   // Never derive it from shareEnabled (which is cleared to false on every shutdown by stopRelay).
   config.autoShareOnLaunch = typeof config.autoShareOnLaunch === 'boolean' ? config.autoShareOnLaunch : false
+  config.preventSleepWhileSharing = typeof config.preventSleepWhileSharing === 'boolean' ? config.preventSleepWhileSharing : false
   config.privateShareActive = !!config.privateShareActive
   config.privateShare = config.privateShare ?? null
   config.privateShareDeviceId = config.privateShareDeviceId ?? config.privateShare?.device_id ?? null
@@ -977,6 +1022,7 @@ function shutdownDesktopRuntime(reason = 'quit') {
     log.info('PROCESS', '_cliWatchTimer cleared on shutdown')
   }
   try { suspendRelayForShutdown(reason) } catch (e) { log.warn('PROCESS', 'suspendRelayForShutdown failed', { err: e.message }) }
+  try { stopProviderSleepBlocker() } catch (e) { log.warn('PROCESS', 'stopProviderSleepBlocker failed', { err: e.message }) }
   try { closeAllSlotTunnels(false) } catch (e) { log.warn('PROCESS', 'closeAllSlotTunnels during shutdown failed', { err: e.message }) }
   try { controlServer.close(); log.debug('PROCESS', 'controlServer closed') } catch {}
   try { localProxyServer.close(); log.debug('PROCESS', 'localProxyServer closed') } catch {}
@@ -998,6 +1044,8 @@ function getPublicState() {
     connectionSlots: clampSlots(config.connectionSlots ?? 1),
     connectionSlotsSync: config.connectionSlotsSync ?? null,
     profileSync: config.profileSync ?? null,
+    preventSleepWhileSharing: !!config.preventSleepWhileSharing,
+    preventSleepWhileSharingActive: isProviderSleepBlockerActive(),
     privateShareActive: !!(privateShare?.enabled && privateShare?.active),
     privateShare: privateShare,
     privateShareDeviceId: privateShare?.device_id ?? config.privateShareDeviceId ?? null,
@@ -2285,6 +2333,15 @@ function updateTray() {
         }
       },
     },
+    {
+      type: 'checkbox',
+      label: 'Prevent sleep while sharing',
+      checked: !!config.preventSleepWhileSharing,
+      enabled: !!config.userId,
+      click: (item) => {
+        setPreventSleepWhileSharingPreference(item.checked)
+      },
+    },
     { type: 'separator' },
     { label: 'Settings', click: showWindow },
     { label: 'Open Dashboard', click: () => shell.openExternal(`${API_BASE}/dashboard`) },
@@ -2456,6 +2513,11 @@ ipcMain.handle('set-auto-share-on-launch', async (_, enabled) => {
   } catch (e) {
     return { success: false, error: e.message, state: getPublicState() }
   }
+})
+
+ipcMain.handle('set-prevent-sleep-while-sharing', async (_, enabled) => {
+  const result = setPreventSleepWhileSharingPreference(enabled)
+  return { success: true, ...result, state: getPublicState() }
 })
 
 ipcMain.handle('set-connection-slots', async (_, slots) => {
