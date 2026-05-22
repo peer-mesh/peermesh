@@ -1,6 +1,6 @@
 {
   "name": "peermesh-desktop",
-  "version": "1.0.98",
+  "version": "1.0.99",
   "description": "PeerMesh Desktop — Share your connection from the system tray",
   "author": "PeerMesh",
   "main": "main.js",

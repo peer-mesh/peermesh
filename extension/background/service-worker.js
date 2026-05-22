@@ -64,6 +64,8 @@ async function getLiveRelays() {
 }
 const NATIVE_HOST = 'com.peermesh.desktop'
 const CONTROL_PORT = 7654
+const REQUESTER_SESSION_REFRESH_MS = 45 * 60 * 1000
+const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 4
 
 let relayWs = null
 let currentSession = null
@@ -86,6 +88,7 @@ let providerPrivateShare = null
 let providerPrivateShares = []
 let providerAuthFailureCount = 0
 const PROVIDER_AUTH_FAILURE_THRESHOLD = 3
+let _sessionRefreshing = false
 
 const pendingRequests = new Map()
 
@@ -299,6 +302,19 @@ function log(level, ...args) {
 
 function getLogs() { return [..._logs] }
 
+function getPublicRequesterSession() {
+  if (!currentSession) return null
+  return {
+    id: currentSession.sessionId,
+    sessionId: currentSession.sessionId,
+    country: currentSession.country,
+    relayEndpoint: currentSession.relayEndpoint,
+    quality: currentSession.quality || null,
+    connectionType: currentSession.connectionType || 'public',
+    refreshedAt: currentSession.refreshedAt || null,
+  }
+}
+
 async function broadcastSessionEnded(reason = 'Peer connection dropped') {
   await chrome.runtime.sendMessage({ type: 'SESSION_ENDED', reason }).catch(() => {})
   try {
@@ -354,7 +370,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const helper = await persistSharingState()
           const isSharing = helper.available && !helper.ownerMismatch && (helper.running || helper.shareEnabled)
           log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
-          sendResponse({ connected: !!currentSession, session: currentSession, isSharing, helper })
+          sendResponse({ connected: !!currentSession, session: getPublicRequesterSession(), isSharing, helper, failClosed: proxyFailClosed })
+          break
+        }
+        case 'GET_DESKTOP_REQUIRED_STATUS': {
+          const helper = await getDesktopHelperStatusHttp()
+          sendResponse({
+            available: !!helper?.available,
+            helper,
+            error: helper?.available ? null : 'PeerMesh Desktop required',
+          })
           break
         }
         case 'PROXY_FETCH': {
@@ -1274,7 +1299,7 @@ async function connectToRelay(opts, attempt, retries) {
   if (retries === undefined) retries = 0
   const serverFallbackList = opts.relayFallbackList || []
   const liveFallbackList = await getLiveRelays()
-  const fallbackList = Array.from(new Set([...serverFallbackList, ...liveFallbackList]))
+  const fallbackList = Array.from(new Set([opts.relayEndpoint, ...serverFallbackList, ...liveFallbackList].filter(Boolean)))
   if (attempt >= fallbackList.length) {
     if (retries < 3) {
       log("warn", "[CONNECT] all relays exhausted, retry " + (retries + 1) + "/3 in 3s")
@@ -1296,7 +1321,7 @@ async function connectToRelay(opts, attempt, retries) {
   }
 }
 
-async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token }) {
+async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token, privateCode, connectionType }) {
   return new Promise((resolve, reject) => {
     const wsUrl = relayEndpoint
     log('info', `[CONNECT] WS connecting to ${wsUrl} country=${country} userId=${userId?.slice(0,8)}`)
@@ -1340,29 +1365,51 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       if (msg.type === 'agent_session_ready') {
         relayWs = ws
         agentSessionId = msg.sessionId || agentSessionId
-        currentSession = { ws, sessionId: agentSessionId, country, relayEndpoint, userId }
+        currentSession = {
+          ws,
+          sessionId: agentSessionId,
+          country,
+          relayEndpoint,
+          userId,
+          dbSessionId,
+          token,
+          privateCode: privateCode || null,
+          connectionType: connectionType || (privateCode ? 'private' : 'public'),
+          createdAt: Date.now(),
+        }
 
         const desktopStatus = await getDesktopHelperStatusHttp()
         let desktopProxyReady = false
-        if (desktopStatus?.available) {
-          try {
-            const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
-            })
-            desktopProxyReady = response.ok
-            log(desktopProxyReady ? 'info' : 'warn', `[CONNECT] proxy-session desktop status=${response.status}`)
-          } catch (e) {
-            log('error', `[CONNECT] proxy-session failed: ${e.message}`)
-          }
+        if (!desktopStatus?.available) {
+          ws.close(1000)
+          currentSession = null
+          relayWs = null
+          agentSessionId = null
+          settle(reject, new Error('PeerMesh Desktop required. Open the desktop app, then retry.'))
+          return
         }
-        if (desktopProxyReady) {
-          setProxyDesktop(agentSessionId, country)
-        } else {
-          if (desktopStatus?.available) log('warn', '[CONNECT] desktop helper unavailable for session - using relay proxy fallback')
-          setProxyRelay(relayEndpoint, agentSessionId, country)
+        try {
+          const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
+            signal: AbortSignal.timeout(4000),
+          })
+          desktopProxyReady = response.ok
+          log(desktopProxyReady ? 'info' : 'warn', `[CONNECT] proxy-session desktop status=${response.status}`)
+        } catch (e) {
+          log('error', `[CONNECT] proxy-session failed: ${e.message}`)
         }
+        if (!desktopProxyReady) {
+          setProxyFailClosed('Desktop proxy unavailable')
+          ws.close(1000)
+          currentSession = null
+          relayWs = null
+          agentSessionId = null
+          settle(reject, new Error('PeerMesh Desktop proxy is not ready. Open the desktop app and retry.'))
+          return
+        }
+        setProxyDesktop(agentSessionId, country)
         settle(resolve, undefined)
       }
 
@@ -1372,15 +1419,25 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         // Use the relayEndpoint from the message if provided Ã¢â‚¬â€ it's the relay the
         // requester is already on, so the desktop proxy-session must point there.
         const reconnectRelay = msg.relayEndpoint || relayEndpoint
-        if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId, relayEndpoint: reconnectRelay }
+        if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId, relayEndpoint: reconnectRelay, createdAt: Date.now() }
         log('info', `[CONNECT] session_reconnected attempt=${msg.attempt} newSession=${msg.sessionId?.slice(0,8)} relay=${reconnectRelay}`)
 
         // Update desktop local proxy with new sessionId and correct relayEndpoint
-        fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint: reconnectRelay, country: msg.country }),
-        }).catch(() => {})
+        try {
+          const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint: reconnectRelay, country: msg.country }),
+            signal: AbortSignal.timeout(4000),
+          })
+          if (!response.ok) throw new Error(`desktop proxy status=${response.status}`)
+          setProxyDesktop(msg.sessionId, msg.country || country)
+        } catch (error) {
+          const reason = `Desktop proxy unavailable after reconnect: ${error.message}`
+          setProxyFailClosed(reason)
+          broadcastSessionEnded(reason).catch(() => {})
+          return
+        }
 
         // Reapply header rules if provider country changed
         if (msg.country && msg.country !== country) applyHeaderRules({ country: msg.country, userId })
@@ -1412,13 +1469,21 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         const reason = msg.reason || 'Peer connection dropped'
         log('info', `[CONNECT] session_ended reason=${reason}`)
         if (_userInitiatedDisconnect) clearProxy()
-        else setProxyFailClosed(reason)
+        else if (!_sessionRefreshing) setProxyFailClosed(reason)
         currentSession = null
         relayWs = null
         agentSessionId = null
-        if (!_userInitiatedDisconnect) {
+        if (!_userInitiatedDisconnect && !_sessionRefreshing) {
           broadcastSessionEnded(reason).catch(() => {})
         }
+      }
+
+      if (msg.type === 'session_expiring') {
+        log('warn', '[CONNECT] relay reported session_expiring')
+        refreshRequesterSession('relay reported session expiry').catch((error) => {
+          setProxyFailClosed(error.message)
+          broadcastSessionEnded(error.message).catch(() => {})
+        })
       }
 
       if (msg.type === 'session_quality') {
@@ -1454,11 +1519,11 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       if (currentSession) {
         const reason = e.reason || 'Peer connection dropped'
         if (_userInitiatedDisconnect) clearProxy()
-        else setProxyFailClosed(reason)
+        else if (!_sessionRefreshing) setProxyFailClosed(reason)
         currentSession = null
         relayWs = null
         agentSessionId = null
-        if (!_userInitiatedDisconnect) {
+        if (!_userInitiatedDisconnect && !_sessionRefreshing) {
           broadcastSessionEnded(reason).catch(() => {})
         }
       }
@@ -1490,6 +1555,97 @@ const HEADER_RULE_IDS = [
   HDR_RULE_SEC_CH_UA,
 ]
 const HEADER_RESOURCE_TYPES = ['main_frame', 'sub_frame', 'xmlhttprequest', 'script', 'stylesheet', 'image', 'font', 'media', 'websocket', 'other']
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function createRequesterSession({ token, country, privateCode }) {
+  const isPrivateConnect = !!privateCode
+  let lastQueuedMessage = null
+  for (let attempt = 0; attempt < (isPrivateConnect ? PRIVATE_ON_DEMAND_MAX_ATTEMPTS : 1); attempt += 1) {
+    const res = await fetch(`${APP_URL}/api/session/create`, {
+      method: 'POST',
+      headers: withSharingHeaders({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
+      body: JSON.stringify(isPrivateConnect ? { privateCode } : { country }),
+      signal: AbortSignal.timeout(10000),
+    })
+    const data = await res.json().catch(() => ({}))
+
+    if ((res.status === 401 || res.status === 403) && await tryRefreshExtensionToken()) {
+      const stored = await chrome.storage.local.get(['user', 'desktopToken', 'supabaseToken'])
+      token = stored.desktopToken || stored.user?.token || stored.supabaseToken || token
+      continue
+    }
+
+    if (!res.ok || data.error) {
+      if (isPrivateConnect && data.onDemandStartQueued && attempt < PRIVATE_ON_DEMAND_MAX_ATTEMPTS - 1) {
+        lastQueuedMessage = data.error || 'Private provider is starting. Retrying...'
+        const retryMs = Math.max(3000, Math.min(30000, Number(data.retryAfterSeconds ?? 5) * 1000))
+        log('warn', `[REQUESTER] private on-demand queued; retrying in ${retryMs}ms`)
+        await sleep(retryMs)
+        continue
+      }
+      throw new Error(data.error || `Session refresh failed (${res.status})`)
+    }
+
+    return { data, token }
+  }
+  throw new Error(lastQueuedMessage || 'Private provider did not come online in time. Try again shortly.')
+}
+
+async function refreshRequesterSession(reason = 'session refresh') {
+  if (_sessionRefreshing || !currentSession) return
+  const previous = currentSession
+  const token = previous.token || desktopToken || supabaseToken
+  if (!token) throw new Error('Cannot refresh PeerMesh session: missing auth token')
+
+  _sessionRefreshing = true
+  setProxyFailClosed(`Refreshing PeerMesh session: ${reason}`)
+  try {
+    const oldWs = relayWs
+    relayWs = null
+    currentSession = null
+    agentSessionId = null
+    if (oldWs) {
+      oldWs.onclose = null
+      oldWs.onerror = null
+      oldWs.onmessage = null
+      try { oldWs.close(1000) } catch {}
+    }
+
+    const { data, token: refreshedToken } = await createRequesterSession({
+      token,
+      country: previous.country,
+      privateCode: previous.privateCode,
+    })
+
+    await connectToRelay({
+      relayEndpoint: data.relayEndpoint,
+      relayFallbackList: data.relayFallbackList || [data.relayEndpoint],
+      country: data.country || previous.country,
+      userId: previous.userId,
+      dbSessionId: data.sessionId,
+      preferredProviderUserId: data.preferredProviderUserId || null,
+      privateProviderUserId: data.privateProviderUserId || null,
+      privateBaseDeviceId: data.privateBaseDeviceId || null,
+      privateCode: previous.privateCode || null,
+      connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public'),
+      token: refreshedToken,
+    })
+
+    const session = {
+      id: data.sessionId,
+      country: data.country || previous.country,
+      relayEndpoint: data.relayEndpoint,
+      refreshedAt: new Date().toISOString(),
+    }
+    await chrome.storage.local.set({ session, connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public') })
+    chrome.runtime.sendMessage({ type: 'SESSION_RECONNECTED', sessionId: data.sessionId, reason }).catch(() => {})
+  } finally {
+    _sessionRefreshing = false
+  }
+}
 
 async function applyHeaderRules(session) {
   if (!chrome.declarativeNetRequest?.updateDynamicRules) return
@@ -1630,6 +1786,8 @@ function setProxyDesktop(sessionId, country) {
   if (country) applyHeaderRules({ country, userId: currentSession?.userId || '' })
 }
 
+// Kept as a fallback utility for emergency relay-proxy builds; normal browsing requires desktop.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function setProxyRelay(relayEndpoint, sessionId, country) {
   proxyFailClosed = false
   const relayUrl = relayEndpoint.replace('wss://', 'https://').replace('ws://', 'http://')
@@ -1724,8 +1882,14 @@ async function disconnect() {
 // Ã¢â€â‚¬Ã¢â€â‚¬ Lifecycle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async function restoreSharingRuntime() {
-  clearProxy()
-  await chrome.storage.local.set({ session: null })
+  const storedSession = await chrome.storage.local.get(['session'])
+  if (storedSession.session) {
+    setProxyFailClosed('PeerMesh background restarted. Reconnect before browsing.')
+    await chrome.storage.local.set({ session: null })
+    broadcastSessionEnded('PeerMesh background restarted. Reconnect before browsing.').catch(() => {})
+  } else {
+    clearProxy()
+  }
   await loadSharingContext()
   await syncProviderPrivateShareState({ source: 'restore' })
   const helper = await getSharingStatus()
@@ -1795,6 +1959,27 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   const helper = await getSharingStatus()
   await persistSharingState(helper)
+
+  if (currentSession) {
+    if (!relayWs || relayWs.readyState === WebSocket.CLOSED) {
+      const reason = 'PeerMesh relay connection dropped'
+      setProxyFailClosed(reason)
+      currentSession = null
+      agentSessionId = null
+      broadcastSessionEnded(reason).catch(() => {})
+    } else if (Date.now() - (currentSession.createdAt || 0) > REQUESTER_SESSION_REFRESH_MS) {
+      try {
+        await refreshRequesterSession('scheduled pre-expiry refresh')
+      } catch (error) {
+        const reason = error.message || 'PeerMesh session refresh failed'
+        setProxyFailClosed(reason)
+        currentSession = null
+        relayWs = null
+        agentSessionId = null
+        broadcastSessionEnded(reason).catch(() => {})
+      }
+    }
+  }
 
   if (sharingMode === 'extension' && providerShareEnabled) {
     if (!providerWs || providerWs.readyState === WebSocket.CLOSED) {

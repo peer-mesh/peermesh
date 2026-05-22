@@ -20,7 +20,7 @@ async function loadCountries(page = 1, search = '') {
     if (search) qs.set('q', search)
     const res = await fetch(`${API}/api/countries?${qs}`)
     if (!res.ok) throw new Error('failed')
-    const data = await res.json()
+    const data = await res.json().catch(() => ({}))
     countriesData = data.countries ?? []
     countriesTotalPages = data.pages ?? 1
     countriesPage = page
@@ -87,6 +87,8 @@ let state = {
   slotDailyLimitSaving: false,
   connectionType: 'public',
   profileSync: null,
+  reconnectStatus: null,
+  failClosed: false,
 }
 
 // Pending edits: user changes not yet saved. Polls skip overwriting these fields.
@@ -107,6 +109,10 @@ function formatMbps(value) {
   const speed = Number(value)
   if (!Number.isFinite(speed) || speed <= 0) return '0.00 Mbps'
   return `${speed >= 10 ? speed.toFixed(1) : speed.toFixed(2)} Mbps`
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function captureFocusedInput() {
@@ -452,6 +458,7 @@ async function refreshRuntimeStatus() {
     if (!status) return
     state.session = status.session || null
     state.helper = status.helper || null
+    state.failClosed = !!status.failClosed
     const helper = ownedHelper(status.helper || null, state.user)
     state.isSharing = helperSharingActive(helper)
     state.sharePending = helperSharingPending(helper)
@@ -746,7 +753,16 @@ function renderDashboard(app) {
   const errorBanner = state.error
     ? `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-size:11px;color:#ff6060;line-height:1.5">
         <span>${state.error}</span>
-        <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0;flex-shrink:0">x</button>
+        <span style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+          ${/desktop/i.test(state.error) ? `<button id="desktopInstallBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;padding:0">DOWNLOAD</button>` : ''}
+          <button id="dismissErrorBtn" style="background:none;border:none;color:#666680;cursor:pointer;font-size:13px;line-height:1;padding:0">x</button>
+        </span>
+       </div>`
+    : ''
+  const reconnectBanner = state.reconnectStatus
+    ? `<div style="display:flex;align-items:center;gap:8px;background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.22);border-radius:8px;padding:8px 12px;margin:0 16px 8px;font-family:'Courier New',monospace;font-size:10px;color:#00ff88;line-height:1.5">
+        <span style="width:10px;height:10px;border:2px solid rgba(0,255,136,0.25);border-top-color:#00ff88;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block;flex-shrink:0"></span>
+        <span>${state.reconnectStatus}</span>
        </div>`
     : ''
 
@@ -755,10 +771,11 @@ function renderDashboard(app) {
       <span class="logo">PEERMESH</span>
       <div class="status-pill ${session ? 'connected' : ''}">
         <div class="status-dot"></div>
-        ${session ? `VIA ${session.country}` : 'DISCONNECTED'}
+        ${session ? `VIA ${session.country}` : state.failClosed ? 'BLOCKED' : 'DISCONNECTED'}
       </div>
     </div>
     ${offlineBanner}
+    ${reconnectBanner}
     ${errorBanner}
 
     ${session ? `
@@ -830,7 +847,10 @@ function renderDashboard(app) {
       ${state.error && !state.session ? `
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-top:8px;padding:8px 10px;background:rgba(255,68,102,0.08);border:1px solid rgba(255,68,102,0.25);border-radius:8px;font-size:11px;color:#ff6060;line-height:1.5">
           <span>${state.error}</span>
-          <button id="retryConnectBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;white-space:nowrap;padding:0;flex-shrink:0">RETRY</button>
+          <span style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+            <button id="retryConnectBtn" style="background:none;border:none;color:#00ff88;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;white-space:nowrap;padding:0">RETRY</button>
+            ${state.failClosed ? `<button id="stopBlockedBtn" style="background:none;border:none;color:#666680;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;white-space:nowrap;padding:0">STOP</button>` : ''}
+          </span>
         </div>` : ''}
     </div>
     `}
@@ -976,7 +996,11 @@ function renderDashboard(app) {
   }
 
   document.getElementById('dismissErrorBtn')?.addEventListener('click', () => { state.error = null; render() })
+  document.getElementById('desktopInstallBtn')?.addEventListener('click', () => {
+    chrome.tabs.create({ url: `${API}/api/desktop-download` })
+  })
   document.getElementById('retryConnectBtn')?.addEventListener('click', () => { state.error = null; connectSession() })
+  document.getElementById('stopBlockedBtn')?.addEventListener('click', disconnectSession)
   document.getElementById('retryCountriesBtn')?.addEventListener('click', () => loadCountries(countriesPage, countriesSearch))
   document.getElementById('countriesPrevBtn')?.addEventListener('click', () => loadCountries(countriesPage - 1, countriesSearch))
   document.getElementById('countriesNextBtn')?.addEventListener('click', () => loadCountries(countriesPage + 1, countriesSearch))
@@ -1169,6 +1193,55 @@ function renderDashboard(app) {
 
 // Actions
 
+async function requireDesktopForBrowsing() {
+  const status = await chrome.runtime.sendMessage({ type: 'GET_DESKTOP_REQUIRED_STATUS' }).catch(() => null)
+  if (status?.available) return true
+  state.error = 'PeerMesh Desktop required. Open the desktop app, then retry. If it is not installed, download the latest desktop app.'
+  state.reconnectStatus = null
+  render()
+  return false
+}
+
+async function createSessionWithOnDemandRetry({ authToken, isPrivateConnect, privateCode }) {
+  let lastQueuedMessage = null
+  const attempts = isPrivateConnect ? 4 : 1
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const res = await fetch(`${API}/api/session/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`,
+      },
+      body: JSON.stringify(isPrivateConnect ? { privateCode } : { country: state.selectedCountry }),
+    })
+
+    const data = await res.json()
+    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) {
+      state.connecting = false
+      return { aborted: true }
+    }
+    if ((!res.ok || data.error) && data.nextStep) {
+      chrome.tabs.create({ url: `${API}${data.nextStep}` }).catch(() => {})
+    }
+    if (!res.ok || data.error) {
+      if (isPrivateConnect && data.onDemandStartQueued && attempt < attempts - 1) {
+        lastQueuedMessage = data.error ?? 'Private provider is starting. Retrying...'
+        state.reconnectStatus = data.providerReachable
+          ? 'Private provider is reachable. Starting sharing and retrying...'
+          : 'Private provider is offline. On-demand start queued; waiting for it to come online...'
+        state.error = lastQueuedMessage
+        render()
+        const retryMs = Math.max(3000, Math.min(30000, Number(data.retryAfterSeconds ?? 5) * 1000))
+        await sleep(retryMs)
+        continue
+      }
+      throw new Error(data.error ?? `Server error (${res.status})`)
+    }
+    return { data }
+  }
+  throw new Error(lastQueuedMessage ?? 'Private provider did not come online in time. Try again shortly.')
+}
+
 async function connectSession() {
   const privateCode = (state.privateCodeInput || '').trim()
   // Country selected = public mode; clear any stale private code
@@ -1185,39 +1258,33 @@ async function connectSession() {
     return
   }
 
+  if (!await requireDesktopForBrowsing()) return
+
   state.connecting = true
   state.error = null
+  state.reconnectStatus = null
   render()
 
   try {
     // Always prefer the long-lived desktop token for relay auth.
     // supabaseToken is a short-lived Supabase JWT (1h) that may be stale in storage.
     const authToken = state.user.token || state.supabaseToken
-    const res = await fetch(`${API}/api/session/create`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(isPrivateConnect ? { privateCode } : { country: state.selectedCountry }),
-    })
-
-    const data = await res.json()
-    if (await handleAuthFailure(res.status, { preserveWhileSharing: true })) { state.connecting = false; return }
-    if ((!res.ok || data.error) && data.nextStep) {
-      chrome.tabs.create({ url: `${API}${data.nextStep}` }).catch(() => {})
-    }
-    if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
+    const created = await createSessionWithOnDemandRetry({ authToken, isPrivateConnect, privateCode })
+    if (created?.aborted) return
+    const data = created.data
 
     const response = await chrome.runtime.sendMessage({
       type: 'CONNECT',
       relayEndpoint: data.relayEndpoint,
+      relayFallbackList: data.relayFallbackList ?? [data.relayEndpoint],
       country: data.country ?? state.selectedCountry,
       userId: state.user.id,
       dbSessionId: data.sessionId,
       preferredProviderUserId: data.preferredProviderUserId ?? null,
       privateProviderUserId: data.privateProviderUserId ?? null,
       privateBaseDeviceId: data.privateBaseDeviceId ?? null,
+      privateCode: isPrivateConnect ? privateCode : null,
+      connectionType: isPrivateConnect ? 'private' : 'public',
       token: authToken,
     })
 
@@ -1225,6 +1292,8 @@ async function connectSession() {
 
     state.session = { id: data.sessionId, country: data.country ?? state.selectedCountry, relayEndpoint: data.relayEndpoint }
     state.connectionType = isPrivateConnect ? 'private' : 'public'
+    state.failClosed = false
+    state.reconnectStatus = null
     await chrome.storage.local.set({ session: state.session, connectionType: state.connectionType })
   } catch (err) {
     state.error = err.message === 'Failed to fetch' ? 'Network error - could not reach server' : err.message
@@ -1239,8 +1308,8 @@ async function disconnectSession() {
   state.disconnecting = true
   render()
 
+  await chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
   if (state.session) {
-    await chrome.runtime.sendMessage({ type: 'DISCONNECT' })
     try {
       await fetch(`${API}/api/session/end`, {
         method: 'POST',
@@ -1255,6 +1324,8 @@ async function disconnectSession() {
 
   state.session = null
   state.connectionType = 'public'
+  state.failClosed = false
+  state.reconnectStatus = null
   state.disconnecting = false
   await chrome.storage.local.set({ session: null, connectionType: 'public' })
   render()
@@ -1561,6 +1632,8 @@ chrome.runtime.onMessage.addListener((msg) => {
       state.session = { ...state.session, id: msg.sessionId }
       chrome.storage.local.set({ session: state.session })
     }
+    state.failClosed = false
+    state.reconnectStatus = null
     // Brief visual pulse on the status pill so user knows a switch happened
     const pill = document.querySelector('.status-pill')
     if (pill) {
@@ -1583,9 +1656,11 @@ chrome.runtime.onMessage.addListener((msg) => {
   // Provider dropped and relay gave up finding a replacement
   if (msg.type === 'SESSION_ENDED') {
     state.session = null
+    state.failClosed = true
+    state.reconnectStatus = 'Traffic is blocked until PeerMesh reconnects or you disconnect.'
     state.error = msg.reason
-      ? `Connection lost - ${msg.reason}. Select a country to reconnect.`
-      : 'Connection lost - your peer disconnected. Select a country to reconnect.'
+      ? `Connection lost - ${msg.reason}. Retry to reconnect.`
+      : 'Connection lost - your peer disconnected. Retry to reconnect.'
     chrome.storage.local.set({ session: null })
     render()
   }

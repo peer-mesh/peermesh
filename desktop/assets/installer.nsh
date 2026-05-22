@@ -1,7 +1,17 @@
 ; PeerMesh installer/uninstaller hooks
 
+!macro IsPeerMeshRunning RESULT
+  nsExec::ExecToStack '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $$_.ProcessName -eq ''PeerMesh'' -or $$_.ProcessName -like ''PeerMesh Helper*'' }) { exit 0 } else { exit 1 }"'
+  Pop ${RESULT}
+  Pop $R3
+!macroend
+
 ; Shared macro to kill all PeerMesh processes cleanly
 !macro KillPeerMesh
+  !insertmacro IsPeerMeshRunning $R0
+  ${If} $R0 != "0"
+    DetailPrint "No running PeerMesh process found."
+  ${Else}
   ; 1. Ask both possible control ports to quit gracefully
   nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "try { Invoke-WebRequest -Uri http://127.0.0.1:7654/quit -Method POST -TimeoutSec 2 -UseBasicParsing | Out-Null } catch {}; try { Invoke-WebRequest -Uri http://127.0.0.1:7656/quit -Method POST -TimeoutSec 2 -UseBasicParsing | Out-Null } catch {}"'
   Sleep 2500
@@ -12,7 +22,7 @@
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (GPU).exe" /T'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Renderer).exe" /T'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Plugin).exe" /T'
-  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "Get-Process PeerMesh* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"'
+  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { $$_.ProcessName -eq ''PeerMesh'' -or $$_.ProcessName -like ''PeerMesh Helper*'' } | Stop-Process -Force -ErrorAction SilentlyContinue"'
 
   ; 3. Wait until the process is actually gone (poll up to 10s)
   ; nsExec::ExecToStack pushes: exit-code then stdout — pop both, check exit code
@@ -20,17 +30,16 @@
   StrCpy $R1 0
   ${Do}
     Sleep 500
-    nsExec::ExecToStack '$SYSDIR\tasklist.exe /FI "IMAGENAME eq PeerMesh.exe" /NH'
-    Pop $R2  ; exit code
-    Pop $R3  ; stdout (discard)
+    !insertmacro IsPeerMeshRunning $R2
     ${If} $R2 != "0"
-      ${Break}  ; tasklist found no match = process gone
+      ${Break}  ; process gone
     ${EndIf}
     IntOp $R1 $R1 + 1
     ${If} $R1 >= 20
       ${Break}
     ${EndIf}
   ${Loop}
+  ${EndIf}
 !macroend
 
 ; customInit runs before electron-builder's own CloseApplications/uninstall flow.
