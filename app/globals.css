@@ -9,6 +9,10 @@
   --text: #e8e8f0;
   --muted: #666680;
   --danger: #ff4466;
+  --toast-bg: #f7fff9;
+  --toast-text: #052e1a;
+  --toast-border: #00b866;
+  --toast-shadow: rgba(0, 0, 0, 0.28);
   color-scheme: dark;
 }
 
@@ -21,6 +25,10 @@
   --text: #101820;
   --muted: #647184;
   --danger: #c6284a;
+  --toast-bg: #07351f;
+  --toast-text: #f4fff8;
+  --toast-border: #00a765;
+  --toast-shadow: rgba(6, 24, 44, 0.22);
   color-scheme: light;
 }
 
@@ -56,4 +64,23 @@ a {
   letter-spacing: 0.5px;
   cursor: pointer;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.pm-toast {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--toast-bg);
+  border: 1px solid var(--toast-border);
+  color: var(--toast-text);
+  padding: 12px 22px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: var(--font-geist-mono), 'Courier New', monospace;
+  white-space: nowrap;
+  z-index: 9999;
+  animation: slideup 0.2s ease;
+  box-shadow: 0 10px 30px var(--toast-shadow);
+  pointer-events: none;
 }

@@ -64,7 +64,8 @@ function getProviderShareStatus(profile: {
   share_bytes_today_date?: string | null
 }, slotLimitRow?: SlotLimitRow | null) {
   const totalBytesToday = getTodaySharedBytes(profile)
-  const limitBytes = profile.daily_share_limit_mb == null ? null : profile.daily_share_limit_mb * 1024 * 1024
+  const accountLimitMb = Number(profile.daily_share_limit_mb ?? 0)
+  const limitBytes = accountLimitMb > 0 ? accountLimitMb * 1024 * 1024 : null
   const slotStatus = getSlotLimitStatus(slotLimitRow ?? null)
   const profileCanAccept = limitBytes == null ? true : totalBytesToday < limitBytes
   const canAccept = profileCanAccept && slotStatus.slot_can_accept_sessions
@@ -184,7 +185,8 @@ function getSlotLimitStatus(row: SlotLimitRow | null) {
 
   const today = new Date().toISOString().slice(0, 10)
   const totalBytesToday = row.bytes_today_date === today ? (row.bytes_today ?? 0) : 0
-  const limitBytes = row.daily_limit_mb == null ? null : row.daily_limit_mb * 1024 * 1024
+  const dailyLimitMb = Number(row.daily_limit_mb ?? 0)
+  const limitBytes = dailyLimitMb > 0 ? dailyLimitMb * 1024 * 1024 : null
 
   return {
     slot_total_bytes_today: totalBytesToday,

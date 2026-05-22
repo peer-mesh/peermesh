@@ -160,6 +160,17 @@ function peersSnapshot() {
 
 // ── Affinity helpers ──────────────────────────────────────────────────────────
 
+function canProviderAcceptShareStatus(status) {
+  return status?.can_accept_sessions !== false
+}
+
+function describeProviderShareBlock(status) {
+  if (status?.status_unavailable) return 'status_unavailable'
+  if (status?.daily_limit_bytes != null && Number(status.total_bytes_today ?? 0) >= Number(status.daily_limit_bytes)) return 'account_daily_limit_reached'
+  if (status?.slot_daily_limit_bytes != null && Number(status.slot_total_bytes_today ?? 0) >= Number(status.slot_daily_limit_bytes)) return 'slot_daily_limit_reached'
+  return 'share_status_blocked'
+}
+
 function getAffinity(requesterUserId, country) {
   return peerAffinity.get(requesterUserId)?.get(country) ?? null
 }
@@ -183,7 +194,7 @@ async function getProviderShareStatus(userId, deviceId = null, baseDeviceId = nu
       log('LIMIT', `STATUS_STALE userId=${userId?.slice(0,8) ?? 'unknown'} using cached share status`)
       return cached.value
     }
-    return { can_accept_sessions: false, total_bytes_today: 0, daily_limit_bytes: null }
+    return { can_accept_sessions: true, total_bytes_today: 0, daily_limit_bytes: null, status_unavailable: true }
   }
 
   try {
@@ -203,7 +214,7 @@ async function getProviderShareStatus(userId, deviceId = null, baseDeviceId = nu
       log('LIMIT', `STATUS_STALE userId=${userId.slice(0,8)} using cached share status`)
       return cached.value
     }
-    return { can_accept_sessions: false, total_bytes_today: 0, daily_limit_bytes: null }
+    return { can_accept_sessions: true, total_bytes_today: 0, daily_limit_bytes: null, status_unavailable: true }
   }
 }
 
@@ -285,8 +296,8 @@ async function findProvider(country, requesterId, requestingUserId, {
     for (const [, peer] of peers) {
       if (peer.userId === preferredUserId && isEligible(peer)) {
         const status = await getProviderShareStatus(peer.userId, peer.deviceId, peer.baseDeviceId)
-        if (!status.can_accept_sessions) {
-          log('LIMIT', `SKIP preferred provider userId=${preferredUserId.slice(0,8)} daily limit reached`)
+        if (!canProviderAcceptShareStatus(status)) {
+          log('LIMIT', `SKIP preferred provider userId=${preferredUserId.slice(0,8)} ${describeProviderShareBlock(status)}`)
           continue
         }
         log('AFFINITY', `HIT preferred provider userId=${preferredUserId.slice(0,8)} country=${country}`)
@@ -309,8 +320,8 @@ async function findProvider(country, requesterId, requestingUserId, {
 
   for (const peer of eligible) {
     const status = await getProviderShareStatus(peer.userId, peer.deviceId, peer.baseDeviceId)
-    if (status.can_accept_sessions) return peer
-    log('LIMIT', `SKIP provider peerId=${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)} daily limit reached`)
+    if (canProviderAcceptShareStatus(status)) return peer
+    log('LIMIT', `SKIP provider peerId=${peer.peerId.slice(0,8)} userId=${peer.userId?.slice(0,8)} ${describeProviderShareBlock(status)}`)
   }
 
   return null
@@ -1110,12 +1121,12 @@ async function handleMessage(ws, msg) {
             if (peer.trustScore < 30) reasons.push(`low_trust(${peer.trustScore})`)
             if (peer.peerId === ws.peerId) reasons.push('same_peer')
             if (peer.userId === auth.userId) reasons.push('same_user')
-            if (privateBaseDeviceId && peer.baseDeviceId !== privateBaseDeviceId) reasons.push('wrong_private_device')
+            if (privateBaseDeviceId && peer.deviceId !== privateBaseDeviceId && peer.baseDeviceId !== privateBaseDeviceId) reasons.push('wrong_private_device')
             if (!privateBaseDeviceId && peer.privateOnly) reasons.push('private_only_slot')
             if (peer.supportsHttp === false) reasons.push('no_http')
             if (requireTunnel && !peer.supportsTunnel) reasons.push('no_tunnel')
             const shareStatus = await getProviderShareStatus(peer.userId, peer.deviceId ?? null, peer.baseDeviceId ?? null)
-            if (!shareStatus.can_accept_sessions) reasons.push('daily_limit_reached')
+            if (!canProviderAcceptShareStatus(shareStatus)) reasons.push(describeProviderShareBlock(shareStatus))
             log(ws.peerId.slice(0,8), `  PROVIDER_REJECTED ${peer.peerId.slice(0,8)} | ${reasons.join(', ')}`)
           }
         }

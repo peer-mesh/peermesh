@@ -209,13 +209,7 @@ export default function InstallPageClient() {
       </main>
 
       {toast && (
-        <div style={{
-          position: 'fixed', bottom: '28px', left: '50%', transform: 'translateX(-50%)',
-          background: '#1e1e2a', border: '1px solid var(--accent)', color: 'var(--text)',
-          padding: '12px 22px', borderRadius: '10px', fontSize: '13px', fontFamily: mono,
-          whiteSpace: 'nowrap', zIndex: 9999, animation: 'slideup 0.2s ease',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.5)', pointerEvents: 'none',
-        }}>
+        <div className="pm-toast">
           {toast}
         </div>
       )}
