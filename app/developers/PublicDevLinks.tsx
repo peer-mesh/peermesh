@@ -14,6 +14,7 @@ const publicLinks: DevLink[] = [
 
 const privateLinks: DevLink[] = [
   { href: '/developers/keys', label: 'API Keys', icon: 'KEY' },
+  { href: '/developers/webhooks', label: 'Webhooks', icon: 'HOOK' },
   { href: '/developers/billing', label: 'Billing', icon: '$' },
   { href: '/provider/sessions', label: 'Provider Traffic', icon: 'LOG' },
 ]
@@ -64,6 +65,12 @@ export function SignedInDeveloperCards() {
           label: 'Billing',
           desc: 'Fund your USD wallet, estimate session cost, and withdraw provider earnings via Flutterwave.',
           tag: 'BILLING',
+        },
+        {
+          href: '/developers/webhooks',
+          label: 'Webhooks',
+          desc: 'Register outbound endpoints for session lifecycle events with signed deliveries and retry logs.',
+          tag: 'HOOKS',
         },
       ].map(card => (
         <Link key={card.href} href={card.href} style={{ textDecoration: 'none' }}>

@@ -15,6 +15,7 @@ import { isProviderHealthy, sortProvidersByHealth } from '@/lib/provider-health'
 import { getConnectionAccessRequirement, hasPaidAccess } from '@/lib/account-access'
 import { getEffectiveBandwidthLimitBytes, quoteApiUsage } from '@/lib/billing'
 import { touchApiKeyLastUsed } from '@/lib/api-keys'
+import { buildSessionWebhookPayload, enqueueWebhookEvent } from '@/lib/developer-webhooks'
 import { resolveRequesterAuth } from '@/lib/requester-auth'
 import { checkServerRateLimit } from '@/lib/server-rate-limit'
 
@@ -428,6 +429,25 @@ export async function POST(req: Request) {
   if (auth.apiKey?.id) {
     await touchApiKeyLastUsed(auth.apiKey.id)
   }
+
+  enqueueWebhookEvent({
+    userId,
+    event: 'session.created',
+    sessionId: session.id,
+    payload: buildSessionWebhookPayload({
+      event: 'session.created',
+      session: {
+        id: session.id,
+        status: 'pending',
+        country,
+        accessMode: hasPrivateCode ? 'private' : 'public',
+        authKind: requestAuthKind,
+        requestId: apiRequestId,
+        relayEndpoint: relay,
+        createdAt: new Date().toISOString(),
+      },
+    }),
+  }).catch(error => console.error('[webhooks] enqueue session.created failed', error))
 
   return NextResponse.json({
     sessionId: session.id,

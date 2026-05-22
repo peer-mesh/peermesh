@@ -72,6 +72,7 @@ let state = {
   isOnline: navigator.onLine,
   showDisclosure: false,
   privateCodeInput: '',
+  privateCodeRecent: [],
   privateShare: null,
   privateShares: [],
   selectedPrivateSlot: null,
@@ -104,6 +105,38 @@ function getPendingEdit(key) {
 }
 
 const RESTORABLE_INPUT_IDS = new Set(['countrySearchInput', 'privateCodeInput', 'dailyLimitInput', 'slotDailyLimitInput'])
+const PRIVATE_CODE_RECENT_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const PRIVATE_CODE_RECENT_MAX = 8
+
+function normalizeRecentPrivateCodes(rows) {
+  const cutoff = Date.now() - PRIVATE_CODE_RECENT_TTL_MS
+  const seen = new Set()
+  return (Array.isArray(rows) ? rows : [])
+    .map(row => ({
+      code: String(row?.code || '').replace(/\D/g, '').slice(0, 9),
+      lastUsedAt: Number(row?.lastUsedAt || 0),
+    }))
+    .filter(row => row.code.length === 9 && row.lastUsedAt >= cutoff && !seen.has(row.code) && seen.add(row.code))
+    .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+    .slice(0, PRIVATE_CODE_RECENT_MAX)
+}
+
+async function rememberPrivateCode(code) {
+  const normalized = String(code || '').replace(/\D/g, '').slice(0, 9)
+  if (normalized.length !== 9) return
+  const next = normalizeRecentPrivateCodes([
+    { code: normalized, lastUsedAt: Date.now() },
+    ...state.privateCodeRecent.filter(row => row.code !== normalized),
+  ])
+  state.privateCodeRecent = next
+  await chrome.storage.local.set({ privateCodeRecent: next })
+}
+
+async function clearRecentPrivateCodes() {
+  state.privateCodeRecent = []
+  await chrome.storage.local.set({ privateCodeRecent: [] })
+  render()
+}
 
 function formatMbps(value) {
   const speed = Number(value)
@@ -373,13 +406,17 @@ async function handleExpiredSession() {
 // Init
 
 async function init() {
-  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'extId', 'supabaseToken', 'connectionType'])
+  const stored = await chrome.storage.local.get(['user', 'session', 'isSharing', 'helper', 'selectedCountry', 'privateCodeInput', 'privateCodeRecent', 'extId', 'supabaseToken', 'connectionType'])
 
   if (!stored.extId) {
     stored.extId = crypto.randomUUID()
     await chrome.storage.local.set({ extId: stored.extId })
   }
   state = { ...state, ...stored }
+  state.privateCodeRecent = normalizeRecentPrivateCodes(stored.privateCodeRecent)
+  if (state.privateCodeRecent.length !== (stored.privateCodeRecent || []).length) {
+    await chrome.storage.local.set({ privateCodeRecent: state.privateCodeRecent })
+  }
   if (state.user?.dailyLimitMb != null && !state.dailyLimitInput) {
     state.dailyLimitInput = String(state.user.dailyLimitMb)
   }
@@ -783,6 +820,12 @@ function renderDashboard(app) {
         <span>${state.reconnectStatus}</span>
        </div>`
     : ''
+  const blockedBanner = state.failClosed && !session
+    ? `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.28);border-radius:8px;padding:9px 12px;margin:0 16px 8px;font-size:11px;color:#ffaa00;line-height:1.5">
+        <span>PeerMesh protection is blocking browser traffic. Use direct browsing only if you are done routing through PeerMesh.</span>
+        <button id="unblockBrowserBtn" style="background:none;border:1px solid rgba(255,170,0,0.35);border-radius:6px;color:#ffaa00;font-family:'Courier New',monospace;font-size:10px;cursor:pointer;white-space:nowrap;padding:4px 7px">UNBLOCK</button>
+       </div>`
+    : ''
 
   app.innerHTML = `
     <div class="header">
@@ -794,6 +837,7 @@ function renderDashboard(app) {
     </div>
     ${offlineBanner}
     ${reconnectBanner}
+    ${blockedBanner}
     ${errorBanner}
     <div style="margin:0 16px 8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.03);font-family:'Courier New',monospace;font-size:10px;color:var(--muted);line-height:1.5">
       Press <span style="color:var(--accent)">Ctrl + Shift + P</span> on any page to open the PeerMesh session panel with country, connection state, reconnect status, and provider speed.
@@ -855,6 +899,15 @@ function renderDashboard(app) {
           ${state.connecting && state.privateCodeInput ? '...' : 'CODE'}
         </button>
       </div>
+      ${state.privateCodeRecent.length > 0 ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            ${state.privateCodeRecent.map(row => `
+              <button class="recent-private-code-btn" data-code="${row.code}" style="padding:4px 7px;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.18);border-radius:6px;color:var(--accent);font-family:'Courier New',monospace;font-size:10px;letter-spacing:0.8px;cursor:pointer">${row.code}</button>
+            `).join('')}
+          </div>
+          <button id="clearRecentPrivateCodesBtn" style="background:none;border:none;color:var(--muted);font-family:'Courier New',monospace;font-size:9px;cursor:pointer;white-space:nowrap;padding:0">CLEAR</button>
+        </div>` : ''}
       <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.5">Locks the session to one known device and its active slots only.</div>
     </div>
     <div class="section">
@@ -1022,6 +1075,7 @@ function renderDashboard(app) {
   })
   document.getElementById('retryConnectBtn')?.addEventListener('click', () => { state.error = null; connectSession() })
   document.getElementById('stopBlockedBtn')?.addEventListener('click', disconnectSession)
+  document.getElementById('unblockBrowserBtn')?.addEventListener('click', unblockBrowser)
   document.getElementById('retryCountriesBtn')?.addEventListener('click', () => loadCountries(countriesPage, countriesSearch))
   document.getElementById('countriesPrevBtn')?.addEventListener('click', () => loadCountries(countriesPage - 1, countriesSearch))
   document.getElementById('countriesNextBtn')?.addEventListener('click', () => loadCountries(countriesPage + 1, countriesSearch))
@@ -1049,6 +1103,16 @@ function renderDashboard(app) {
     const btn = document.getElementById('connectPrivateBtn')
     if (btn) btn.disabled = !state.privateCodeInput || !state.isOnline || state.connecting
   })
+  document.querySelectorAll('.recent-private-code-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.privateCodeInput = btn.dataset.code || ''
+      state.selectedCountry = null
+      state.error = null
+      chrome.storage.local.set({ privateCodeInput: state.privateCodeInput, selectedCountry: null })
+      render()
+    })
+  })
+  document.getElementById('clearRecentPrivateCodesBtn')?.addEventListener('click', clearRecentPrivateCodes)
   document.getElementById('connectBtn')?.addEventListener('click', connectSession)
   document.getElementById('connectPrivateBtn')?.addEventListener('click', connectSession)
   document.getElementById('disconnectBtn')?.addEventListener('click', disconnectSession)
@@ -1315,6 +1379,7 @@ async function connectSession() {
     state.connectionType = isPrivateConnect ? 'private' : 'public'
     state.failClosed = false
     state.reconnectStatus = null
+    if (isPrivateConnect) await rememberPrivateCode(privateCode)
     await chrome.storage.local.set({ session: state.session, connectionType: state.connectionType })
   } catch (err) {
     state.error = err.message === 'Failed to fetch' ? 'Network error - could not reach server' : err.message
@@ -1341,6 +1406,26 @@ async function disconnectSession() {
         body: JSON.stringify({ sessionId: state.session.id }),
       })
     } catch {}
+  }
+
+  state.session = null
+  state.connectionType = 'public'
+  state.failClosed = false
+  state.reconnectStatus = null
+  state.disconnecting = false
+  await chrome.storage.local.set({ session: null, connectionType: 'public' })
+  render()
+}
+
+async function unblockBrowser() {
+  if (state.disconnecting) return
+  state.disconnecting = true
+  state.error = null
+  render()
+
+  const response = await chrome.runtime.sendMessage({ type: 'UNBLOCK_BROWSER' }).catch(() => null)
+  if (!response?.success) {
+    await chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
   }
 
   state.session = null

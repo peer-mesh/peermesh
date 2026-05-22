@@ -7,7 +7,6 @@
  *   node build-save-cli.mjs major         - major bump + publish
  *   node build-save-cli.mjs --no-bump     - publish without version change
  *   node build-save-cli.mjs --dry-run     - preview next version, do not write or publish
- *   node build-save-cli.mjs --otp 123456  - publish with npm two-factor code
  */
 
 import { execSync } from 'child_process'
@@ -26,11 +25,13 @@ const args = process.argv.slice(2)
 const bumpType = args.find(a => ['major', 'minor', 'patch'].includes(a)) ?? 'patch'
 const noBump = args.includes('--no-bump')
 const dryRun = args.includes('--dry-run')
-const otpArgIndex = args.findIndex(a => a === '--otp')
-const otpArgValue = args.find(a => a.startsWith('--otp='))
-const otp = otpArgValue
-  ? otpArgValue.slice('--otp='.length).trim()
-  : (otpArgIndex >= 0 ? String(args[otpArgIndex + 1] || '').trim() : '')
+const usesOtpArg = args.some(a => a === '--otp' || a.startsWith('--otp='))
+
+if (usesOtpArg) {
+  console.error('\n  x --otp is no longer supported by this script.')
+  console.error('  Put an npm automation token in cli/.npmrc, then rerun without --otp.\n')
+  process.exit(1)
+}
 
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf-8'))
 const currentVersion = pkg.version
@@ -40,13 +41,17 @@ function run(command, options = {}) {
   return execSync(command, {
     encoding: 'utf8',
     stdio: options.stdio ?? 'pipe',
+    env: {
+      ...process.env,
+      ...(existsSync(CLI_NPMRC_PATH) ? { NPM_CONFIG_USERCONFIG: CLI_NPMRC_PATH } : {}),
+    },
     ...options,
   })
 }
 
 function assertNpmPublishReady(packageName) {
   if (existsSync(CLI_NPMRC_PATH)) {
-    console.log('\n  npm auth: using ignored cli/.npmrc for publish')
+    console.log('\n  npm auth: using cli/.npmrc via NPM_CONFIG_USERCONFIG')
   }
 
   let npmUser = ''
@@ -105,15 +110,11 @@ if (!noBump) {
 
 console.log(`\n  Publishing peermesh-provider@${newVersion} to npm...`)
 try {
-  const publishCommand = [
-    'npm publish --access public --registry=https://registry.npmjs.org/',
-    otp ? `--otp=${otp}` : '',
-  ].filter(Boolean).join(' ')
-  execSync(publishCommand, { cwd: CLI_DIR, stdio: 'inherit' })
+  run('npm publish --access public --registry=https://registry.npmjs.org/', { cwd: CLI_DIR, stdio: 'inherit' })
 } catch {
   console.error('\n  x npm publish failed after the version files were updated.')
-  console.error('  If npm requires two-factor auth, rerun with: node build-save-cli.mjs --no-bump --otp 123456')
-  console.error('  Or create an npm automation token with publish access and run npm login using that token.\n')
+  console.error('  Check cli/.npmrc contains an npm automation token with publish access.')
+  console.error('  If the version already exists on npm, rerun without --no-bump to publish a new patch version.\n')
   process.exit(1)
 }
 

@@ -357,6 +357,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await disconnect()
           sendResponse({ success: true })
           break
+        case 'UNBLOCK_BROWSER':
+          log('warn', 'UNBLOCK_BROWSER requested - clearing PeerMesh proxy protection')
+          await manualUnblockBrowser()
+          sendResponse({ success: true })
+          break
         case 'START_SHARING': {
           if (msg.supabaseToken) {
             supabaseToken = msg.supabaseToken
@@ -1972,6 +1977,22 @@ async function disconnect() {
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Lifecycle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+
+async function manualUnblockBrowser() {
+  _userInitiatedDisconnect = true
+  if (relayWs?.readyState === WebSocket.OPEN) {
+    try { relayWs.send(JSON.stringify({ type: 'end_session' })) } catch {}
+    try { relayWs.close(1000) } catch {}
+  }
+  relayWs = null
+  currentSession = null
+  agentSessionId = null
+  clearProxy()
+  await chrome.storage.local.set({ session: null, connectionType: 'public' })
+  await chrome.storage.session.remove(['proxyFailClosed', 'proxyFailClosedReason', 'proxySessionId', 'proxyHost', 'proxyPort']).catch(() => {})
+  fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, { method: 'DELETE' }).catch(() => {})
+  _userInitiatedDisconnect = false
+}
 
 async function restoreSharingRuntime() {
   const storedSession = await chrome.storage.local.get(['session'])

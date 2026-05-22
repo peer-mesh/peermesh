@@ -3,6 +3,7 @@ import { adminClient } from '@/lib/supabase/admin'
 import { resolveRequesterAuth } from '@/lib/requester-auth'
 import { settleSessionUsage } from '@/lib/wallet'
 import { nextProviderHealthScore } from '@/lib/provider-health'
+import { buildSessionWebhookPayload, enqueueWebhookEvent, isWebhookEvent } from '@/lib/developer-webhooks'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
@@ -141,6 +142,50 @@ export async function PATCH(req: Request) {
 
   if (!count) {
     logSession('warn', 'PATCH session row missing', { resolvedId, providerUserId, relayEndpoint, targetHost })
+  }
+
+  if (typeof status === 'string') {
+    const eventName = status === 'active'
+      ? 'session.active'
+      : status === 'reconnecting'
+        ? 'session.reconnecting'
+        : null
+
+    if (eventName && isWebhookEvent(eventName)) {
+      const { data: updatedSession } = await adminClient
+        .from('sessions')
+        .select('id, user_id, status, target_country, relay_endpoint, request_access_mode, request_auth_kind, request_id, provider_id, provider_device_id, provider_base_device_id, started_at, bytes_used, reconnect_attempts, reconnect_reason, last_reconnect_at')
+        .eq('id', resolvedId)
+        .maybeSingle()
+
+      if (updatedSession?.user_id) {
+        enqueueWebhookEvent({
+          userId: updatedSession.user_id,
+          event: eventName,
+          sessionId: updatedSession.id,
+          payload: buildSessionWebhookPayload({
+            event: eventName,
+            session: {
+              id: updatedSession.id,
+              status: updatedSession.status,
+              country: updatedSession.target_country,
+              relayEndpoint: updatedSession.relay_endpoint,
+              accessMode: updatedSession.request_access_mode,
+              authKind: updatedSession.request_auth_kind,
+              requestId: updatedSession.request_id,
+              providerId: updatedSession.provider_id,
+              providerDeviceId: updatedSession.provider_device_id,
+              providerBaseDeviceId: updatedSession.provider_base_device_id,
+              startedAt: updatedSession.started_at,
+              bytesUsed: Number(updatedSession.bytes_used ?? 0),
+              reconnectAttempts: Number(updatedSession.reconnect_attempts ?? 0),
+              reconnectReason: updatedSession.reconnect_reason,
+              lastReconnectAt: updatedSession.last_reconnect_at,
+            },
+          }),
+        }).catch(error => console.error(`[webhooks] enqueue ${eventName} failed`, error))
+      }
+    }
   }
 
   return NextResponse.json({ ok: true, updated: count ?? 0 })
@@ -394,6 +439,34 @@ export async function POST(req: Request) {
     settlement,
     endedActiveRow: count ?? 0,
   })
+
+  enqueueWebhookEvent({
+    userId: finalRequesterId,
+    event: 'session.ended',
+    sessionId,
+    payload: buildSessionWebhookPayload({
+      event: 'session.ended',
+      session: {
+        id: sessionId,
+        status: 'ended',
+        country: finalCountry,
+        relayEndpoint: finalRelayEndpoint,
+        providerId: finalProviderId,
+        providerKind: finalProviderKind,
+        providerDeviceId: finalProviderDeviceId,
+        providerBaseDeviceId: finalProviderBaseDeviceId,
+        targetHost: finalTargetHost,
+        targetHosts: mergedHosts,
+        disconnectReason: finalDisconnectReason,
+        bytesUsed: finalBytes,
+        providerAvgMbps: finalProviderAvgMbps,
+        providerLastMbps: finalProviderLastMbps,
+        connectionQuality: finalConnectionQuality,
+        endedAt: new Date().toISOString(),
+        settlement,
+      },
+    }),
+  }).catch(error => console.error('[webhooks] enqueue session.ended failed', error))
 
   return NextResponse.json({ success: true })
 }

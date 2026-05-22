@@ -446,6 +446,118 @@ Errors:
 )`,
   },
   {
+    id: 'webhooks-list',
+    method: 'GET',
+    path: '/developers/webhooks',
+    title: 'List webhooks',
+    description: 'Returns registered outbound webhook endpoints and recent delivery attempts for your developer account.',
+    headers: [
+      { name: 'Authorization', type: 'string', desc: 'Bearer <token>. Required.' },
+    ],
+    response: `{
+  "webhooks": [
+    {
+      "id": "uuid",
+      "name": "Session lifecycle",
+      "url": "https://example.com/peermesh",
+      "events": ["session.created", "session.ended"],
+      "is_active": true,
+      "last_delivery_at": "2026-05-22T12:00:00Z",
+      "created_at": "2026-05-22T11:00:00Z"
+    }
+  ],
+  "deliveries": [
+    {
+      "id": "uuid",
+      "event": "session.ended",
+      "status": "delivered",
+      "attempt_count": 1,
+      "response_status": 200
+    }
+  ]
+}`,
+    curl: `curl --request GET \\
+  --url '${API}/developers/webhooks' \\
+  --header 'Authorization: Bearer <token>'`,
+    node: `const res = await fetch('${API}/developers/webhooks', {
+  headers: { Authorization: \`Bearer \${token}\` },
+})
+const { webhooks, deliveries } = await res.json()
+console.log(webhooks.length, deliveries[0]?.status)`,
+    python: `r = requests.get(
+  '${API}/developers/webhooks',
+  headers={'Authorization': f'Bearer {token}'}
+)
+print(r.json()['webhooks'])`,
+  },
+  {
+    id: 'webhooks-create',
+    method: 'POST',
+    path: '/developers/webhooks',
+    title: 'Create webhook',
+    description: 'Register an HTTPS endpoint for session lifecycle events. PeerMesh signs every delivery with HMAC-SHA256 using the returned signing secret.',
+    body: [
+      { name: 'name', type: 'string', required: false, desc: 'Human-readable endpoint label.' },
+      { name: 'url', type: 'string', required: true, desc: 'HTTPS endpoint that receives POST delivery attempts.' },
+      { name: 'events', type: 'string[]', required: false, desc: 'Any of session.created, session.active, session.reconnecting, session.ended. Defaults to all.' },
+    ],
+    headers: [
+      { name: 'Authorization', type: 'string', desc: 'Bearer <token>. Required.' },
+      { name: 'Content-Type', type: 'string', desc: 'application/json' },
+    ],
+    response: `{
+  "webhook": {
+    "id": "uuid",
+    "name": "Session lifecycle",
+    "url": "https://example.com/peermesh",
+    "events": ["session.created", "session.ended"],
+    "is_active": true
+  },
+  "signingSecret": "whsec_..."
+}
+
+Delivery headers:
+X-PeerMesh-Event: session.ended
+X-PeerMesh-Delivery: uuid
+X-PeerMesh-Timestamp: 1779451200
+X-PeerMesh-Signature: t=1779451200,v1=<hex-hmac>
+
+The signed message is "\${timestamp}.\${rawBody}".`,
+    curl: `curl --request POST \\
+  --url '${API}/developers/webhooks' \\
+  --header 'Authorization: Bearer <token>' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+    "name": "Session lifecycle",
+    "url": "https://example.com/peermesh",
+    "events": ["session.created", "session.ended"]
+  }'`,
+    node: `const res = await fetch('${API}/developers/webhooks', {
+  method: 'POST',
+  headers: {
+    Authorization: \`Bearer \${token}\`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    name: 'Session lifecycle',
+    url: 'https://example.com/peermesh',
+    events: ['session.created', 'session.ended'],
+  }),
+})
+const { webhook, signingSecret } = await res.json()
+console.log(webhook.id, signingSecret)`,
+    python: `resp = requests.post(
+  '${API}/developers/webhooks',
+  headers={'Authorization': f'Bearer {token}'},
+  json={
+    'name': 'Session lifecycle',
+    'url': 'https://example.com/peermesh',
+    'events': ['session.created', 'session.ended'],
+  }
+)
+print(resp.json()['signingSecret'])`,
+  },
+  {
     id: 'billing-quote',
     method: 'POST',
     path: '/billing/quote',
@@ -546,6 +658,7 @@ const GROUPS = [
   { label: 'Core', ids: ['version', 'countries'] },
   { label: 'Sessions', ids: ['session-create', 'session-status', 'session-end'] },
   { label: 'API Keys', ids: ['keys-list', 'keys-create', 'keys-toggle'] },
+  { label: 'Webhooks', ids: ['webhooks-list', 'webhooks-create'] },
   { label: 'Billing', ids: ['billing-quote'] },
 ]
 
