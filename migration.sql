@@ -85,11 +85,13 @@ create table if not exists provider_uptime_schedules (
   timezone text not null default 'UTC',
   wake_enabled boolean not null default false,
   allow_on_demand_wake boolean not null default false,
+  allow_private_on_demand_start boolean not null default false,
   shutdown_after_window boolean not null default false,
   last_start_window_key text,
   last_stop_window_key text,
   last_wake_window_key text,
   last_tick_at timestamptz,
+  last_provider_seen_at timestamptz,
   state_actor text,
   state_changed_at timestamptz default now(),
   created_at timestamptz default now(),
@@ -115,7 +117,12 @@ end $$;
 
 alter table provider_uptime_schedules
   add column if not exists allow_on_demand_wake boolean not null default false;
+alter table provider_uptime_schedules
+  add column if not exists allow_private_on_demand_start boolean not null default false;
+alter table provider_uptime_schedules
+  add column if not exists last_provider_seen_at timestamptz;
 create index if not exists provider_uptime_schedules_on_demand_idx on provider_uptime_schedules (allow_on_demand_wake, user_id, base_device_id);
+create index if not exists provider_uptime_schedules_private_on_demand_idx on provider_uptime_schedules (allow_private_on_demand_start, last_provider_seen_at);
 
 create table if not exists provider_wake_jobs (
   id uuid primary key default gen_random_uuid(),

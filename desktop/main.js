@@ -129,6 +129,8 @@ let _sharingScheduleCloudSyncBusy = false
 let _uptimeJobsTimer = null
 let _uptimeJobsBusy = false
 let _uptimeJobsInterval = 30_000
+let _desktopUpdateState = null
+let _desktopUpdateBusy = false
 const SHARING_CONFIG_SYNC_MAX = 30000
 const UPTIME_JOBS_SYNC_MAX = 120_000
 const AUTH_CLEAR_FAILURE_THRESHOLD = 3
@@ -167,6 +169,7 @@ let config = {
   sharingSchedule: getDefaultSharingSchedule(),
   scheduleWakeEnabled: false,
   allowOnDemandWake: false,
+  allowPrivateOnDemandStart: false,
   scheduleWakeStatus: null,
   todaySharedBytes: 0,
   todaySharedBytesDate: null,
@@ -821,6 +824,76 @@ function normalizeSharingSchedule(raw = {}) {
   }
 }
 
+function compareVersions(a, b) {
+  const aParts = String(a || '').split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const bParts = String(b || '').split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const length = Math.max(aParts.length, bParts.length)
+  for (let index = 0; index < length; index += 1) {
+    const diff = (aParts[index] ?? 0) - (bParts[index] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+function getDesktopDownloadPlatform() {
+  if (process.platform === 'darwin') return 'mac'
+  if (process.platform === 'linux') return 'linux'
+  return 'win'
+}
+
+function getDesktopDownloadUrl(platform = getDesktopDownloadPlatform()) {
+  return `${API_BASE}/api/desktop-download?platform=${encodeURIComponent(platform)}`
+}
+
+async function checkDesktopUpdate(reason = 'manual') {
+  if (_desktopUpdateBusy) return _desktopUpdateState
+  _desktopUpdateBusy = true
+  const platform = getDesktopDownloadPlatform()
+  try {
+    const res = await fetch(`${API_BASE}/api/version`, { signal: AbortSignal.timeout(6000) })
+    if (!res.ok) throw new Error(`status=${res.status}`)
+    const data = await res.json().catch(() => ({}))
+    const platformInfo = data?.downloads?.desktop?.[platform] ?? null
+    const latestVersion = typeof platformInfo?.version === 'string'
+      ? platformInfo.version
+      : (typeof data.desktop === 'string' ? data.desktop : null)
+    const downloadPath = typeof platformInfo?.url === 'string' ? platformInfo.url : `/api/desktop-download?platform=${platform}`
+    const downloadUrl = downloadPath.startsWith('http') ? downloadPath : `${API_BASE}${downloadPath}`
+    _desktopUpdateState = {
+      checkedAt: new Date().toISOString(),
+      currentVersion: DESKTOP_VERSION,
+      latestVersion,
+      updateAvailable: !!latestVersion && compareVersions(latestVersion, DESKTOP_VERSION) > 0,
+      downloadUrl,
+      platform,
+      error: null,
+    }
+    log.info('UPDATE', 'desktop update check completed', { reason, currentVersion: DESKTOP_VERSION, latestVersion, updateAvailable: _desktopUpdateState.updateAvailable })
+    return _desktopUpdateState
+  } catch (e) {
+    _desktopUpdateState = {
+      checkedAt: new Date().toISOString(),
+      currentVersion: DESKTOP_VERSION,
+      latestVersion: null,
+      updateAvailable: false,
+      downloadUrl: getDesktopDownloadUrl(platform),
+      platform,
+      error: e.message,
+    }
+    log.warn('UPDATE', 'desktop update check failed', { reason, err: e.message })
+    return _desktopUpdateState
+  } finally {
+    _desktopUpdateBusy = false
+  }
+}
+
+async function openDesktopUpdateDownload() {
+  const state = await checkDesktopUpdate('download')
+  const url = state?.downloadUrl || getDesktopDownloadUrl()
+  await shell.openExternal(url)
+  return { success: true, update: _desktopUpdateState }
+}
+
 function normalizeRemoteSharingSchedule(raw = {}) {
   return normalizeSharingSchedule({
     enabled: raw?.enabled,
@@ -847,15 +920,19 @@ function applyUptimeScheduleData(raw, { source = 'remote' } = {}) {
   const nextWakeEnabled = typeof wakeEnabled === 'boolean' ? wakeEnabled : !!config.scheduleWakeEnabled
   const allowOnDemandWake = raw.allowOnDemandWake ?? raw.allow_on_demand_wake
   const nextAllowOnDemandWake = typeof allowOnDemandWake === 'boolean' ? allowOnDemandWake : !!config.allowOnDemandWake
+  const allowPrivateOnDemandStart = raw.allowPrivateOnDemandStart ?? raw.allow_private_on_demand_start
+  const nextAllowPrivateOnDemandStart = typeof allowPrivateOnDemandStart === 'boolean' ? allowPrivateOnDemandStart : !!config.allowPrivateOnDemandStart
   const scheduleChanged = JSON.stringify(previousSchedule) !== JSON.stringify(nextSchedule)
   const wakeChanged = !!config.scheduleWakeEnabled !== !!nextWakeEnabled
   const onDemandChanged = !!config.allowOnDemandWake !== !!nextAllowOnDemandWake
+  const privateOnDemandChanged = !!config.allowPrivateOnDemandStart !== !!nextAllowPrivateOnDemandStart
 
   config.sharingSchedule = nextSchedule
   config.scheduleWakeEnabled = !!nextWakeEnabled
   config.allowOnDemandWake = !!nextAllowOnDemandWake
+  config.allowPrivateOnDemandStart = !!nextAllowPrivateOnDemandStart
   config.uptimeScheduleSync = preferLatestSyncRow(currentSync, incomingSync)
-  if (scheduleChanged || wakeChanged || onDemandChanged) {
+  if (scheduleChanged || wakeChanged || onDemandChanged || privateOnDemandChanged) {
     log.info('SCHEDULE', 'uptime schedule synced', {
       source,
       enabled: nextSchedule.enabled,
@@ -864,9 +941,10 @@ function applyUptimeScheduleData(raw, { source = 'remote' } = {}) {
       timezone: nextSchedule.timezone,
       wakeEnabled: !!config.scheduleWakeEnabled,
       allowOnDemandWake: !!config.allowOnDemandWake,
+      allowPrivateOnDemandStart: !!config.allowPrivateOnDemandStart,
     })
   }
-  return scheduleChanged || wakeChanged || onDemandChanged
+  return scheduleChanged || wakeChanged || onDemandChanged || privateOnDemandChanged
 }
 
 function quotePowerShellString(value) {
@@ -1133,6 +1211,7 @@ async function syncSharingScheduleToServer(reason = 'sync') {
       ...schedule,
       wakeEnabled: !!config.scheduleWakeEnabled,
       allowOnDemandWake: !!config.allowOnDemandWake,
+      allowPrivateOnDemandStart: !!config.allowPrivateOnDemandStart,
       shutdownAfterWindow: false,
     },
   }
@@ -1198,11 +1277,27 @@ async function setScheduleWakeEnabledPreference(enabled) {
 }
 
 async function setOnDemandWakeEnabledPreference(enabled) {
+  if (enabled && !config.allowPrivateOnDemandStart) {
+    return {
+      success: false,
+      error: 'Enable private on-demand start before enabling on-demand wake.',
+      state: getPublicState(),
+    }
+  }
   config.allowOnDemandWake = !!enabled
   saveConfig()
   void syncSharingScheduleToServer('on_demand_wake_preference')
   updateTray()
   return { success: true, allowOnDemandWake: !!config.allowOnDemandWake, state: getPublicState() }
+}
+
+async function setPrivateOnDemandStartPreference(enabled) {
+  config.allowPrivateOnDemandStart = !!enabled
+  if (!config.allowPrivateOnDemandStart) config.allowOnDemandWake = false
+  saveConfig()
+  void syncSharingScheduleToServer('private_on_demand_start_preference')
+  updateTray()
+  return { success: true, allowPrivateOnDemandStart: !!config.allowPrivateOnDemandStart, state: getPublicState() }
 }
 
 function shouldScheduleStartSharing() {
@@ -1420,6 +1515,9 @@ async function processUptimeJob(job) {
       await completeUptimeJob(job, 'completed')
       return
     }
+    if (String(job?.payload?.reason || '').startsWith('on_demand_private')) {
+      try { await refreshSharingConfig() } catch (e) { log.warn('SCHEDULE', 'private on-demand refresh failed before start', { jobId: job.id, err: e.message }) }
+    }
     if (!shouldScheduleStartSharing()) {
       const err = 'Provider is not ready to start scheduled sharing'
       log.warn('SCHEDULE', err, {
@@ -1537,6 +1635,7 @@ function loadConfig() {
   config.sharingSchedule = normalizeSharingSchedule(config.sharingSchedule)
   config.scheduleWakeEnabled = typeof config.scheduleWakeEnabled === 'boolean' ? config.scheduleWakeEnabled : false
   config.allowOnDemandWake = typeof config.allowOnDemandWake === 'boolean' ? config.allowOnDemandWake : false
+  config.allowPrivateOnDemandStart = typeof config.allowPrivateOnDemandStart === 'boolean' ? config.allowPrivateOnDemandStart : false
   config.scheduleWakeStatus = config.scheduleWakeStatus ?? null
   config.privateShareActive = !!config.privateShareActive
   config.privateShare = config.privateShare ?? null
@@ -1662,6 +1761,7 @@ async function initializeDesktopRuntime(reason) {
   startSharingConfigSync()
   void syncSharingScheduleToServer('startup')
   startUptimeJobLoop()
+  void checkDesktopUpdate('startup')
 }
 
 function shutdownDesktopRuntime(reason = 'quit') {
@@ -1718,6 +1818,7 @@ function getPublicState() {
     },
     stats,
     version: DESKTOP_VERSION,
+    desktopUpdate: _desktopUpdateState,
   }
 }
 
@@ -3213,6 +3314,8 @@ ipcMain.handle('set-schedule-wake-enabled', async (_, enabled) => setScheduleWak
 
 ipcMain.handle('set-on-demand-wake-enabled', async (_, enabled) => setOnDemandWakeEnabledPreference(enabled))
 
+ipcMain.handle('set-private-on-demand-start-enabled', async (_, enabled) => setPrivateOnDemandStartPreference(enabled))
+
 ipcMain.handle('set-connection-slots', async (_, slots) => {
   return applyConnectionSlots(slots, { syncPeer: true })
 })
@@ -3349,6 +3452,16 @@ ipcMain.handle('sign-out', async () => {
 })
 
 ipcMain.handle('open-dashboard', () => { logIpc('open-dashboard'); shell.openExternal(`${API_BASE}/dashboard`) })
+
+ipcMain.handle('check-desktop-update', async () => {
+  logIpc('check-desktop-update')
+  return { success: true, update: await checkDesktopUpdate('ipc') }
+})
+
+ipcMain.handle('download-desktop-update', async () => {
+  logIpc('download-desktop-update')
+  return openDesktopUpdateDownload()
+})
 
 ipcMain.handle('accept-provider-terms', async (_, { checkOnly } = {}) => {
   logIpc('accept-provider-terms', { checkOnly })

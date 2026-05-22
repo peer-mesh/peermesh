@@ -12,6 +12,7 @@
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (GPU).exe" /T'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Renderer).exe" /T'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Plugin).exe" /T'
+  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "Get-Process PeerMesh* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"'
 
   ; 3. Wait until the process is actually gone (poll up to 10s)
   ; nsExec::ExecToStack pushes: exit-code then stdout — pop both, check exit code
@@ -32,21 +33,18 @@
   ${Loop}
 !macroend
 
+; customInit runs before electron-builder's own CloseApplications/uninstall flow.
+; Stop the tray process early so upgrades do not hit locked app files.
+!macro customInit
+  DetailPrint "Preparing PeerMesh for update..."
+  !insertmacro KillPeerMesh
+!macroend
+
 ; customInstall fires after NSIS's CloseApplications step but before files are written.
 ; Killing here ensures the process is gone before NSIS tries to overwrite locked files.
 !macro customInstall
   DetailPrint "Stopping any running PeerMesh instance..."
   !insertmacro KillPeerMesh
-
-  ; Uninstall previous version silently if registry entry exists
-  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PeerMesh" "UninstallString"
-  ${If} $R0 != ""
-    DetailPrint "Removing previous version..."
-    nsExec::ExecToLog '$R0 /S'
-    Sleep 3000
-    !insertmacro CleanPeerMeshArtifacts
-    !insertmacro CleanPeerMeshInstallDirs
-  ${EndIf}
 !macroend
 
 ; Shared macro to remove all PeerMesh artifacts

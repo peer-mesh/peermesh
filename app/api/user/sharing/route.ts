@@ -128,11 +128,13 @@ type ProviderUptimeScheduleRow = {
   timezone: string
   wake_enabled: boolean
   allow_on_demand_wake: boolean
+  allow_private_on_demand_start: boolean
   shutdown_after_window: boolean
   last_start_window_key: string | null
   last_stop_window_key: string | null
   last_wake_window_key: string | null
   last_tick_at: string | null
+  last_provider_seen_at: string | null
   state_actor: string | null
   state_changed_at: string | null
 }
@@ -246,11 +248,13 @@ function serializeUptimeSchedule(row: ProviderUptimeScheduleRow | null) {
     timezone: normalizeScheduleTimezone(row.timezone),
     wakeEnabled: row.wake_enabled === true,
     allowOnDemandWake: row.allow_on_demand_wake === true,
+    allowPrivateOnDemandStart: row.allow_private_on_demand_start === true,
     shutdownAfterWindow: row.shutdown_after_window === true,
     lastStartWindowKey: row.last_start_window_key,
     lastStopWindowKey: row.last_stop_window_key,
     lastWakeWindowKey: row.last_wake_window_key,
     lastTickAt: row.last_tick_at,
+    lastProviderSeenAt: row.last_provider_seen_at,
     ...serializeSyncState(row),
   }
 }
@@ -342,7 +346,7 @@ async function loadProviderDeviceStates(userId: string, baseDeviceId: string): P
 async function loadProviderUptimeSchedule(userId: string, baseDeviceId: string): Promise<ProviderUptimeScheduleRow | null> {
   const { data, error } = await adminClient
     .from('provider_uptime_schedules')
-    .select('user_id, base_device_id, enabled, start_time, end_time, timezone, wake_enabled, allow_on_demand_wake, shutdown_after_window, last_start_window_key, last_stop_window_key, last_wake_window_key, last_tick_at, state_actor, state_changed_at')
+    .select('user_id, base_device_id, enabled, start_time, end_time, timezone, wake_enabled, allow_on_demand_wake, allow_private_on_demand_start, shutdown_after_window, last_start_window_key, last_stop_window_key, last_wake_window_key, last_tick_at, last_provider_seen_at, state_actor, state_changed_at')
     .eq('user_id', userId)
     .eq('base_device_id', baseDeviceId)
     .maybeSingle<ProviderUptimeScheduleRow>()
@@ -880,6 +884,7 @@ export async function POST(req: Request) {
       timezone: normalizeScheduleTimezone(scheduleInput.timezone),
       wake_enabled: scheduleInput.wakeEnabled === true || scheduleInput.wake_enabled === true,
       allow_on_demand_wake: scheduleInput.allowOnDemandWake === true || scheduleInput.allow_on_demand_wake === true,
+      allow_private_on_demand_start: scheduleInput.allowPrivateOnDemandStart === true || scheduleInput.allow_private_on_demand_start === true,
       shutdown_after_window: scheduleInput.shutdownAfterWindow === true || scheduleInput.shutdown_after_window === true,
       state_actor: stateActor,
       state_changed_at: stateChangedAt,
@@ -889,7 +894,7 @@ export async function POST(req: Request) {
     const { data: uptimeSchedule, error: scheduleError } = await adminClient
       .from('provider_uptime_schedules')
       .upsert(payload, { onConflict: 'user_id,base_device_id' })
-      .select('user_id, base_device_id, enabled, start_time, end_time, timezone, wake_enabled, allow_on_demand_wake, shutdown_after_window, last_start_window_key, last_stop_window_key, last_wake_window_key, last_tick_at, state_actor, state_changed_at')
+      .select('user_id, base_device_id, enabled, start_time, end_time, timezone, wake_enabled, allow_on_demand_wake, allow_private_on_demand_start, shutdown_after_window, last_start_window_key, last_stop_window_key, last_wake_window_key, last_tick_at, last_provider_seen_at, state_actor, state_changed_at')
       .single<ProviderUptimeScheduleRow>()
 
     if (scheduleError || !uptimeSchedule) {

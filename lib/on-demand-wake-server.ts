@@ -15,6 +15,8 @@ type PrivateShareWakeRow = {
 
 type ProviderWakeScheduleRow = {
   allow_on_demand_wake: boolean | null
+  allow_private_on_demand_start: boolean | null
+  last_provider_seen_at: string | null
 }
 
 export type QueueOnDemandWakeResult =
@@ -25,6 +27,8 @@ export type QueueOnDemandWakeResult =
       inserted: number
       duplicates: number
       expiresAt: string
+      providerReachable: boolean
+      wakeIncluded: boolean
     }
   | {
       ok: false
@@ -35,6 +39,7 @@ export type QueueOnDemandWakeResult =
         | 'private_share_unavailable'
         | 'self_request'
         | 'on_demand_wake_disabled'
+        | 'on_demand_start_disabled'
         | 'insert_failed'
     }
 
@@ -92,6 +97,7 @@ export async function queueOnDemandPrivateWake(input: {
   requesterUserId: string
   source?: string
   now?: Date
+  includeWake?: boolean
 }): Promise<QueueOnDemandWakeResult> {
   const privateCode = normalizePrivateShareCode(input.privateCode)
   if (!privateCode) {
@@ -117,7 +123,7 @@ export async function queueOnDemandPrivateWake(input: {
   const baseDeviceId = normalizeProviderBaseDeviceId(privateShare.base_device_id)
   const { data: schedule, error: scheduleError } = await adminClient
     .from('provider_uptime_schedules')
-    .select('allow_on_demand_wake')
+    .select('allow_on_demand_wake, allow_private_on_demand_start, last_provider_seen_at')
     .eq('user_id', privateShare.user_id)
     .eq('base_device_id', baseDeviceId)
     .maybeSingle<ProviderWakeScheduleRow>()
@@ -125,16 +131,25 @@ export async function queueOnDemandPrivateWake(input: {
   if (scheduleError) {
     return { ok: false, status: 500, code: 'on_demand_wake_disabled', error: 'Could not validate provider wake settings' }
   }
-  if (schedule?.allow_on_demand_wake !== true) {
+  if (schedule?.allow_private_on_demand_start !== true) {
+    return { ok: false, status: 403, code: 'on_demand_start_disabled', error: 'Provider has not enabled private on-demand start requests' }
+  }
+
+  const wakeIncluded = input.includeWake === true
+  if (wakeIncluded && schedule?.allow_on_demand_wake !== true) {
     return { ok: false, status: 403, code: 'on_demand_wake_disabled', error: 'Provider has not enabled on-demand wake requests' }
   }
 
+  const lastSeenMs = schedule?.last_provider_seen_at ? new Date(schedule.last_provider_seen_at).getTime() : 0
+  const now = input.now ?? new Date()
+  const providerReachable = Number.isFinite(lastSeenMs) && now.getTime() - lastSeenMs < 2 * 60 * 1000
   const rows = buildOnDemandWakeJobRows({
     providerUserId: privateShare.user_id,
     baseDeviceId,
     requesterUserId: input.requesterUserId,
-    now: input.now,
+    now,
     source: input.source,
+    includeWake: wakeIncluded,
   })
 
   let inserted = 0
@@ -154,6 +169,8 @@ export async function queueOnDemandPrivateWake(input: {
     baseDeviceId,
     inserted,
     duplicates,
+    providerReachable,
+    wakeIncluded,
     expiresAt: rows[0]?.expires_at ?? new Date().toISOString(),
   }
 }

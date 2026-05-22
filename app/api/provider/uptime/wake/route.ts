@@ -13,6 +13,7 @@ export async function POST(req: Request) {
     privateCode: body.privateCode ?? body.privateShareCode ?? body.shareCode,
     requesterUserId: auth.userId,
     source: auth.kind,
+    includeWake: body.includeWake === true || body.wake === true,
   })
 
   if (!result.ok) {
@@ -22,11 +23,14 @@ export async function POST(req: Request) {
   return NextResponse.json({
     ok: true,
     status: result.inserted > 0 ? 'queued' : 'already_queued',
+    startQueued: true,
+    wakeQueued: result.wakeIncluded,
+    providerReachable: result.providerReachable,
     providerUserId: result.providerUserId,
     baseDeviceId: result.baseDeviceId,
     inserted: result.inserted,
     duplicates: result.duplicates,
     expiresAt: result.expiresAt,
-    retryAfterSeconds: 60,
+    retryAfterSeconds: result.providerReachable ? 8 : 30,
   }, { status: 202 })
 }

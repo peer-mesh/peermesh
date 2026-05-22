@@ -318,12 +318,17 @@ export async function POST(req: Request) {
         requesterUserId: userId,
         source: `session_create:${auth.kind}`,
       })
+      const retryAfterSeconds = wakeResult.ok ? (wakeResult.providerReachable ? 8 : 30) : undefined
       return NextResponse.json({
         error: wakeResult.ok
-          ? 'Private share is currently offline. A wake request was queued for this provider.'
+          ? (wakeResult.providerReachable
+              ? 'Private share is starting on the provider. Try again in a few seconds.'
+              : 'Private share is currently offline. A private on-demand start request was queued for this provider.')
           : 'Private share is currently offline',
-        wakeQueued: wakeResult.ok,
-        retryAfterSeconds: wakeResult.ok ? 60 : undefined,
+        onDemandStartQueued: wakeResult.ok,
+        wakeQueued: wakeResult.ok && wakeResult.wakeIncluded,
+        providerReachable: wakeResult.ok ? wakeResult.providerReachable : false,
+        retryAfterSeconds,
       }, { status: 409 })
     }
 

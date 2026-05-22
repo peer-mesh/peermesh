@@ -385,6 +385,16 @@ export default function Dashboard() {
   const [countriesSearch, setCountriesSearch] = useState('')
   const countriesSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const code = params.get('privateCode') ?? params.get('private') ?? params.get('code')
+    const normalized = code?.trim() ?? ''
+    if (/^\d{9}$/.test(normalized)) {
+      setPrivateCodeInput(normalized)
+      setSelectedCountry(null)
+    }
+  }, [])
+
   const loadCountries = useCallback(async (page: number, search: string) => {
     setCountriesLoading(true)
     setCountriesError(false)
@@ -1143,20 +1153,34 @@ export default function Dashboard() {
     }
     setConnecting(true)
     try {
-      const res = await fetch('/api/session/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(isPrivateConnect ? { privateCode: trimmedPrivateCode } : { country: selectedCountry }),
-      })
-      const data = await res.json()
-      if ((!res.ok || data.error) && data.nextStep) {
-        router.push(data.nextStep)
+      let lastQueuedMessage: string | null = null
+      for (let attempt = 0; attempt < (isPrivateConnect ? 4 : 1); attempt += 1) {
+        const res = await fetch('/api/session/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(isPrivateConnect ? { privateCode: trimmedPrivateCode } : { country: selectedCountry }),
+        })
+        const data = await res.json()
+        if ((!res.ok || data.error) && data.nextStep) {
+          router.push(data.nextStep)
+          return
+        }
+        if (!res.ok || data.error) {
+          if (isPrivateConnect && data.onDemandStartQueued && attempt < 3) {
+            lastQueuedMessage = data.error ?? 'Provider is starting. Retrying...'
+            setConnectError(lastQueuedMessage)
+            const retryMs = Math.max(3000, Math.min(10000, Number(data.retryAfterSeconds ?? 5) * 1000))
+            await new Promise(resolve => setTimeout(resolve, retryMs))
+            continue
+          }
+          throw new Error(data.error ?? `Server error (${res.status})`)
+        }
+        const targetCountry = data.country ?? selectedCountry
+        const fallback = (data.relayFallbackList ?? [data.relayEndpoint]).join(',')
+        router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&relayFallback=${encodeURIComponent(fallback)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}&connectionType=${isPrivateConnect ? 'private' : 'public'}`)
         return
       }
-      if (!res.ok || data.error) throw new Error(data.error ?? `Server error (${res.status})`)
-      const targetCountry = data.country ?? selectedCountry
-      const fallback = (data.relayFallbackList ?? [data.relayEndpoint]).join(',')
-      router.push(`/browse?relay=${encodeURIComponent(data.relayEndpoint)}&relayFallback=${encodeURIComponent(fallback)}&country=${encodeURIComponent(targetCountry)}&userId=${profile.id}&dbSessionId=${data.sessionId}&preferredProviderUserId=${encodeURIComponent(data.preferredProviderUserId ?? '')}&privateProviderUserId=${encodeURIComponent(data.privateProviderUserId ?? '')}&privateBaseDeviceId=${encodeURIComponent(data.privateBaseDeviceId ?? '')}&connectionType=${isPrivateConnect ? 'private' : 'public'}`)
+      throw new Error(lastQueuedMessage ?? 'Private provider did not come online in time. Try again shortly.')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Could not connect'
       setConnectError(msg === 'Failed to fetch' ? 'Network error – could not reach server' : msg)

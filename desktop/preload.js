@@ -5,6 +5,7 @@ try { _version = require('./package.json').version } catch {}
 
 contextBridge.exposeInMainWorld('peermesh', {
   version: _version,
+  appBaseUrl: 'https://peermesh-beta.vercel.app',
   getState: () => ipcRenderer.invoke('get-state'),
   getExtId: () => ipcRenderer.invoke('get-ext-id'),
   checkWebsiteAuth: () => ipcRenderer.invoke('check-website-auth'),
@@ -17,6 +18,7 @@ contextBridge.exposeInMainWorld('peermesh', {
   setSharingSchedule: (schedule) => ipcRenderer.invoke('set-sharing-schedule', schedule),
   setScheduleWakeEnabled: (enabled) => ipcRenderer.invoke('set-schedule-wake-enabled', enabled),
   setOnDemandWakeEnabled: (enabled) => ipcRenderer.invoke('set-on-demand-wake-enabled', enabled),
+  setPrivateOnDemandStartEnabled: (enabled) => ipcRenderer.invoke('set-private-on-demand-start-enabled', enabled),
   setConnectionSlots: (slots) => ipcRenderer.invoke('set-connection-slots', slots),
   setDailyShareLimit: (limitMb) => ipcRenderer.invoke('set-daily-share-limit', limitMb),
   setSlotDailyLimit: (payload) => ipcRenderer.invoke('set-slot-daily-limit', payload),
@@ -24,6 +26,8 @@ contextBridge.exposeInMainWorld('peermesh', {
   updatePrivateShare: (payload) => ipcRenderer.invoke('update-private-share', payload),
   signOut: () => ipcRenderer.invoke('sign-out'),
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),
+  checkDesktopUpdate: () => ipcRenderer.invoke('check-desktop-update'),
+  downloadDesktopUpdate: () => ipcRenderer.invoke('download-desktop-update'),
   acceptProviderTerms: (opts) => ipcRenderer.invoke('accept-provider-terms', opts),
   requestDeviceCode: () => ipcRenderer.invoke('request-device-code'),
   pollDeviceCode: (device_code) => ipcRenderer.invoke('poll-device-code', { device_code }),

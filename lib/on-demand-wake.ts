@@ -2,6 +2,7 @@ export const ON_DEMAND_WAKE_BUCKET_MS = 5 * 60 * 1000
 export const ON_DEMAND_WAKE_EXPIRES_MS = 15 * 60 * 1000
 
 export type OnDemandWakeAction = 'wake' | 'start'
+export type OnDemandWakeReason = 'on_demand_private_wake' | 'on_demand_private_start'
 
 export type OnDemandWakeJobRow = {
   user_id: string
@@ -12,7 +13,7 @@ export type OnDemandWakeJobRow = {
   idempotency_key: string
   window_key: string
   payload: {
-    reason: 'on_demand_private_wake'
+    reason: OnDemandWakeReason
     requesterUserId: string
     requestedAt: string
     source: string
@@ -36,6 +37,7 @@ export function buildOnDemandWakeJobRows(input: {
   requesterUserId: string
   now?: Date
   source?: string
+  includeWake?: boolean
 }): OnDemandWakeJobRow[] {
   const now = input.now ?? new Date()
   const requestedAt = now.toISOString()
@@ -45,8 +47,10 @@ export function buildOnDemandWakeJobRows(input: {
   const bucket = getOnDemandWakeBucket(now)
   const keyBase = `${input.providerUserId}:${baseDeviceId}:${input.requesterUserId}:on-demand:${bucket}`
   const windowKey = `on-demand:${bucket}`
+  const actions: OnDemandWakeAction[] = input.includeWake === true ? ['wake', 'start'] : ['start']
+  const reason: OnDemandWakeReason = input.includeWake === true ? 'on_demand_private_wake' : 'on_demand_private_start'
 
-  return (['wake', 'start'] as const).map((action) => ({
+  return actions.map((action) => ({
     user_id: input.providerUserId,
     base_device_id: baseDeviceId,
     action,
@@ -55,7 +59,7 @@ export function buildOnDemandWakeJobRows(input: {
     idempotency_key: `${keyBase}:${action}`,
     window_key: windowKey,
     payload: {
-      reason: 'on_demand_private_wake',
+      reason,
       requesterUserId: input.requesterUserId,
       requestedAt,
       source,

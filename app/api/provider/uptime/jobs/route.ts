@@ -63,6 +63,12 @@ export async function GET(req: Request) {
   const claimId = getDeviceClaimId(req, baseDeviceId)
 
   await adminClient
+    .from('provider_uptime_schedules')
+    .update({ last_provider_seen_at: nowIso })
+    .eq('user_id', userId)
+    .eq('base_device_id', baseDeviceId)
+
+  await adminClient
     .from('provider_wake_jobs')
     .update({ status: 'expired', updated_at: nowIso })
     .eq('user_id', userId)

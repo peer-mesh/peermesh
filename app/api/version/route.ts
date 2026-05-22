@@ -1,28 +1,12 @@
 import { NextResponse } from 'next/server'
-import { readdirSync, readFileSync } from 'fs'
+import { readFileSync } from 'fs'
 import { join } from 'path'
+import { DESKTOP_PLATFORM_EXT, findLatestDesktopVersionSync, type DesktopPlatform } from '@/lib/download-artifacts'
 
-function compareVersions(a: string, b: string): number {
-  const aParts = a.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
-  const bParts = b.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
-  const length = Math.max(aParts.length, bParts.length)
-  for (let index = 0; index < length; index += 1) {
-    const diff = (aParts[index] ?? 0) - (bParts[index] ?? 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
+export const dynamic = 'force-dynamic'
 
-function getLatestDesktopVersion(): string | null {
-  try {
-    const files = readdirSync(join(process.cwd(), 'public'))
-    const versions = files
-      .map(file => file.match(/^PeerMesh-Setup_(.+)\.exe$/)?.[1] ?? null)
-      .filter((version): version is string => !!version)
-    if (!versions.length) return null
-    versions.sort(compareVersions).reverse()
-    return versions[0] ?? null
-  } catch { return null }
+function getLatestDesktopVersion(platform: DesktopPlatform): string | null {
+  return findLatestDesktopVersionSync(join(process.cwd(), 'public'), DESKTOP_PLATFORM_EXT[platform])
 }
 
 function getExtensionVersion(): string {
@@ -40,13 +24,27 @@ function getCliVersion(): string {
 }
 
 export async function GET() {
+  const desktopVersions = {
+    win: getLatestDesktopVersion('win'),
+    mac: getLatestDesktopVersion('mac'),
+    linux: getLatestDesktopVersion('linux'),
+  }
+  const defaultDesktopVersion = desktopVersions.win ?? desktopVersions.mac ?? desktopVersions.linux
+
   return NextResponse.json({
     api: {
       version: 'v1',
       prefix: '/api',
       docs: '/developers/api-docs',
     },
-    desktop: getLatestDesktopVersion(),
+    desktop: defaultDesktopVersion,
+    downloads: {
+      desktop: {
+        win: desktopVersions.win ? { version: desktopVersions.win, url: '/api/desktop-download?platform=win' } : null,
+        mac: desktopVersions.mac ? { version: desktopVersions.mac, url: '/api/desktop-download?platform=mac' } : null,
+        linux: desktopVersions.linux ? { version: desktopVersions.linux, url: '/api/desktop-download?platform=linux' } : null,
+      },
+    },
     extension: getExtensionVersion(),
     cli: getCliVersion(),
   })

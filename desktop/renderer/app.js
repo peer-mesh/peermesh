@@ -7,6 +7,7 @@ const startupBusy = {
   sharingSchedule: false,
   scheduleWakeEnabled: false,
   onDemandWake: false,
+  privateOnDemandStart: false,
 }
 
 let devicePollInterval = null
@@ -29,6 +30,7 @@ let dailyLimitSaving = false
 let sharingScheduleSaving = false
 let slotUpdating = false
 let lastPrivateShareLoadAt = 0
+let desktopUpdateBusy = false
 const PRIVATE_SHARE_REFRESH_TTL = 2500
 
 // Pending edits: user changes not yet saved. Polls skip overwriting these fields.
@@ -274,6 +276,7 @@ function syncSlotDailyLimitInput() {
 function renderPrivateShare() {
   const codeEl = document.getElementById('private-share-code')
   const copyBtn = document.getElementById('copy-private-share')
+  const copyLinkBtn = document.getElementById('copy-private-link')
   const refreshBtn = document.getElementById('refresh-private-share')
   const toggleBtn = document.getElementById('toggle-private-share')
   const expiryEl = document.getElementById('private-share-expiry')
@@ -323,6 +326,7 @@ function renderPrivateShare() {
   }
 
   if (copyBtn) copyBtn.disabled = !signedIn || !privateShare?.code || privateShareSaving
+  if (copyLinkBtn) copyLinkBtn.disabled = !signedIn || !privateShare?.code || privateShareSaving
   if (refreshBtn) {
     refreshBtn.disabled = !signedIn || privateShareSaving
     refreshBtn.textContent = privateShareSaving && privateShareAction === 'refresh' ? 'REFRESHING...' : 'REFRESH CODE'
@@ -557,6 +561,38 @@ function renderDailyLimit(state) {
   status.textContent = `${formatDailyLimit(currentLimit)} Minimum custom limit: 1024 MB.${syncLabel ? ` ${syncLabel}` : ''}`
 }
 
+function renderDesktopUpdate(state) {
+  const update = state?.desktopUpdate ?? null
+  const desc = document.getElementById('desktop-update-desc')
+  const status = document.getElementById('desktop-update-status')
+  const checkBtn = document.getElementById('desktop-update-check')
+  const downloadBtn = document.getElementById('desktop-update-download')
+  const currentVersion = state?.version ?? api.version ?? ''
+  const latestVersion = update?.latestVersion ?? null
+  const updateAvailable = update?.updateAvailable === true
+
+  if (desc) {
+    desc.textContent = updateAvailable
+      ? `Latest installer is v${latestVersion}. Current desktop is v${currentVersion}.`
+      : 'Check for the latest PeerMesh desktop installer.'
+  }
+  if (status) {
+    if (desktopUpdateBusy) status.textContent = 'Checking for update...'
+    else if (update?.error) status.textContent = `Update check failed: ${update.error}`
+    else if (updateAvailable) status.textContent = `Update available: v${latestVersion}. Download it, then run the installer.`
+    else if (latestVersion) status.textContent = `You are on the latest desktop version (${currentVersion}).`
+    else status.textContent = 'Not checked yet.'
+  }
+  if (checkBtn) {
+    checkBtn.disabled = desktopUpdateBusy
+    checkBtn.textContent = desktopUpdateBusy ? 'CHECKING...' : 'CHECK'
+  }
+  if (downloadBtn) {
+    downloadBtn.disabled = desktopUpdateBusy
+    downloadBtn.textContent = updateAvailable ? 'DOWNLOAD UPDATE' : 'DOWNLOAD LATEST'
+  }
+}
+
 function renderStartupPreferences(state) {
   const config = state?.config ?? {}
   const launchToggle = document.getElementById('launch-startup-toggle')
@@ -565,12 +601,14 @@ function renderStartupPreferences(state) {
   const scheduleToggle = document.getElementById('sharing-schedule-toggle')
   const scheduleWakeToggle = document.getElementById('schedule-wake-toggle')
   const onDemandWakeToggle = document.getElementById('on-demand-wake-toggle')
+  const privateOnDemandStartToggle = document.getElementById('private-on-demand-start-toggle')
   const launchDesc = document.getElementById('launch-startup-desc')
   const autoShareDesc = document.getElementById('auto-share-desc')
   const preventSleepDesc = document.getElementById('prevent-sleep-desc')
   const scheduleDesc = document.getElementById('sharing-schedule-desc')
   const scheduleWakeDesc = document.getElementById('schedule-wake-desc')
   const onDemandWakeDesc = document.getElementById('on-demand-wake-desc')
+  const privateOnDemandStartDesc = document.getElementById('private-on-demand-start-desc')
   const scheduleControls = document.getElementById('sharing-schedule-controls')
   const scheduleStart = document.getElementById('sharing-schedule-start')
   const scheduleEnd = document.getElementById('sharing-schedule-end')
@@ -611,7 +649,12 @@ function renderStartupPreferences(state) {
   setToggleVisual(onDemandWakeToggle, {
     on: !!config.allowOnDemandWake,
     loading: startupBusy.onDemandWake,
-    disabled: !signedIn || startupBusy.onDemandWake,
+    disabled: !signedIn || !config.allowPrivateOnDemandStart || startupBusy.onDemandWake,
+  })
+  setToggleVisual(privateOnDemandStartToggle, {
+    on: !!config.allowPrivateOnDemandStart,
+    loading: startupBusy.privateOnDemandStart,
+    disabled: !signedIn || startupBusy.privateOnDemandStart,
   })
 
   if (scheduleControls) scheduleControls.style.display = schedule.enabled ? 'block' : 'none'
@@ -689,10 +732,22 @@ function renderStartupPreferences(state) {
   if (onDemandWakeDesc) {
     if (!signedIn) {
       onDemandWakeDesc.textContent = 'Sign in before allowing requester wake calls.'
+    } else if (!config.allowPrivateOnDemandStart) {
+      onDemandWakeDesc.textContent = 'Enable private on-demand start first. Wake is only useful when a requester may also start sharing.'
     } else if (config.allowOnDemandWake) {
-      onDemandWakeDesc.textContent = 'Known private-share requesters can queue a wake/start request when this provider is offline.'
+      onDemandWakeDesc.textContent = 'Known private-code requesters can queue wake/start requests for this provider.'
     } else {
-      onDemandWakeDesc.textContent = 'Off by default. Private requesters cannot queue wake/start requests for this provider.'
+      onDemandWakeDesc.textContent = 'Off by default. Private requesters can only start this provider while PeerMesh is already reachable.'
+    }
+  }
+
+  if (privateOnDemandStartDesc) {
+    if (!signedIn) {
+      privateOnDemandStartDesc.textContent = 'Sign in before allowing private on-demand start.'
+    } else if (config.allowPrivateOnDemandStart) {
+      privateOnDemandStartDesc.textContent = 'Known private-code requesters can start sharing when PeerMesh is running but idle.'
+    } else {
+      privateOnDemandStartDesc.textContent = 'Off by default. Private-code requesters cannot start sharing on this provider.'
     }
   }
 
@@ -1004,6 +1059,7 @@ function updateUI(state) {
     slotDailyLimitInput = ''
     renderPrivateShare()
     renderStartupPreferences(state)
+    renderDesktopUpdate(state)
     renderDailyLimit(state)
     showScreen('auth-screen')
     return
@@ -1070,6 +1126,7 @@ function updateUI(state) {
 
   renderPrivateShare()
   renderStartupPreferences(state)
+  renderDesktopUpdate(state)
   renderDailyLimit(state)
   renderSlots(displaySlots.configured ?? configuredSlots, displaySlots)
 
@@ -1260,6 +1317,55 @@ async function updateOnDemandWake(enabled) {
   }
 }
 
+async function checkDesktopUpdate() {
+  desktopUpdateBusy = true
+  renderDesktopUpdate(window.__lastPeerMeshState || null)
+  clearMainError()
+  try {
+    const result = await invoke('checkDesktopUpdate')
+    if (!result?.success) throw new Error(result?.error || 'Could not check for update')
+    if (window.__lastPeerMeshState) window.__lastPeerMeshState.desktopUpdate = result.update
+    renderDesktopUpdate(window.__lastPeerMeshState || null)
+  } catch (error) {
+    showMainError(error?.message || 'Could not check for update')
+  } finally {
+    desktopUpdateBusy = false
+    renderDesktopUpdate(window.__lastPeerMeshState || null)
+  }
+}
+
+async function downloadDesktopUpdate() {
+  desktopUpdateBusy = true
+  renderDesktopUpdate(window.__lastPeerMeshState || null)
+  clearMainError()
+  try {
+    const result = await invoke('downloadDesktopUpdate')
+    if (!result?.success) throw new Error(result?.error || 'Could not open update download')
+    if (window.__lastPeerMeshState) window.__lastPeerMeshState.desktopUpdate = result.update
+  } catch (error) {
+    showMainError(error?.message || 'Could not open update download')
+  } finally {
+    desktopUpdateBusy = false
+    renderDesktopUpdate(window.__lastPeerMeshState || null)
+  }
+}
+
+async function updatePrivateOnDemandStart(enabled) {
+  startupBusy.privateOnDemandStart = true
+  renderStartupPreferences(window.__lastPeerMeshState || null)
+  clearMainError()
+  try {
+    const result = await invoke('setPrivateOnDemandStartEnabled', enabled)
+    if (!result?.success) throw new Error(result?.error || 'Could not update private on-demand start setting')
+    await pollState()
+  } catch (error) {
+    showMainError(error?.message || 'Could not update private on-demand start setting')
+  } finally {
+    startupBusy.privateOnDemandStart = false
+    renderStartupPreferences(window.__lastPeerMeshState || null)
+  }
+}
+
 document.getElementById('btn-open-browser').addEventListener('click', () => {
   stopDevicePoll()
   deviceFlowActive = false
@@ -1350,9 +1456,18 @@ document.getElementById('on-demand-wake-toggle').addEventListener('click', async
   await updateOnDemandWake(!current)
 })
 
+document.getElementById('private-on-demand-start-toggle').addEventListener('click', async () => {
+  const current = !!window.__lastPeerMeshState?.config?.allowPrivateOnDemandStart
+  await updatePrivateOnDemandStart(!current)
+})
+
 document.getElementById('btn-dashboard').addEventListener('click', async () => {
   await invoke('openDashboard')
 })
+
+document.getElementById('desktop-update-check').addEventListener('click', checkDesktopUpdate)
+
+document.getElementById('desktop-update-download').addEventListener('click', downloadDesktopUpdate)
 
 document.getElementById('btn-signout').addEventListener('click', async () => {
   if (!confirm('Sign out of PeerMesh?')) return
@@ -1399,6 +1514,21 @@ document.getElementById('copy-private-share').addEventListener('click', async ()
     btn.textContent = 'COPIED'
     setTimeout(() => { btn.textContent = previous }, 1500)
   } catch {}
+})
+
+document.getElementById('copy-private-link').addEventListener('click', async () => {
+  if (!privateShare?.code) return
+  const baseUrl = String(api.appBaseUrl || 'https://peermesh-beta.vercel.app').replace(/\/$/, '')
+  const link = `${baseUrl}/dashboard?privateCode=${encodeURIComponent(privateShare.code)}`
+  try {
+    await navigator.clipboard.writeText(link)
+    const btn = document.getElementById('copy-private-link')
+    const previous = btn.textContent
+    btn.textContent = 'COPIED'
+    setTimeout(() => { btn.textContent = previous }, 1500)
+  } catch {
+    showMainError('Could not copy private link')
+  }
 })
 
 document.getElementById('private-share-expiry').addEventListener('change', async (event) => {
@@ -1591,6 +1721,7 @@ if (window.peermesh?.onSharingError) {
 setOffline(!navigator.onLine)
 renderPrivateShare()
 renderStartupPreferences(null)
+renderDesktopUpdate(null)
 renderDailyLimit(null)
 
 const openBtn = document.getElementById('btn-open-browser')

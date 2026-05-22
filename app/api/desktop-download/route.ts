@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
-import { readFile, readdir } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import { join } from 'path'
+import { DESKTOP_PLATFORM_EXT, findLatestDesktopInstaller, getDesktopInstallerVersion } from '@/lib/download-artifacts'
 
 type Platform = 'win' | 'mac' | 'linux'
 
@@ -8,21 +9,6 @@ const PLATFORM_MIME: Record<Platform, string> = {
   win:   'application/octet-stream',
   mac:   'application/x-apple-diskimage',
   linux: 'application/octet-stream',
-}
-
-const PLATFORM_EXT: Record<Platform, string> = {
-  win:   '.exe',
-  mac:   '.dmg',
-  linux: '.AppImage',
-}
-
-async function findLatestInstaller(dir: string, ext: string): Promise<string | null> {
-  try {
-    const files = (await readdir(dir)).filter((file) => file.startsWith('PeerMesh-Setup_') && file.endsWith(ext))
-    if (!files.length) return null
-    files.sort().reverse()
-    return files[0]
-  } catch { return null }
 }
 
 function detectPlatform(ua: string): Platform {
@@ -40,11 +26,11 @@ export async function GET(req: Request) {
   const platform: Platform = (override && override in PLATFORM_MIME) ? override : detectPlatform(ua)
 
   const mime = PLATFORM_MIME[platform]
-  const ext = PLATFORM_EXT[platform]
+  const ext = DESKTOP_PLATFORM_EXT[platform]
 
   // Try public/ first (Vercel)
   const publicDir = join(process.cwd(), 'public')
-  const publicFile = await findLatestInstaller(publicDir, ext)
+  const publicFile = await findLatestDesktopInstaller(publicDir, ext)
   if (publicFile) {
     const content = await readFile(join(publicDir, publicFile))
     return new NextResponse(content, {
@@ -53,6 +39,7 @@ export async function GET(req: Request) {
         'Content-Disposition': `attachment; filename="${publicFile}"`,
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'X-Platform': platform,
+        'X-PeerMesh-Version': getDesktopInstallerVersion(publicFile, ext) ?? '',
       },
     })
   }
@@ -60,7 +47,7 @@ export async function GET(req: Request) {
   // Try desktop/dist/ (local dev)
   try {
     const distDir = join(process.cwd(), 'desktop', 'dist')
-    const found = await findLatestInstaller(distDir, ext)
+    const found = await findLatestDesktopInstaller(distDir, ext)
     if (found) {
       const content = await readFile(join(distDir, found))
       return new NextResponse(content, {
@@ -68,6 +55,7 @@ export async function GET(req: Request) {
           'Content-Type': mime,
           'Content-Disposition': `attachment; filename="${found}"`,
           'X-Platform': platform,
+          'X-PeerMesh-Version': getDesktopInstallerVersion(found, ext) ?? '',
         },
       })
     }

@@ -490,9 +490,16 @@
       <div class="toggle-row compact">
         <div class="toggle-info">
           <h4>Allow on-demand wake</h4>
-          <p id="on-demand-wake-desc">Known private-share requesters can queue a wake/start request when this provider is offline.</p>
+          <p id="on-demand-wake-desc">Known private-share requesters can queue a wake request when private on-demand start is allowed.</p>
         </div>
         <button class="toggle" id="on-demand-wake-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
+      </div>
+      <div class="toggle-row compact">
+        <div class="toggle-info">
+          <h4>Private on-demand start</h4>
+          <p id="private-on-demand-start-desc">Known private-code requesters can start sharing when PeerMesh is running but idle.</p>
+        </div>
+        <button class="toggle" id="private-on-demand-start-toggle"><span class="toggle-spinner"><span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block"></span></span></button>
       </div>
       <div class="toggle-note" id="startup-note">These settings apply to this desktop only.</div>
     </div>
@@ -564,6 +571,7 @@
       <div class="private-code-row">
         <div class="private-code" id="private-share-code">---------</div>
         <button class="mini-btn" id="copy-private-share" disabled>COPY</button>
+        <button class="mini-btn" id="copy-private-link" disabled>LINK</button>
       </div>
       <div class="private-controls">
         <select class="private-select" id="private-share-expiry">
@@ -597,6 +605,20 @@
     </div>
 
     <div class="divider"></div>
+
+    <div class="private-card" id="desktop-update-card">
+      <div class="private-head">
+        <div>
+          <div class="private-title">Desktop update</div>
+          <div class="private-subtitle" id="desktop-update-desc">Check for the latest PeerMesh desktop installer.</div>
+        </div>
+      </div>
+      <div class="private-controls">
+        <button class="mini-btn" id="desktop-update-check">CHECK</button>
+        <button class="mini-btn" id="desktop-update-download">DOWNLOAD</button>
+      </div>
+      <div class="private-status" id="desktop-update-status">Not checked yet.</div>
+    </div>
 
     <button class="btn btn-secondary" id="btn-dashboard">OPEN DASHBOARD IN BROWSER</button>
 
