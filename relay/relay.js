@@ -40,7 +40,7 @@ function isAllowedTarget(hostname, port) {
 const peerAffinity = new Map()
 const providerShareStatusCache = new Map()
 
-const MAX_RECONNECT_ATTEMPTS = 5
+const MAX_RECONNECT_ATTEMPTS = 12
 
 function log(tag, msg, extra = '') {
   const ts = new Date().toISOString().slice(11, 23)
@@ -278,7 +278,8 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     provider.sessionId = null
     requesterWs.sessionId = null
     sessions.delete(sessionId)
-    attemptReconnect(requesterWs, { ...session, providerId: provider.peerId, reconnectAttempts: 0 })
+    send(requesterWs, { type: 'session_reconnecting', reason: 'provider_unresponsive', attempt: 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
+    attemptReconnect(requesterWs, { ...session, sessionId, providerId: provider.peerId, reconnectAttempts: 0 })
   }, 10_000)
 
   return sessionId
@@ -397,6 +398,10 @@ async function attemptReconnect(requesterWs, droppedSession) {
 
   if ((reconnectAttempts ?? 0) >= MAX_RECONNECT_ATTEMPTS) {
     log(requesterWs.peerId.slice(0,8), `RECONNECT giving up after ${MAX_RECONNECT_ATTEMPTS} attempts`)
+    reportSessionEnd(
+      { ...droppedSession, disconnectReason: droppedSession.disconnectReason ?? 'provider_disconnected' },
+      droppedSession.sessionId ?? droppedSession.dbSessionId ?? 'unknown',
+    )
     send(requesterWs, { type: 'session_ended', reason: 'no_peers_available' })
     return
   }
@@ -416,6 +421,7 @@ async function attemptReconnect(requesterWs, droppedSession) {
 
   if (!nextProvider) {
     log(requesterWs.peerId.slice(0,8), `RECONNECT no provider available in ${country} attempt=${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS}`)
+    send(requesterWs, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt: (reconnectAttempts ?? 0) + 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
     // Retry with backoff: 2s, 4s, 8s, 16s, 30s
     const delay = Math.min(2000 * Math.pow(2, reconnectAttempts ?? 0), 30000)
     setTimeout(() => {
@@ -1084,18 +1090,26 @@ function cleanupSession(ws) {
     session.disconnectReason = ws.role === 'provider' ? 'provider_disconnected' : 'peer_disconnected'
   }
 
-  reportSessionEnd(session, sessionId)
-  sessions.delete(sessionId)
-  log(ws.peerId.slice(0,8), `SESSION_CLEANED id=${sessionId.slice(0,8)} bytes=${session.bytesRequester ?? 0}`)
-
-  if (!other) return
+  if (!other) {
+    reportSessionEnd(session, sessionId)
+    sessions.delete(sessionId)
+    log(ws.peerId.slice(0,8), `SESSION_CLEANED id=${sessionId.slice(0,8)} bytes=${session.bytesRequester ?? 0}`)
+    return
+  }
   other.sessionId = null
 
   // Auto-reconnect — only when provider dropped and requester is still connected
   if (ws.role === 'provider' && other.readyState === WebSocket.OPEN) {
     log(other.peerId.slice(0,8), `PROVIDER_DROPPED — attempting auto-reconnect country=${session.country}`)
-    attemptReconnect(other, session)
+    sessions.delete(sessionId)
+    log(ws.peerId.slice(0,8), `SESSION_RECONNECT_PENDING id=${sessionId.slice(0,8)} bytes=${session.bytesRequester ?? 0}`)
+    send(other, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt: 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
+    attemptReconnect(other, { ...session, sessionId, reconnectAttempts: 0 })
+    return
   } else {
+    reportSessionEnd(session, sessionId)
+    sessions.delete(sessionId)
+    log(ws.peerId.slice(0,8), `SESSION_CLEANED id=${sessionId.slice(0,8)} bytes=${session.bytesRequester ?? 0}`)
     send(other, { type: 'session_ended', reason: 'peer_disconnected' })
   }
 }
@@ -1124,7 +1138,8 @@ const sessionWatchdog = setInterval(() => {
       log(requester.peerId.slice(0,8), `SESSION_WATCHDOG provider gone sessionId=${sessionId.slice(0,8)}`)
       requester.sessionId = null
       sessions.delete(sessionId)
-      attemptReconnect(requester, { ...session, reconnectAttempts: 0 })
+      send(requester, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt: 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
+      attemptReconnect(requester, { ...session, sessionId, reconnectAttempts: 0 })
     }
   }
 }, 30_000)

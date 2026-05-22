@@ -344,7 +344,12 @@ function syncProfile(session) {
   })
 }
 
-function showDisconnectOverlay(reason) {
+function removePeerMeshOverlay() {
+  document.getElementById('peermesh-status-overlay')?.remove()
+  document.getElementById('peermesh-disconnect-overlay')?.remove()
+}
+
+function showPeerMeshStatusOverlay({ state = 'blocked', title, message, autoHideMs = 0 } = {}) {
   try {
     if (window !== window.top) return
   } catch {
@@ -355,11 +360,19 @@ function showDisconnectOverlay(reason) {
   const body = document.body
   if (!root || !body) return
 
-  const existing = document.getElementById('peermesh-disconnect-overlay')
-  if (existing) existing.remove()
+  removePeerMeshOverlay()
+
+  if (state === 'clear' || state === 'connected') return
+
+  const palette = {
+    reconnecting: { accent: '#00ff88', border: 'rgba(0,255,136,0.35)', label: 'PEERMESH RECONNECTING' },
+    reconnected: { accent: '#00ff88', border: 'rgba(0,255,136,0.35)', label: 'PEERMESH RECONNECTED' },
+    blocked: { accent: '#ffaa00', border: 'rgba(255,170,0,0.36)', label: 'PEERMESH PROTECTION ACTIVE' },
+    ended: { accent: '#ff6060', border: 'rgba(255,96,96,0.35)', label: 'PEERMESH DISCONNECTED' },
+  }[state] || { accent: '#ffaa00', border: 'rgba(255,170,0,0.36)', label: 'PEERMESH STATUS' }
 
   const overlay = document.createElement('div')
-  overlay.id = 'peermesh-disconnect-overlay'
+  overlay.id = 'peermesh-status-overlay'
   overlay.style.cssText = [
     'position:fixed',
     'top:16px',
@@ -368,23 +381,181 @@ function showDisconnectOverlay(reason) {
     'max-width:360px',
     'padding:14px 16px',
     'background:rgba(10,10,15,0.96)',
-    'border:1px solid rgba(255,96,96,0.35)',
+    `border:1px solid ${palette.border}`,
     'border-radius:10px',
     'box-shadow:0 10px 30px rgba(0,0,0,0.3)',
     'font-family:ui-monospace,SFMono-Regular,Menlo,monospace',
     'color:#f5f5f8',
+    'text-align:left',
   ].join(';')
   overlay.innerHTML = `
-    <div style="font-size:10px;letter-spacing:1px;color:#ff8080;margin-bottom:8px">PEERMESH DISCONNECTED</div>
-    <div style="font-size:12px;line-height:1.6;color:#cfd3dc">${String(reason || 'Your routed connection dropped.')}</div>
-    <div style="font-size:11px;line-height:1.5;color:#9090a8;margin-top:6px">Reconnect from the extension popup, then reload this tab.</div>
-    <div style="display:flex;gap:8px;margin-top:12px">
-      <button id="peermesh-disconnect-close" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:transparent;color:#f5f5f8;cursor:pointer;font:inherit;font-size:11px">DISMISS</button>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      ${state === 'reconnecting' ? `<span style="width:10px;height:10px;border:2px solid rgba(0,255,136,0.25);border-top-color:${palette.accent};border-radius:999px;display:inline-block;animation:peermesh-spin 0.8s linear infinite"></span>` : ''}
+      <div style="font-size:10px;letter-spacing:1px;color:${palette.accent}">${palette.label}</div>
     </div>
+    <div style="font-size:13px;line-height:1.45;color:#f5f5f8;font-weight:700">${String(title || 'PeerMesh status')}</div>
+    <div style="font-size:12px;line-height:1.6;color:#cfd3dc;margin-top:5px">${String(message || 'Traffic is blocked until PeerMesh is ready.')}</div>
+    ${state === 'ended' ? `<div style="font-size:11px;line-height:1.5;color:#9090a8;margin-top:6px">Reconnect from the extension popup, then reload this tab.</div>` : ''}
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button id="peermesh-status-close" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:transparent;color:#f5f5f8;cursor:pointer;font:inherit;font-size:11px">DISMISS</button>
+    </div>
+    <style>@keyframes peermesh-spin{to{transform:rotate(360deg)}}</style>
   `
   body.appendChild(overlay)
-  document.getElementById('peermesh-disconnect-close')?.addEventListener('click', () => overlay.remove())
+  document.getElementById('peermesh-status-close')?.addEventListener('click', () => overlay.remove())
+  if (autoHideMs > 0) {
+    setTimeout(() => {
+      if (document.getElementById('peermesh-status-overlay') === overlay) overlay.remove()
+    }, autoHideMs)
+  }
 }
+
+function showDisconnectOverlay(reason) {
+  showPeerMeshStatusOverlay({
+    state: 'ended',
+    title: 'PeerMesh connection lost',
+    message: String(reason || 'Your routed connection dropped.'),
+  })
+}
+
+let sessionPanelTimer = null
+
+function formatPanelMbps(value) {
+  const speed = Number(value)
+  if (!Number.isFinite(speed) || speed <= 0) return '0.00 Mbps'
+  return `${speed >= 10 ? speed.toFixed(1) : speed.toFixed(2)} Mbps`
+}
+
+function stopSessionPanelPolling() {
+  if (!sessionPanelTimer) return
+  clearInterval(sessionPanelTimer)
+  sessionPanelTimer = null
+}
+
+function closeSessionPanel() {
+  stopSessionPanelPolling()
+  document.getElementById('peermesh-session-panel')?.remove()
+}
+
+function getSessionPanelStatusLabel(status) {
+  if (status?.failClosed) return { label: 'PROTECTED BLOCK', color: '#ffaa00' }
+  if (status?.connected) return { label: 'CONNECTED', color: '#00ff88' }
+  return { label: 'DISCONNECTED', color: '#ff6060' }
+}
+
+function renderSessionPanelStatus(status = {}) {
+  const panel = document.getElementById('peermesh-session-panel')
+  if (!panel) return
+
+  const session = status.session || null
+  const quality = session?.quality || null
+  const helper = status.helper || null
+  const state = getSessionPanelStatusLabel(status)
+  const country = session?.country || helper?.country || 'none'
+  const connectionType = session?.connectionType || 'none'
+  const currentSpeed = quality ? formatPanelMbps(quality.currentMbps) : '0.00 Mbps'
+  const avgSpeed = quality ? formatPanelMbps(quality.avgMbps) : '0.00 Mbps'
+  const provider = quality?.providerKind || helper?.source || 'unknown'
+  const sessionId = session?.sessionId || session?.id || ''
+  const failReason = status.failClosedReason || (status.failClosed ? 'Traffic is blocked to protect your real connection.' : '')
+
+  panel.querySelector('[data-pm-status]').textContent = state.label
+  panel.querySelector('[data-pm-status]').style.color = state.color
+  panel.querySelector('[data-pm-dot]').style.background = state.color
+  panel.querySelector('[data-pm-country]').textContent = country
+  panel.querySelector('[data-pm-mode]').textContent = connectionType
+  panel.querySelector('[data-pm-current]').textContent = currentSpeed
+  panel.querySelector('[data-pm-avg]').textContent = avgSpeed
+  panel.querySelector('[data-pm-provider]').textContent = provider
+  panel.querySelector('[data-pm-session]').textContent = sessionId ? sessionId.slice(0, 8) : 'none'
+  panel.querySelector('[data-pm-helper]').textContent = helper?.available
+    ? `${helper.source || 'desktop'} ${helper.running ? 'sharing' : 'ready'}`
+    : 'not available'
+  panel.querySelector('[data-pm-reason]').textContent = failReason
+}
+
+async function refreshSessionPanelStatus() {
+  try {
+    const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' })
+    renderSessionPanelStatus(status || {})
+  } catch {
+    renderSessionPanelStatus({ failClosed: true, failClosedReason: 'PeerMesh background is not reachable.' })
+  }
+}
+
+function showSessionPanel() {
+  try {
+    if (window !== window.top) return
+  } catch {
+    return
+  }
+
+  const body = document.body
+  if (!body) return
+
+  const existing = document.getElementById('peermesh-session-panel')
+  if (existing) {
+    closeSessionPanel()
+    return
+  }
+
+  const panel = document.createElement('div')
+  panel.id = 'peermesh-session-panel'
+  panel.style.cssText = [
+    'position:fixed',
+    'right:16px',
+    'bottom:16px',
+    'z-index:2147483647',
+    'width:min(360px,calc(100vw - 32px))',
+    'background:rgba(10,10,15,0.97)',
+    'border:1px solid rgba(0,255,136,0.28)',
+    'border-radius:10px',
+    'box-shadow:0 12px 36px rgba(0,0,0,0.34)',
+    'color:#f5f5f8',
+    'font-family:ui-monospace,SFMono-Regular,Menlo,monospace',
+    'text-align:left',
+    'overflow:hidden',
+  ].join(';')
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.08)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span data-pm-dot style="width:8px;height:8px;border-radius:999px;background:#666"></span>
+        <div>
+          <div style="font-size:11px;letter-spacing:1px;color:#00ff88">PEERMESH SESSION</div>
+          <div data-pm-status style="font-size:13px;font-weight:700;margin-top:2px">LOADING</div>
+        </div>
+      </div>
+      <button id="peermesh-session-panel-close" style="border:1px solid rgba(255,255,255,0.14);background:transparent;color:#cfd3dc;border-radius:7px;padding:6px 8px;cursor:pointer;font:inherit;font-size:11px">DISMISS</button>
+    </div>
+    <div style="padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
+      <div><div style="color:#777b8f;font-size:10px">COUNTRY</div><div data-pm-country style="margin-top:3px">none</div></div>
+      <div><div style="color:#777b8f;font-size:10px">MODE</div><div data-pm-mode style="margin-top:3px">none</div></div>
+      <div><div style="color:#777b8f;font-size:10px">CURRENT SPEED</div><div data-pm-current style="margin-top:3px;color:#00ff88">0.00 Mbps</div></div>
+      <div><div style="color:#777b8f;font-size:10px">AVG SPEED</div><div data-pm-avg style="margin-top:3px;color:#00ff88">0.00 Mbps</div></div>
+      <div><div style="color:#777b8f;font-size:10px">PROVIDER</div><div data-pm-provider style="margin-top:3px">unknown</div></div>
+      <div><div style="color:#777b8f;font-size:10px">SESSION</div><div data-pm-session style="margin-top:3px">none</div></div>
+      <div style="grid-column:1 / -1"><div style="color:#777b8f;font-size:10px">LOCAL HELPER</div><div data-pm-helper style="margin-top:3px">checking</div></div>
+      <div style="grid-column:1 / -1;color:#ffaa00;font-size:11px;line-height:1.5;min-height:16px" data-pm-reason></div>
+    </div>
+    <div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <span style="font-size:10px;color:#777b8f">Shortcut: Ctrl+Shift+P</span>
+      <button id="peermesh-session-panel-dismiss" style="border:none;background:transparent;color:#9090a8;cursor:pointer;font:inherit;font-size:10px;padding:0">DISMISS</button>
+    </div>
+  `
+  body.appendChild(panel)
+  document.getElementById('peermesh-session-panel-close')?.addEventListener('click', closeSessionPanel)
+  document.getElementById('peermesh-session-panel-dismiss')?.addEventListener('click', closeSessionPanel)
+  refreshSessionPanelStatus()
+  stopSessionPanelPolling()
+  sessionPanelTimer = setInterval(refreshSessionPanelStatus, 2000)
+}
+
+document.addEventListener('keydown', (event) => {
+  if (!event.ctrlKey || !event.shiftKey || event.key.toLowerCase() !== 'p') return
+  event.preventDefault()
+  event.stopPropagation()
+  showSessionPanel()
+}, true)
 
 withDocumentRoot(markExtensionPresence)
 
@@ -400,5 +571,18 @@ chrome.storage.onChanged?.addListener((changes, areaName) => {
 chrome.runtime.onMessage?.addListener((message) => {
   if (message?.type === 'PEERMESH_SESSION_ENDED') {
     showDisconnectOverlay(message.reason)
+  }
+  if (message?.type === 'PEERMESH_BROWSING_STATUS') {
+    if (message.state === 'clear' || message.state === 'connected') {
+      removePeerMeshOverlay()
+      return
+    }
+    showPeerMeshStatusOverlay({
+      state: message.state,
+      title: message.title,
+      message: message.message,
+      autoHideMs: message.state === 'reconnected' ? 4500 : 0,
+    })
+    refreshSessionPanelStatus()
   }
 })

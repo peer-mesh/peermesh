@@ -1070,7 +1070,7 @@ async function registerWindowsScheduleWakeTask(schedule) {
     '$action = New-ScheduledTaskAction -Execute $execute -Argument $arguments',
     `$trigger = New-ScheduledTaskTrigger -Daily -At ${quotePowerShellString(schedule.startTime)}`,
     '$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries',
-    '$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel LeastPrivilege',
+    '$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited',
     "Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Wakes this PC so PeerMesh can start scheduled sharing.' -Force | Out-Null",
   ].join('; ')
   await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script])
@@ -2151,6 +2151,7 @@ async function handleNativeHostMessage(message) {
   log.info('NATIVE', `nativeHost message: ${message.type}`, { payload: message.payload ? Object.keys(message.payload) : undefined })
   switch (message.type) {
     case 'status': return { success: true, ...(await getNativeState()) }
+    case 'launch_app': { const ok = await ensureDesktopApp(); if (!ok) return { success: false, error: 'Desktop helper did not start' }; return { success: true, ...(await callControl('/native/state')) } }
     case 'sync_auth': { const ok = await ensureDesktopApp(); if (!ok) return { success: false, error: 'Desktop helper did not start' }; return { success: true, ...(await callControl('/native/auth', { method: 'POST', body: message.payload || {} })) } }
     case 'start_sharing': { const ok = await ensureDesktopApp(); if (!ok) return { success: false, error: 'Desktop helper did not start' }; return { success: true, ...(await callControl('/native/share/start', { method: 'POST', body: message.payload || {} })) } }
     case 'stop_sharing': { const ok = await ensureDesktopApp(); if (!ok) return { success: false, error: 'Desktop helper did not start' }; return { success: true, ...(await callControl('/native/share/stop', { method: 'POST' })) } }

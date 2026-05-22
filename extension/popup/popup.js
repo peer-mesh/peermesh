@@ -136,6 +136,19 @@ function restoreFocusedInput(snapshot) {
   }
 }
 
+function captureScrollPosition() {
+  const el = document.scrollingElement || document.documentElement || document.body
+  return Number(el?.scrollTop ?? 0)
+}
+
+function restoreScrollPosition(scrollTop) {
+  if (!Number.isFinite(scrollTop) || scrollTop <= 0) return
+  requestAnimationFrame(() => {
+    const el = document.scrollingElement || document.documentElement || document.body
+    if (el) el.scrollTop = scrollTop
+  })
+}
+
 window.addEventListener('online', () => { state.isOnline = true; render() })
 window.addEventListener('offline', () => { state.isOnline = false; render() })
 
@@ -672,6 +685,7 @@ function startAuthPolling() {
 function render() {
   const app = document.getElementById('app')
   const focusedInput = captureFocusedInput()
+  const scrollTop = captureScrollPosition()
 
   if (state.loading) {
     app.innerHTML = `<div class="loading"><div class="spinner"></div>LOADING...</div>`
@@ -685,6 +699,7 @@ function render() {
 
   renderDashboard(app)
   restoreFocusedInput(focusedInput)
+  restoreScrollPosition(scrollTop)
 }
 
 function renderAuth(app) {
@@ -721,6 +736,9 @@ function renderDashboard(app) {
   const standaloneHelper = activeHelper?.source === 'extension'
   const configuredSlots = activeHelper?.slots?.configured ?? activeHelper?.connectionSlots ?? 1
   const activeSlots = activeHelper?.slots?.active ?? 0
+  const privateSlotCount = Math.min(configuredSlots, state.privateShares.filter(s => s?.enabled).length)
+  const publicSlotCount = Math.max(0, configuredSlots - privateSlotCount)
+  const slotModeSummary = `${publicSlotCount} public / ${privateSlotCount} private`
   const slotMax = standaloneHelper ? 1 : 32
   const slotDots = Array.from({ length: configuredSlots }, (_, index) => {
     const running = !!activeHelper?.slots?.statuses?.[index]?.running || index < activeSlots
@@ -866,14 +884,14 @@ function renderDashboard(app) {
         <div class="share-info">
           <h4>Share my connection</h4>
           <p>${isSharing ? 'Sharing active - earning credits' : helperLabel}</p>
-          ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.privateShare?.active ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.privateShare?.active ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.privateShare?.active ? '#00ff88' : '#666680'}">${state.privateShare?.active ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>` : ''}
+          ${isSharing ? `<div style="margin-top:4px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:rgba(255,255,255,0.05);border:1px solid #1e1e2a;color:#666680">${slotModeSummary}</div>` : ''}
           ${state.user?.dailyLimitMb != null ? `<p style="font-size:10px;color:var(--muted);margin-top:2px">${formatBytes((state.user.dailyLimitMb ?? 0) * 1024 * 1024)} daily limit</p>` : ''}
           <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
               <div>
                 <div style="font-family:'Courier New',monospace;font-size:9px;color:var(--muted);letter-spacing:0.5px">CONNECTION SLOTS</div>
                 <div style="margin-top:4px;display:flex;align-items:center;gap:5px;flex-wrap:wrap">${slotDots}</div>
-                <p style="font-size:10px;color:var(--muted);margin-top:6px">${state.slotUpdating ? 'Updating slot count...' : `${activeSlots} / ${configuredSlots} slots active${activeHelper?.slots?.warning ? ` - ${activeHelper.slots.warning}` : ''}`}</p>
+                <p style="font-size:10px;color:var(--muted);margin-top:6px">${state.slotUpdating ? 'Updating slot count...' : `${activeSlots} / ${configuredSlots} slots active - ${slotModeSummary}${activeHelper?.slots?.warning ? ` - ${activeHelper.slots.warning}` : ''}`}</p>
                 ${!state.slotUpdating && slotsSyncLabel ? `<p style="font-size:10px;color:var(--muted);margin-top:4px;font-family:'Courier New',monospace">${slotsSyncLabel}</p>` : ''}
               </div>
               <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -1229,7 +1247,7 @@ async function createSessionWithOnDemandRetry({ authToken, isPrivateConnect, pri
         state.reconnectStatus = data.providerReachable
           ? 'Private provider is reachable. Starting sharing and retrying...'
           : 'Private provider is offline. On-demand start queued; waiting for it to come online...'
-        state.error = lastQueuedMessage
+        state.error = null
         render()
         const retryMs = Math.max(3000, Math.min(30000, Number(data.retryAfterSeconds ?? 5) * 1000))
         await sleep(retryMs)
@@ -1640,6 +1658,13 @@ chrome.runtime.onMessage.addListener((msg) => {
       pill.style.opacity = '0.4'
       setTimeout(() => { pill.style.opacity = '1' }, 600)
     }
+  }
+
+  if (msg.type === 'SESSION_RECONNECTING') {
+    state.failClosed = true
+    state.reconnectStatus = msg.reason || 'Provider reconnecting. Traffic is blocked until PeerMesh resumes.'
+    state.error = null
+    render()
   }
 
   if (msg.type === 'SESSION_QUALITY') {

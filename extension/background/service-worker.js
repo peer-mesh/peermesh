@@ -1,5 +1,6 @@
 // background/service-worker.js - PeerMesh Extension Service Worker
 const APP_URL = 'https://peermesh-beta.vercel.app'
+const APP_HOST = new URL(APP_URL).hostname
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
@@ -66,6 +67,7 @@ const NATIVE_HOST = 'com.peermesh.desktop'
 const CONTROL_PORT = 7654
 const REQUESTER_SESSION_REFRESH_MS = 45 * 60 * 1000
 const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 4
+const DESKTOP_LAUNCH_WAIT_MS = 8000
 
 let relayWs = null
 let currentSession = null
@@ -327,6 +329,17 @@ async function broadcastSessionEnded(reason = 'Peer connection dropped') {
   } catch {}
 }
 
+async function broadcastBrowsingStatus(status) {
+  try {
+    const tabs = await chrome.tabs.query({})
+    await Promise.all(
+      tabs
+        .filter((tab) => typeof tab.id === 'number')
+        .map((tab) => chrome.tabs.sendMessage(tab.id, { type: 'PEERMESH_BROWSING_STATUS', ...status }).catch(() => {})),
+    )
+  } catch {}
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
     try {
@@ -369,12 +382,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'GET_STATUS': {
           const helper = await persistSharingState()
           const isSharing = helper.available && !helper.ownerMismatch && (helper.running || helper.shareEnabled)
+          const failClosedState = await chrome.storage.session.get(['proxyFailClosedReason']).catch(() => ({}))
           log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
-          sendResponse({ connected: !!currentSession, session: getPublicRequesterSession(), isSharing, helper, failClosed: proxyFailClosed })
+          sendResponse({
+            connected: !!currentSession,
+            session: getPublicRequesterSession(),
+            isSharing,
+            helper,
+            failClosed: proxyFailClosed,
+            failClosedReason: failClosedState.proxyFailClosedReason ?? null,
+          })
           break
         }
         case 'GET_DESKTOP_REQUIRED_STATUS': {
-          const helper = await getDesktopHelperStatusHttp()
+          const helper = await waitForDesktopHelperHttp()
           sendResponse({
             available: !!helper?.available,
             helper,
@@ -831,6 +852,44 @@ async function getDesktopHelperStatus() {
   } catch {
     return { available: false, source: 'desktop', running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
   }
+}
+
+async function waitForDesktopHelperHttp(timeoutMs = DESKTOP_LAUNCH_WAIT_MS) {
+  const first = await getDesktopHelperStatusHttp()
+  if (first?.available) return first
+
+  let nativeStatus = null
+  try {
+    const response = await sendNativeMessage({ type: 'launch_app' })
+    if (response?.success) nativeStatus = response
+  } catch (error) {
+    log('warn', `[DESKTOP] native launch unavailable: ${error.message}`)
+    try {
+      const response = await sendNativeMessage({ type: 'status' })
+      if (response?.success) nativeStatus = response
+    } catch {}
+  }
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 500))
+    const helper = await getDesktopHelperStatusHttp()
+    if (helper?.available) return helper
+  }
+
+  return nativeStatus
+    ? {
+        available: true,
+        source: nativeStatus.where ?? 'desktop',
+        running: !!nativeStatus.running,
+        shareEnabled: !!nativeStatus.shareEnabled,
+        configured: !!nativeStatus.configured,
+        country: nativeStatus.country ?? null,
+        userId: nativeStatus.userId ?? null,
+        version: nativeStatus.version ?? null,
+        baseDeviceId: nativeStatus.baseDeviceId ?? null,
+      }
+    : { available: false, source: 'desktop', running: false, shareEnabled: false, configured: false, country: null, userId: null, version: null }
 }
 
 async function startDesktopSharing({ token, userId, country, trust }) {
@@ -1447,6 +1506,27 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
         // Notify popup so it can show a brief "reconnected" indicator
         chrome.runtime.sendMessage({ type: 'SESSION_RECONNECTED', sessionId: msg.sessionId, attempt: msg.attempt }).catch(() => {})
+        broadcastBrowsingStatus({
+          state: 'reconnected',
+          title: 'PeerMesh reconnected',
+          message: 'Browsing is protected again. Reload the page if this site did not recover automatically.',
+          sessionId: msg.sessionId,
+        }).catch(() => {})
+      }
+
+      if (msg.type === 'session_reconnecting') {
+        const attempt = Number(msg.attempt) || 1
+        const maxAttempts = Number(msg.maxAttempts) || 0
+        const reason = `Provider reconnecting${maxAttempts ? ` (${attempt}/${maxAttempts})` : ''}`
+        setProxyFailClosed(reason)
+        chrome.runtime.sendMessage({ type: 'SESSION_RECONNECTING', reason, attempt, maxAttempts }).catch(() => {})
+        broadcastBrowsingStatus({
+          state: 'reconnecting',
+          title: 'PeerMesh reconnecting',
+          message: `${reason}. Traffic is blocked so your real connection does not leak.`,
+          attempt,
+          maxAttempts,
+        }).catch(() => {})
       }
 
       if (msg.type === 'proxy_response') {
@@ -1766,7 +1846,7 @@ function setProxyDesktop(sessionId, country) {
         mode: 'fixed_servers',
         rules: {
           singleProxy: { scheme: 'http', host: '127.0.0.1', port: 7655 },
-          bypassList: ['localhost', '127.0.0.1', '<local>'],
+          bypassList: ['localhost', '127.0.0.1', '<local>', APP_HOST],
         },
       },
       scope: 'regular',
@@ -1781,6 +1861,11 @@ function setProxyDesktop(sessionId, country) {
   )
   chrome.storage.session.remove(['proxyFailClosed', 'proxyFailClosedReason'])
   chrome.storage.session.set({ proxySessionId: sessionId, proxyHost: '127.0.0.1', proxyPort: 7655 })
+  broadcastBrowsingStatus({
+    state: 'connected',
+    title: 'PeerMesh connected',
+    message: country ? `Browsing via ${country}.` : 'Browsing through PeerMesh.',
+  }).catch(() => {})
   syncActionBadge()
   blockWebRTC()
   if (country) applyHeaderRules({ country, userId: currentSession?.userId || '' })
@@ -1819,6 +1904,7 @@ function setProxyFailClosed(reason = 'Peer connection dropped') {
   const pacScript = `
     function FindProxyForURL(url, host) {
       if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) return 'DIRECT';
+      if (host === '${APP_HOST}') return 'DIRECT';
       return 'PROXY 127.0.0.1:9';
     }
   `
@@ -1831,6 +1917,11 @@ function setProxyFailClosed(reason = 'Peer connection dropped') {
   )
   chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort'])
   chrome.storage.session.set({ proxyFailClosed: true, proxyFailClosedReason: reason })
+  broadcastBrowsingStatus({
+    state: 'blocked',
+    title: 'PeerMesh protecting your IP',
+    message: `${reason}. Traffic is blocked until PeerMesh reconnects or you disconnect.`,
+  }).catch(() => {})
   syncActionBadge()
   blockWebRTC()
 }
@@ -1840,6 +1931,7 @@ function clearProxy() {
   log('info', 'proxy cleared')
   chrome.proxy.settings.clear({ scope: 'regular' })
   chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort', 'proxyFailClosed', 'proxyFailClosedReason'])
+  broadcastBrowsingStatus({ state: 'clear' }).catch(() => {})
   syncActionBadge()
   restoreWebRTC()
   clearHeaderRules()
