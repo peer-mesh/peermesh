@@ -107,9 +107,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Private code must be exactly 9 digits' }, { status: 400 })
   }
 
+  try { await adminClient.rpc('ensure_current_bandwidth_month', { p_user_id: userId }) } catch {}
+
   const { data: profile } = await adminClient
     .from('profiles')
-    .select('role, trust_score, is_verified, is_sharing, is_premium, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes')
+    .select('role, trust_score, is_verified, is_sharing, is_premium, bandwidth_used_month, bandwidth_limit, preferred_providers, wallet_balance_usd, contribution_credits_bytes, outstanding_balance_usd, billing_hold_reason')
     .eq('id', userId)
     .single()
 
@@ -119,6 +121,13 @@ export async function POST(req: Request) {
   }
   if (!isUserTrusted(activeProfile.trust_score)) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 })
+  }
+  if (Number(activeProfile.outstanding_balance_usd ?? 0) > 0 || activeProfile.billing_hold_reason) {
+    return NextResponse.json({
+      error: 'Your account has an outstanding usage balance. Fund your wallet before creating another session.',
+      code: 'billing_hold',
+      outstandingBalanceUsd: Number(activeProfile.outstanding_balance_usd ?? 0),
+    }, { status: 402 })
   }
   const trustScore = Number(activeProfile.trust_score ?? 50)
   const maxConcurrentSessions = trustScore >= 80 ? 8 : trustScore >= 50 ? 3 : 1

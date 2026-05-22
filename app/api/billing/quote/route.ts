@@ -8,6 +8,9 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json().catch(() => ({}))
+  if (!['standard', 'advanced', 'enterprise', 'contributor'].includes(body.tier)) {
+    return NextResponse.json({ error: 'tier is required and must be standard, advanced, enterprise, or contributor' }, { status: 400 })
+  }
   const quote = quoteApiUsage({
     bandwidthGb: Number(body.bandwidthGb ?? 1),
     rpm: Number(body.rpm ?? 60),

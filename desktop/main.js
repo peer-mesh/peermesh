@@ -8,6 +8,7 @@ const {
 const path = require('path')
 const http = require('http')
 const net = require('net')
+const dns = require('dns').promises
 const fs = require('fs')
 const os = require('os')
 const { spawn, spawnSync } = require('child_process')
@@ -2299,6 +2300,40 @@ function isAllowed(hostname, port = 443) {
   return ALLOWED_TARGET_PORTS.has(Number(port)) && !BLOCKED.some(p => p.test(host)) && !PRIVATE.some(p => p.test(host))
 }
 
+function ipv4ToInt(value) {
+  const parts = String(value).split('.').map(part => Number.parseInt(part, 10))
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null
+  return ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
+}
+
+function isPrivateIp(value) {
+  const host = normalizeTargetHost(value)
+  const kind = net.isIP(host)
+  if (kind === 4) {
+    const ip = ipv4ToInt(host)
+    if (ip === null) return false
+    const ranges = [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16], ['224.0.0.0', 4], ['240.0.0.0', 4]]
+    return ranges.some(([base, bits]) => {
+      const baseInt = ipv4ToInt(base)
+      const mask = (0xffffffff << (32 - bits)) >>> 0
+      return baseInt !== null && (ip & mask) === (baseInt & mask)
+    }) || host === '255.255.255.255'
+  }
+  if (kind === 6) return host === '::1' || /^f[cd]/i.test(host) || /^fe[89ab]/i.test(host) || /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i.test(host)
+  return false
+}
+
+async function isAllowedResolved(hostname, port = 443) {
+  const host = normalizeTargetHost(hostname)
+  if (!isAllowed(host, port) || isPrivateIp(host)) return false
+  try {
+    const records = await dns.lookup(host, { all: true, verbatim: false })
+    return records.length > 0 && !records.some(record => isPrivateIp(record.address))
+  } catch {
+    return false
+  }
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ Fetch handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 function addBytes(slot, bytes) {
@@ -2314,7 +2349,7 @@ async function handleFetch(slot, request) {
   log.info('PROXY', `${slotPrefix(slot)} fetch request`, { requestId: requestId?.slice(0,8), method, url })
   try {
     const parsed = new URL(url)
-    if (!['http:', 'https:'].includes(parsed.protocol) || !isAllowed(parsed.hostname, getUrlPort(parsed))) {
+    if (!['http:', 'https:'].includes(parsed.protocol) || !(await isAllowedResolved(parsed.hostname, getUrlPort(parsed)))) {
       log.warn('PROXY', 'blocked URL', { hostname: parsed.hostname, port: getUrlPort(parsed), requestId: requestId?.slice(0,8), slot: slot.index })
       return { requestId, status: 403, headers: {}, body: '', error: 'URL not allowed' }
     }
@@ -2561,7 +2596,7 @@ function connectSlot(slot) {
       } else if (msg.type === 'open_tunnel') {
         slot.requestsHandled++
         syncAggregateState()
-        if (!isAllowed(msg.hostname, Number(msg.port) || 443)) {
+        if (!(await isAllowedResolved(msg.hostname, Number(msg.port) || 443))) {
           log.warn('TUNNEL', 'blocked tunnel target', { hostname: msg.hostname, port: msg.port, slot: slot.index })
           sendRelayMessage(slot, { type: 'tunnel_close', tunnelId: msg.tunnelId })
           return
@@ -2717,7 +2752,7 @@ function openTunnelWs(hostname, port, onOpen) {
   return tunnelWs
 }
 
-const localProxyServer = http.createServer((req, res) => {
+const localProxyServer = http.createServer(async (req, res) => {
   if (!proxySession?.sessionId) {
     log.warn('LOCAL-PROXY', 'HTTP rejected Ã¢â‚¬â€ no session', { url: req.url })
     res.writeHead(503); res.end('No PeerMesh session'); return
@@ -2726,7 +2761,7 @@ const localProxyServer = http.createServer((req, res) => {
   const hostname = parsed.hostname
   const port = parseInt(parsed.port) || 80
   log.info('LOCAL-PROXY', `HTTP ${req.method}`, { target: `${hostname}:${port}`, url: parsed.href.slice(0, 80) })
-  if (!isAllowed(hostname, port)) {
+  if (!(await isAllowedResolved(hostname, port))) {
     log.warn('LOCAL-PROXY', 'HTTP rejected - blocked target', { target: `${hostname}:${port}` })
     res.writeHead(403); res.end('Target not allowed'); return
   }
@@ -2820,7 +2855,7 @@ const localProxyServer = http.createServer((req, res) => {
   })
 })
 
-localProxyServer.on('connect', (req, clientSocket, head) => {
+localProxyServer.on('connect', async (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
   log.info('LOCAL-PROXY', `CONNECT request`, { target: `${hostname}:${port}`, sessionId: proxySession?.sessionId?.slice(0,8) || 'NONE' })
@@ -2830,7 +2865,7 @@ localProxyServer.on('connect', (req, clientSocket, head) => {
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
     clientSocket.destroy(); return
   }
-  if (!isAllowed(hostname, port)) {
+  if (!(await isAllowedResolved(hostname, port))) {
     log.warn('LOCAL-PROXY', 'CONNECT rejected - blocked target', { target: `${hostname}:${port}` })
     clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
     clientSocket.destroy(); return

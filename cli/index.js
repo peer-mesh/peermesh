@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { WebSocket } from 'ws'
-import { connect } from 'net'
+import { connect, isIP } from 'net'
+import { lookup } from 'dns/promises'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
@@ -607,6 +608,40 @@ function isAllowed(hostname, port = 443) {
   return !blocked && !private_ && !badPort
 }
 
+function ipv4ToInt(value) {
+  const parts = String(value).split('.').map(part => Number.parseInt(part, 10))
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null
+  return ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
+}
+
+function isPrivateIp(value) {
+  const host = normalizeTargetHost(value)
+  const kind = isIP(host)
+  if (kind === 4) {
+    const ip = ipv4ToInt(host)
+    if (ip === null) return false
+    const ranges = [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16], ['224.0.0.0', 4], ['240.0.0.0', 4]]
+    return ranges.some(([base, bits]) => {
+      const baseInt = ipv4ToInt(base)
+      const mask = (0xffffffff << (32 - bits)) >>> 0
+      return baseInt !== null && (ip & mask) === (baseInt & mask)
+    }) || host === '255.255.255.255'
+  }
+  if (kind === 6) return host === '::1' || /^f[cd]/i.test(host) || /^fe[89ab]/i.test(host) || /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i.test(host)
+  return false
+}
+
+async function isAllowedResolved(hostname, port = 443) {
+  const host = normalizeTargetHost(hostname)
+  if (!isAllowed(host, port) || isPrivateIp(host)) return false
+  try {
+    const records = await lookup(host, { all: true, verbatim: false })
+    return records.length > 0 && !records.some(record => isPrivateIp(record.address))
+  } catch {
+    return false
+  }
+}
+
 function sanitizeFetchHeaders(headers = {}) {
   const out = {}
   for (const [rawKey, rawValue] of Object.entries(headers ?? {})) {
@@ -1029,7 +1064,7 @@ async function handleFetch(slot, request, limitBytes) {
   clog.info('PROXY', `${slotPrefix(slot)} fetch request`, { requestId: requestId?.slice(0, 8), method, url })
   try {
     const parsed = new URL(url)
-    if (!['http:', 'https:'].includes(parsed.protocol) || !isAllowed(parsed.hostname, getUrlPort(parsed))) return { requestId, status: 403, headers: {}, body: '', error: 'Blocked' }
+    if (!['http:', 'https:'].includes(parsed.protocol) || !(await isAllowedResolved(parsed.hostname, getUrlPort(parsed)))) return { requestId, status: 403, headers: {}, body: '', error: 'Blocked' }
     const res = await fetch(url, {
       method,
       headers: {
@@ -1155,7 +1190,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
 
         case 'open_tunnel': {
           const { tunnelId, hostname, port } = msg
-          if (!isAllowed(hostname, Number(port) || 443)) {
+          if (!(await isAllowedResolved(hostname, Number(port) || 443))) {
             sendMsg(slot, { type: 'tunnel_close', tunnelId })
             break
           }
@@ -1326,14 +1361,14 @@ function openTunnelWs(hostname, port, onOpen) {
   return tunnelWs
 }
 
-const localProxyServer = http.createServer((req, res) => {
+const localProxyServer = http.createServer(async (req, res) => {
   if (!_proxySession?.sessionId) {
     res.writeHead(503); res.end('No PeerMesh session'); return
   }
   const parsed = new URL(req.url.startsWith('http') ? req.url : `http://${req.headers.host}${req.url}`)
   const hostname = parsed.hostname
   const port = parseInt(parsed.port) || 80
-  if (!isAllowed(hostname, port)) {
+  if (!(await isAllowedResolved(hostname, port))) {
     res.writeHead(403); res.end('Target not allowed'); return
   }
 
@@ -1406,14 +1441,14 @@ const localProxyServer = http.createServer((req, res) => {
   })
 })
 
-localProxyServer.on('connect', (req, clientSocket, head) => {
+localProxyServer.on('connect', async (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
   if (!_proxySession?.sessionId) {
     clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
     clientSocket.destroy(); return
   }
-  if (!isAllowed(hostname, port)) {
+  if (!(await isAllowedResolved(hostname, port))) {
     clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
     clientSocket.destroy(); return
   }

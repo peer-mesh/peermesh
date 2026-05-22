@@ -1,11 +1,15 @@
 import { NextResponse } from 'next/server'
 import { isRequestAllowed } from '@/lib/traffic-filter'
+import { getRequestUser } from '@/lib/request-auth'
 
 function getPort(url: URL): number {
   return url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80)
 }
 
 export async function GET(req: Request) {
+  const user = await getRequestUser(req)
+  if (!user) return new NextResponse('Unauthorized', { status: 401 })
+
   const { searchParams } = new URL(req.url)
   let target = searchParams.get('url')
   if (!target) return new NextResponse('Missing url', { status: 400 })

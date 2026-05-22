@@ -61,6 +61,8 @@ type ProviderPayoutRow = {
   created_at: string
 }
 
+export const MIN_PAYOUT_USD = 1
+
 export type SavedPayoutDestination = {
   currency: string | null
   countryCode: string | null
@@ -328,6 +330,9 @@ export async function requestProviderPayout(input: {
   if (sourceAmountUsd <= 0 || Number(profile.wallet_pending_payout_usd ?? 0) <= 0) {
     throw new Error('There is no pending payout balance to withdraw')
   }
+  if (sourceAmountUsd < MIN_PAYOUT_USD) {
+    throw new Error(`Minimum payout is $${MIN_PAYOUT_USD.toFixed(2)}`)
+  }
 
   if (!profile.payout_currency || !profile.payout_bank_code || !profile.payout_account_number || !profile.payout_beneficiary_name) {
     throw new Error('Save a payout destination before requesting a payout')
@@ -340,25 +345,60 @@ export async function requestProviderPayout(input: {
   )
 
   const reference = `pm_payout_${input.userId.slice(0, 8)}_${Date.now()}`
-  const transfer = await createFlutterwaveTransfer({
-    accountBank: profile.payout_bank_code,
-    accountNumber: profile.payout_account_number,
-    amount: quote.destinationAmount,
-    currency: quote.destinationCurrency,
-    debitCurrency: quote.sourceCurrency,
-    beneficiaryName: profile.payout_beneficiary_name,
-    destinationBranchCode: profile.payout_branch_code,
-    reference,
-    callbackUrl: input.callbackUrl ?? undefined,
-    meta: {
-      userId: input.userId,
-      purpose: 'provider_payout',
-      sourceAmountUsd,
-    },
+  const { data: reserved, error: reserveError } = await adminClient.rpc('reserve_provider_payout', {
+    p_user_id: input.userId,
+    p_amount_usd: sourceAmountUsd,
+    p_reservation_id: reference,
   })
+  if (reserveError) throw new Error(reserveError.message)
+  if (reserved !== true) {
+    throw new Error('A payout is already being processed or the pending balance changed. Refresh and try again.')
+  }
+
+  let transfer
+  try {
+    transfer = await createFlutterwaveTransfer({
+      accountBank: profile.payout_bank_code,
+      accountNumber: profile.payout_account_number,
+      amount: quote.destinationAmount,
+      currency: quote.destinationCurrency,
+      debitCurrency: quote.sourceCurrency,
+      beneficiaryName: profile.payout_beneficiary_name,
+      destinationBranchCode: profile.payout_branch_code,
+      reference,
+      callbackUrl: input.callbackUrl ?? undefined,
+      meta: {
+        userId: input.userId,
+        purpose: 'provider_payout',
+        sourceAmountUsd,
+      },
+    })
+  } catch (error) {
+    await adminClient
+      .from('provider_payouts')
+      .update({ status: 'pending', flutterwave_transfer_id: null })
+      .eq('user_id', input.userId)
+      .eq('status', 'processing')
+      .eq('flutterwave_transfer_id', reference)
+    await adminClient.rpc('add_provider_pending_payout', {
+      p_user_id: input.userId,
+      p_amount_usd: sourceAmountUsd,
+    })
+    throw error
+  }
 
   const transferId = String(transfer.data?.id ?? '').trim()
   if (!transferId) {
+    await adminClient
+      .from('provider_payouts')
+      .update({ status: 'pending', flutterwave_transfer_id: null })
+      .eq('user_id', input.userId)
+      .eq('status', 'processing')
+      .eq('flutterwave_transfer_id', reference)
+    await adminClient.rpc('add_provider_pending_payout', {
+      p_user_id: input.userId,
+      p_amount_usd: sourceAmountUsd,
+    })
     throw new Error('Flutterwave did not return a transfer id')
   }
 
@@ -373,20 +413,32 @@ export async function requestProviderPayout(input: {
       fx_rate: fxRate,
     })
     .eq('user_id', input.userId)
-    .eq('status', 'pending')
+    .eq('status', 'processing')
+    .eq('flutterwave_transfer_id', reference)
 
   if (markProcessingError) {
     throw new Error(markProcessingError.message)
   }
 
-  const nextPendingBalance = roundCurrency(
-    Math.max(0, Number(profile.wallet_pending_payout_usd ?? 0) - sourceAmountUsd),
-  )
-
   await adminClient
-    .from('profiles')
-    .update({ wallet_pending_payout_usd: nextPendingBalance })
-    .eq('id', input.userId)
+    .from('wallet_ledger')
+    .insert({
+      user_id: input.userId,
+      kind: 'payout_pending',
+      amount_usd: sourceAmountUsd,
+      currency: 'USD',
+      reference: `payout_pending:${transferId}`,
+      metadata: {
+        destinationCurrency: quote.destinationCurrency,
+        destinationAmount: quote.destinationAmount,
+        reference,
+      },
+    })
+    .select('id')
+    .single()
+    .then(({ error }) => {
+      if (error && !/duplicate/i.test(error.message)) throw error
+    })
 
   return {
     transferId,
@@ -555,15 +607,22 @@ export async function settleWalletTopUp(input: WalletTopUpSettlementInput) {
 
   const { data: profile, error: profileError } = await adminClient
     .from('profiles')
-    .select('wallet_balance_usd')
+    .select('wallet_balance_usd, outstanding_balance_usd')
     .eq('id', input.userId)
-    .single()
+    .single<{
+      wallet_balance_usd: number | null
+      outstanding_balance_usd: number | null
+    }>()
 
   if (profileError || !profile) {
     throw new Error(profileError?.message ?? 'Could not load wallet balance')
   }
 
-  const nextBalanceUsd = roundCurrency(Number(profile.wallet_balance_usd ?? 0) + amountUsd)
+  const outstandingBeforeUsd = roundCurrency(Number(profile.outstanding_balance_usd ?? 0))
+  const amountAppliedToOutstandingUsd = roundCurrency(Math.min(amountUsd, outstandingBeforeUsd))
+  const amountAddedToWalletUsd = roundCurrency(Math.max(0, amountUsd - amountAppliedToOutstandingUsd))
+  const nextOutstandingUsd = roundCurrency(Math.max(0, outstandingBeforeUsd - amountAppliedToOutstandingUsd))
+  const nextBalanceUsd = roundCurrency(Number(profile.wallet_balance_usd ?? 0) + amountAddedToWalletUsd)
   const { error: ledgerError } = await adminClient
     .from('wallet_ledger')
     .insert({
@@ -572,7 +631,11 @@ export async function settleWalletTopUp(input: WalletTopUpSettlementInput) {
       amount_usd: amountUsd,
       currency: 'USD',
       reference,
-      metadata: input.rawResponse ?? {},
+      metadata: {
+        ...(input.rawResponse ?? {}),
+        appliedToOutstandingUsd: amountAppliedToOutstandingUsd,
+        addedToWalletUsd: amountAddedToWalletUsd,
+      },
     })
 
   if (ledgerError) {
@@ -587,7 +650,12 @@ export async function settleWalletTopUp(input: WalletTopUpSettlementInput) {
 
   await adminClient
     .from('profiles')
-    .update({ wallet_balance_usd: nextBalanceUsd })
+    .update({
+      wallet_balance_usd: nextBalanceUsd,
+      outstanding_balance_usd: nextOutstandingUsd,
+      billing_hold_reason: nextOutstandingUsd > 0 ? 'usage_shortfall' : null,
+      billing_hold_at: nextOutstandingUsd > 0 ? new Date().toISOString() : null,
+    })
     .eq('id', input.userId)
 
   return {
@@ -666,20 +734,13 @@ export async function settleSessionUsage(input: SessionUsageSettlementInput) {
     contributionCreditsSpentBytes = usage.creditBytes
   }
 
-  const nextWalletBalanceUsd = roundCurrency(Math.max(0, Number(requesterProfile.wallet_balance_usd ?? 0) - walletDebitUsd))
-  const nextContributionCreditsBytes = Math.max(
-    0,
-    Number(requesterProfile.contribution_credits_bytes ?? 0) - contributionCreditsSpentBytes,
-  )
-
-  if (walletDebitUsd > 0 || contributionCreditsSpentBytes > 0) {
-    const { error: updateRequesterError } = await adminClient
-      .from('profiles')
-      .update({
-        wallet_balance_usd: nextWalletBalanceUsd,
-        contribution_credits_bytes: nextContributionCreditsBytes,
-      })
-      .eq('id', input.requesterId)
+  if (walletDebitUsd > 0 || contributionCreditsSpentBytes > 0 || shortfallUsd > 0) {
+    const { error: updateRequesterError } = await adminClient.rpc('apply_requester_usage_charges', {
+      p_user_id: input.requesterId,
+      p_wallet_debit_usd: walletDebitUsd,
+      p_credit_bytes: contributionCreditsSpentBytes,
+      p_shortfall_usd: shortfallUsd,
+    })
 
     if (updateRequesterError) {
       throw new Error(updateRequesterError.message)
@@ -719,14 +780,10 @@ export async function settleSessionUsage(input: SessionUsageSettlementInput) {
       throw new Error(providerError?.message ?? 'Could not load provider payout state')
     }
 
-    const nextPendingPayoutUsd = roundCurrency(
-      Number(providerProfile.wallet_pending_payout_usd ?? 0) + providerPayoutUsd,
-    )
-
-    await adminClient
-      .from('profiles')
-      .update({ wallet_pending_payout_usd: nextPendingPayoutUsd })
-      .eq('id', input.providerUserId)
+    await adminClient.rpc('add_provider_pending_payout', {
+      p_user_id: input.providerUserId,
+      p_amount_usd: providerPayoutUsd,
+    })
 
     await adminClient
       .from('provider_payouts')

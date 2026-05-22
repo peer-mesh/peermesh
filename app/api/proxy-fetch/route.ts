@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { checkRateLimit, isRequestAllowed } from '@/lib/traffic-filter'
+import { isRequestAllowed } from '@/lib/traffic-filter'
 import { adminClient } from '@/lib/supabase/admin'
 import { getConnectionAccessRequirement } from '@/lib/account-access'
+import { checkServerRateLimit } from '@/lib/server-rate-limit'
 
 const FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.179 Safari/537.36',
@@ -133,7 +134,15 @@ export async function POST(req: Request) {
     .eq('id', sessionId)
     .maybeSingle()
 
-  if (!session || session.user_id !== userId || !['pending', 'active'].includes(session.status)) {
+  const rateLimit = checkServerRateLimit(`proxy-fetch:${userId}:${sessionId}`, 120, 60_000)
+  if (!rateLimit.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded', retryAfterSeconds: rateLimit.retryAfterSeconds },
+      { status: 429, headers: { 'Retry-After': String(rateLimit.retryAfterSeconds) } },
+    )
+  }
+
+  if (!session || session.user_id !== userId || !['pending', 'active', 'reconnecting'].includes(session.status)) {
     return NextResponse.json({ error: 'PeerMesh session is not active. Reconnect from the dashboard.' }, { status: 403 })
   }
 
@@ -147,10 +156,6 @@ export async function POST(req: Request) {
     if (!access.ok) {
       return NextResponse.json({ error: access.error, code: access.code, nextStep: access.nextStep }, { status: 403 })
     }
-  }
-
-  if (sessionId && !checkRateLimit(sessionId)) {
-    return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
   }
 
   let parsed: URL

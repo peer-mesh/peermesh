@@ -36,10 +36,10 @@ export default function DevelopersOverviewPage() {
       <div style={{ marginBottom: '36px', padding: '16px 20px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px' }}>
         <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '2px', marginBottom: '8px' }}>BASE URL</div>
         <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '14px', color: 'var(--accent)' }}>
-          {BASE}/v1/&#123;path&#125;
+          {BASE}/api/&#123;path&#125;
         </code>
         <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--muted)' }}>
-          All v1 endpoints accept <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>Authorization: Bearer &lt;api-key&gt;</code>
+          API endpoints accept <code style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>Authorization: Bearer &lt;api-key&gt;</code>
         </div>
       </div>
 

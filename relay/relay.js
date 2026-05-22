@@ -963,11 +963,6 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (data) => {
     try {
       ws.bytesTransferred += data.length
-      if (ws.bytesTransferred > 1_073_741_824) {
-        send(ws, { type: 'error', message: 'Byte limit reached' })
-        ws.terminate()
-        return
-      }
       const msg = JSON.parse(data.toString())
       if (msg.type !== 'ping') log(peerId.slice(0,8), `MSG_IN type=${msg.type}`, msg.userId ? `userId=${msg.userId.slice(0,8)}` : '')
       await handleMessage(ws, msg)

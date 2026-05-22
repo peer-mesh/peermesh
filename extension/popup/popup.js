@@ -795,6 +795,9 @@ function renderDashboard(app) {
     ${offlineBanner}
     ${reconnectBanner}
     ${errorBanner}
+    <div style="margin:0 16px 8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.03);font-family:'Courier New',monospace;font-size:10px;color:var(--muted);line-height:1.5">
+      Press <span style="color:var(--accent)">Ctrl + Shift + P</span> on any page to open the PeerMesh session panel with country, connection state, reconnect status, and provider speed.
+    </div>
 
     ${session ? `
     <div class="section">

@@ -140,6 +140,7 @@ export default function ProviderSessionsPage() {
           <h1 style={{ margin: 0, fontSize: '30px', lineHeight: 1.15 }}>Inspect routed host history</h1>
           <p style={{ margin: '10px 0 0', color: 'var(--muted)', fontSize: '13px', lineHeight: 1.7, maxWidth: '620px' }}>
             Search the hosts routed through your provider sessions. Use this to audit traffic, inspect active routes, and report suspicious requesters.
+            HTTPS content stays encrypted end-to-end between requester and destination; plain HTTP traffic can be visible to the provider device because it is not encrypted by the website.
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}>

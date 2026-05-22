@@ -5,6 +5,8 @@ import { canRoleProvideNetwork } from '@/lib/roles'
 import { getRequestUser } from '@/lib/request-auth'
 import { adminClient } from '@/lib/supabase/admin'
 
+const MAX_API_KEYS_PER_ACCOUNT = 20
+
 function normalizeSessionMode(value: unknown): 'rotating' | 'sticky' {
   return value === 'sticky' ? 'sticky' : 'rotating'
 }
@@ -53,6 +55,19 @@ export async function POST(req: Request) {
 
   if (!name) {
     return NextResponse.json({ error: 'name is required' }, { status: 400 })
+  }
+
+  const { count: keyCount, error: keyCountError } = await adminClient
+    .from('api_keys')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', user.id)
+  if (keyCountError) return NextResponse.json({ error: keyCountError.message }, { status: 500 })
+  if ((keyCount ?? 0) >= MAX_API_KEYS_PER_ACCOUNT) {
+    return NextResponse.json({
+      error: `API key limit reached. Each account can have up to ${MAX_API_KEYS_PER_ACCOUNT} keys.`,
+      code: 'api_key_limit',
+      maxKeys: MAX_API_KEYS_PER_ACCOUNT,
+    }, { status: 429 })
   }
 
   const { data: profile, error: profileError } = await adminClient

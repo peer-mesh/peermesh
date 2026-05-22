@@ -621,6 +621,10 @@ export async function GET(req: Request) {
   const userId = await resolveUserId(req)
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  try {
+    await adminClient.rpc('ensure_current_bandwidth_month', { p_user_id: userId })
+  } catch {}
+
   const { data, error } = await adminClient
     .from('profiles')
     .select('role, total_bytes_shared, total_bytes_used, bandwidth_used_month, bandwidth_limit, trust_score, is_sharing, is_premium, daily_share_limit_mb, has_accepted_provider_terms, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd, payout_currency, share_bytes_today, share_bytes_today_date, state_actor, state_changed_at')
