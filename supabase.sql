@@ -125,7 +125,7 @@ create table sessions (
   target_host    text,                                                      -- best representative hostname
   target_hosts   text[] default '{}',                                      -- all hostnames seen in session
   relay_endpoint text,
-  status         text default 'pending' check (status in ('pending','active','ended','flagged')),
+  status         text default 'pending' check (status in ('pending','active','reconnecting','ended','flagged')),
   bytes_used     bigint default 0,
   provider_avg_mbps numeric(10,3) not null default 0,
   provider_last_mbps numeric(10,3) not null default 0,
@@ -586,7 +586,8 @@ $$ language plpgsql security definer;
 
 create or replace function cleanup_stale_sessions() returns void as $$
   update sessions set status = 'ended', ended_at = now()
-  where status in ('pending', 'active') and started_at < now() - interval '2 hours';
+  where status in ('pending', 'active', 'reconnecting')
+    and started_at < now() - interval '30 minutes';
 $$ language sql security definer;
 
 create or replace function reset_monthly_bandwidth() returns void as $$

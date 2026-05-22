@@ -334,9 +334,10 @@ export async function POST(req: Request) {
 
     await Promise.all(RELAY_ENDPOINTS.map(async (wsUrl) => {
       try {
+        // Use only baseDeviceId so any online slot from this device matches,
+        // not just the specific slot the share code was issued for.
         const qs = new URLSearchParams({
           providerUserId: privateShare.user_id,
-          deviceId: privateDeviceKey,
           baseDeviceId: privateBaseKey,
         })
         const r = await fetch(`${relayHttpUrl(wsUrl)}/check-private?${qs}`, {

@@ -663,6 +663,15 @@ function startPeerPolling() {
       const resolvedProfileSync = preferLatestSync(previousProfileSync, data.profile_sync ?? null)
       const shouldApplyProfileState = !previousProfileSync || resolvedProfileSync !== previousProfileSync || !data.profile_sync
       state.profileSync = resolvedProfileSync
+      // dailyLimitMb is applied unconditionally — not gated by shouldApplyProfileState.
+      // The sync timestamp comparison can silently drop the update if another surface
+      // saved a limit and the server returns the same or older state_changed_at.
+      if (data.daily_share_limit_mb !== undefined) {
+        state.user = { ...state.user, dailyLimitMb: data.daily_share_limit_mb ?? null }
+        if (!state.dailyLimitSaving && getPendingEdit('dailyLimitInput') === null) {
+          state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
+        }
+      }
       if (shouldApplyProfileState) {
         state.user = {
           ...state.user,
@@ -674,10 +683,8 @@ function startPeerPolling() {
           walletBalanceUsd: data.wallet_balance_usd ?? state.user.walletBalanceUsd ?? 0,
           contributionCreditsBytes: data.contribution_credits_bytes ?? state.user.contributionCreditsBytes ?? 0,
           walletPendingPayoutUsd: data.wallet_pending_payout_usd ?? state.user.walletPendingPayoutUsd ?? 0,
-          dailyLimitMb: data.daily_share_limit_mb ?? state.user.dailyLimitMb ?? null,
         }
       }
-      if (!state.dailyLimitSaving && shouldApplyProfileState && getPendingEdit('dailyLimitInput') === null) state.dailyLimitInput = state.user.dailyLimitMb != null ? String(state.user.dailyLimitMb) : ''
       if (data.has_accepted_provider_terms === true) state.hasAcceptedProviderTerms = true
       await chrome.storage.local.set({ user: state.user })
       document.querySelectorAll('.stat').forEach(el => {

@@ -954,7 +954,7 @@ export default function Dashboard() {
       const data = await res.json().catch(() => ({}))
       if (!res.ok || data.error) throw new Error(data.error ?? 'Could not update daily limit')
       const savedLimit = data.daily_share_limit_mb ?? null
-      setProfile(current => mergeProfileSync(current, data.profile_sync ?? null, { daily_share_limit_mb: savedLimit }))
+      setProfile(current => current ? { ...current, daily_share_limit_mb: savedLimit } : current)
       setDailyLimitInput(savedLimit != null ? String(savedLimit) : '')
     } catch (err: unknown) {
       setDailyLimitError(err instanceof Error ? err.message : 'Could not update daily limit')
