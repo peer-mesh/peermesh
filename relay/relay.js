@@ -412,8 +412,7 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     blockedRequests: 0,
     tunnelWindowStart: Date.now(),
     tunnelOpenCount: 0,
-    byteBurstWindowStart: Date.now(),
-    byteBurstBytes: 0,
+    byteBurstSamples: [],
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
   })
@@ -593,17 +592,31 @@ function recordSessionBytes(session, byteCount, direction = 'unknown') {
   if (!session || byteCount <= 0) return true
   const now = Date.now()
   const limits = sessionLimits(session.requesterTrustScore ?? 50)
-  if (!session.byteBurstWindowStart || now - session.byteBurstWindowStart > BYTE_BURST_WINDOW_MS) {
-    session.byteBurstWindowStart = now
-    session.byteBurstBytes = 0
-  }
-  session.byteBurstBytes = (session.byteBurstBytes ?? 0) + byteCount
-  if (session.byteBurstBytes <= limits.maxBytesPerMinute) return true
+
+  // Sliding window: keep a ring of (timestamp, bytes) samples so the window
+  // always covers exactly the last BYTE_BURST_WINDOW_MS milliseconds.
+  // This prevents a tumbling-window reset from allowing a full-quota burst
+  // immediately after a reset, which would kill legitimate streaming sessions.
+  if (!session.byteBurstSamples) session.byteBurstSamples = []
+  session.byteBurstSamples.push({ t: now, b: byteCount })
+
+  // Evict samples older than the window
+  const cutoff = now - BYTE_BURST_WINDOW_MS
+  let lo = 0
+  while (lo < session.byteBurstSamples.length && session.byteBurstSamples[lo].t < cutoff) lo++
+  if (lo > 0) session.byteBurstSamples = session.byteBurstSamples.slice(lo)
+
+  // Sum bytes in the current window
+  let windowBytes = 0
+  for (let i = 0; i < session.byteBurstSamples.length; i++) windowBytes += session.byteBurstSamples[i].b
+
+  if (windowBytes <= limits.maxBytesPerMinute) return true
+
   session.disconnectReason = 'security_bandwidth_burst_limit'
   logSecurityEvent('session_security_ended', session, {
     reason: session.disconnectReason,
     direction,
-    byteBurstBytes: session.byteBurstBytes,
+    windowBytes,
     maxBytesPerMinute: limits.maxBytesPerMinute,
   })
   endRelaySession(session, session.sessionId ?? null, 'security_bandwidth_burst_limit')
@@ -1292,7 +1305,12 @@ async function handleMessage(ws, msg) {
         tunnelSession.lastActivity = Date.now()
         tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + chunk.length
         tunnelSession.bytesRequester = (tunnelSession.bytesRequester ?? 0) + chunk.length
-        sendSessionQuality(tunnelSession, 'tunnel_data')
+        // Only compute and send quality metrics every 3s — avoid running buildSessionQuality
+        // on every chunk for high-throughput streams (thousands of chunks/minute).
+        const now = Date.now()
+        if (now - (tunnelSession.lastQualitySentAt || 0) >= 3000) {
+          sendSessionQuality(tunnelSession, 'tunnel_data')
+        }
       }
       if (proxyClient.readyState !== undefined) {
         // WS-based client

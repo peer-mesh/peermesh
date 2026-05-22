@@ -1705,7 +1705,9 @@ async function refreshRequesterSession(reason = 'session refresh') {
   if (!token) throw new Error('Cannot refresh PeerMesh session: missing auth token')
 
   _sessionRefreshing = true
-  setProxyFailClosed(`Refreshing PeerMesh session: ${reason}`)
+  // Clear proxy to DIRECT so the new relay WebSocket is not routed through
+  // the fail-closed proxy (127.0.0.1:9), which causes ERR_PROXY_CONNECTION_FAILED.
+  chrome.proxy.settings.clear({ scope: 'regular' })
   try {
     const oldWs = relayWs
     relayWs = null
@@ -2099,6 +2101,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       currentSession = null
       agentSessionId = null
       broadcastSessionEnded(reason).catch(() => {})
+    } else if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+      // Desktop proxy health check: relay WS alive but 127.0.0.1:7655 may be dead.
+      // Without this, a desktop crash mid-session shows broken pages with no ERR badge.
+      try {
+        await fetch(`http://127.0.0.1:${CONTROL_PORT}/health`, { signal: AbortSignal.timeout(1500) })
+      } catch {
+        const reason = 'Desktop proxy unreachable - reopen the desktop app'
+        log('warn', '[SESSION] desktop proxy health check failed mid-session')
+        setProxyFailClosed(reason)
+        broadcastBrowsingStatus({ state: 'blocked', title: 'PeerMesh desktop offline', message: reason }).catch(() => {})
+      }
     } else if (Date.now() - (currentSession.createdAt || 0) > REQUESTER_SESSION_REFRESH_MS) {
       try {
         await refreshRequesterSession('scheduled pre-expiry refresh')
