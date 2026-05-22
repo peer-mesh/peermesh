@@ -193,7 +193,7 @@ Errors:
   {
     id: 'session-status',
     method: 'GET',
-    path: '/session/{id}',
+    path: '/session/:id',
     title: 'Get session status',
     description: 'Poll the current state, metering, provider speed, reconnect state, and final disconnect reason for a session you own.',
     headers: [
@@ -683,7 +683,7 @@ export default function ApiDocsPage() {
 
   function injectBearer(code: string) {
     if (!bearer) return code
-    return code.replace(/<api-key>/g, bearer)
+    return code.replace(/<api-key>/g, bearer).replace(/<token>/g, bearer)
   }
 
   const codeMap: Record<Tab, string> = {
