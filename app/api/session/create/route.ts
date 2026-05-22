@@ -120,6 +120,24 @@ export async function POST(req: Request) {
   if (!isUserTrusted(activeProfile.trust_score)) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 })
   }
+  const trustScore = Number(activeProfile.trust_score ?? 50)
+  const maxConcurrentSessions = trustScore >= 80 ? 8 : trustScore >= 50 ? 3 : 1
+  const { count: activeSessionCount, error: activeSessionCountError } = await adminClient
+    .from('sessions')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .in('status', ['pending', 'active', 'reconnecting'])
+  if (activeSessionCountError) {
+    return NextResponse.json({ error: 'Could not verify active session limits' }, { status: 500 })
+  }
+  if ((activeSessionCount ?? 0) >= maxConcurrentSessions) {
+    return NextResponse.json({
+      error: 'Too many active PeerMesh sessions for this account.',
+      code: 'active_session_limit',
+      activeSessions: activeSessionCount ?? 0,
+      maxConcurrentSessions,
+    }, { status: 429 })
+  }
 
   const requestAuthKind = auth.kind === 'desktop'
     ? 'desktop'

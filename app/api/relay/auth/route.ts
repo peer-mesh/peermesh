@@ -98,7 +98,7 @@ export async function POST(req: Request) {
     }
   }
 
-  if (!['pending', 'active'].includes(sessionRow.status)) {
+  if (!['pending', 'active', 'reconnecting'].includes(sessionRow.status)) {
     return NextResponse.json({ error: 'Session is no longer active' }, { status: 409 })
   }
 

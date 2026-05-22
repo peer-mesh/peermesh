@@ -1,6 +1,8 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
 import { randomUUID } from 'crypto'
+import { lookup } from 'dns/promises'
+import { isIP } from 'net'
 
 const PORT        = parseInt(process.env.PORT ?? '8080')
 const API_BASE    = process.env.API_BASE ?? ''
@@ -26,11 +28,99 @@ function normalizeTargetHost(hostname) {
   return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
 }
 
-function isAllowedTarget(hostname, port) {
+function ipv4ToInt(value) {
+  const parts = String(value).split('.').map(part => Number.parseInt(part, 10))
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null
+  return ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
+}
+
+function isPrivateIpv4(value) {
+  const ip = ipv4ToInt(value)
+  if (ip === null) return false
+  const ranges = [
+    ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+    ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16],
+    ['224.0.0.0', 4], ['240.0.0.0', 4],
+  ]
+  return ranges.some(([base, bits]) => {
+    const baseInt = ipv4ToInt(base)
+    if (baseInt === null) return false
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0
+    return (ip & mask) === (baseInt & mask)
+  }) || value === '255.255.255.255'
+}
+
+function isPrivateIp(value) {
+  const host = normalizeTargetHost(value)
+  const kind = isIP(host)
+  if (kind === 4) return isPrivateIpv4(host)
+  if (kind === 6) {
+    return host === '::1' ||
+      host.startsWith('fc') ||
+      host.startsWith('fd') ||
+      host.startsWith('fe8') ||
+      host.startsWith('fe9') ||
+      host.startsWith('fea') ||
+      host.startsWith('feb') ||
+      /^::ffff:(127|10|192\.168|172\.(1[6-9]|2\d|3[01])|169\.254|0)\./i.test(host)
+  }
+  return false
+}
+
+function isAllowedTargetName(hostname, port) {
   const host = normalizeTargetHost(hostname)
   return ALLOWED_TARGET_PORTS.has(Number(port)) &&
     !BLOCKED_HOSTS.some((pattern) => pattern.test(host)) &&
     !PRIVATE_HOSTS.some((pattern) => pattern.test(host))
+}
+
+async function validateTarget(hostname, port) {
+  const host = normalizeTargetHost(hostname)
+  if (!host) return { ok: false, reason: 'empty_host' }
+  if (!isAllowedTargetName(host, port)) return { ok: false, reason: 'blocked_host_or_port' }
+  if (isPrivateIp(host)) return { ok: false, reason: 'blocked_ip_literal' }
+
+  try {
+    const results = await lookup(host, { all: true, verbatim: false })
+    if (!results.length) return { ok: false, reason: 'dns_no_records' }
+    const blocked = results.find(result => isPrivateIp(result.address))
+    if (blocked) return { ok: false, reason: 'dns_private_ip', address: blocked.address }
+    return { ok: true, addresses: results.map(result => result.address) }
+  } catch (err) {
+    return { ok: false, reason: 'dns_lookup_failed', error: err?.message ?? String(err) }
+  }
+}
+
+function logSecurityEvent(type, session, details = {}) {
+  const context = {
+    type,
+    sessionId: session?.dbSessionId ?? null,
+    relaySessionId: session?.sessionId ?? null,
+    requesterUserId: session?.requesterUserId ?? null,
+    providerUserId: session?.providerUserId ?? null,
+    providerDeviceId: session?.providerDeviceId ?? null,
+    country: session?.country ?? null,
+    details,
+    at: new Date().toISOString(),
+  }
+  log('SECURITY', `${type} ${JSON.stringify({ ...context, sessionId: context.sessionId?.slice?.(0,8), requesterUserId: context.requesterUserId?.slice?.(0,8), providerUserId: context.providerUserId?.slice?.(0,8) })}`)
+  if (!API_BASE || !RELAY_SECRET) return
+  fetch(`${API_BASE}/api/security/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+    body: JSON.stringify(context),
+  }).catch(() => {})
+}
+
+function markBlockedTarget(session, details = {}) {
+  if (!session) return false
+  session.blockedRequests = (session.blockedRequests ?? 0) + 1
+  logSecurityEvent('blocked_target', session, { ...details, blockedRequests: session.blockedRequests })
+  if (session.blockedRequests < MAX_BLOCKED_TARGETS_PER_SESSION) return false
+  session.disconnectReason = 'security_blocked_target_limit'
+  logSecurityEvent('session_security_ended', session, { reason: session.disconnectReason })
+  endRelaySession(session, session.sessionId ?? null, 'security_blocked_target_limit')
+  return true
 }
 
 
@@ -41,6 +131,15 @@ const peerAffinity = new Map()
 const providerShareStatusCache = new Map()
 
 const MAX_RECONNECT_ATTEMPTS = 12
+const MAX_BLOCKED_TARGETS_PER_SESSION = 5
+const TUNNEL_WINDOW_MS = 60_000
+const BYTE_BURST_WINDOW_MS = 60_000
+
+function sessionLimits(trustScore = 50) {
+  if (trustScore >= 80) return { maxConcurrentSessions: 8, maxTunnelsPerMinute: 180, maxBytesPerMinute: 750 * 1024 * 1024 }
+  if (trustScore >= 50) return { maxConcurrentSessions: 3, maxTunnelsPerMinute: 90, maxBytesPerMinute: 250 * 1024 * 1024 }
+  return { maxConcurrentSessions: 1, maxTunnelsPerMinute: 30, maxBytesPerMinute: 60 * 1024 * 1024 }
+}
 
 function log(tag, msg, extra = '') {
   const ts = new Date().toISOString().slice(11, 23)
@@ -230,6 +329,7 @@ function createSession(requesterWs, provider, country, dbSessionId, {
   peers.set(requesterWs.peerId, requesterWs)
 
   sessions.set(sessionId, {
+    sessionId,
     requesterId: requesterWs.peerId,
     providerId: provider.peerId,
     country,
@@ -257,6 +357,12 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     reconnectAttempt,
     reconnectAttempts: reconnectAttempt,
     reconnectReason: reconnectAttempt > 0 ? 'provider_disconnected' : null,
+    requesterTrustScore: requesterWs.trustScore ?? 50,
+    blockedRequests: 0,
+    tunnelWindowStart: Date.now(),
+    tunnelOpenCount: 0,
+    byteBurstWindowStart: Date.now(),
+    byteBurstBytes: 0,
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
   })
@@ -339,6 +445,9 @@ function recordSessionHost(session, hostname, reason = 'target_host') {
   const hadHost = session.targetHosts.has(normalizedHost)
   const previousBest = pickBestHost(session.targetHost, session.targetHosts)
   session.targetHosts.add(normalizedHost)
+  if (session.targetHosts.size === 50 || session.targetHosts.size === 100 || session.targetHosts.size > 150) {
+    logSecurityEvent('high_target_fanout', session, { targetHostCount: session.targetHosts.size })
+  }
   const nextBest = pickBestHost(previousBest, session.targetHosts)
 
   if (nextBest !== session.targetHost) {
@@ -400,6 +509,55 @@ function sendSessionQuality(session, reason = 'traffic', force = false) {
 }
 
 // ── Auto-reconnect — called when provider drops while requester is still live ─
+
+function activeSessionCountForRequester(userId) {
+  if (!userId) return 0
+  let count = 0
+  for (const session of sessions.values()) {
+    if (session.requesterUserId === userId && ['active', 'reconnecting'].includes(session.status)) count += 1
+  }
+  return count
+}
+
+function canOpenTunnel(session) {
+  const now = Date.now()
+  const limits = sessionLimits(session.requesterTrustScore ?? 50)
+  if (!session.tunnelWindowStart || now - session.tunnelWindowStart > TUNNEL_WINDOW_MS) {
+    session.tunnelWindowStart = now
+    session.tunnelOpenCount = 0
+  }
+  session.tunnelOpenCount = (session.tunnelOpenCount ?? 0) + 1
+  if (session.tunnelOpenCount <= limits.maxTunnelsPerMinute) return true
+  session.disconnectReason = 'security_tunnel_rate_limit'
+  logSecurityEvent('session_security_ended', session, {
+    reason: session.disconnectReason,
+    tunnelOpenCount: session.tunnelOpenCount,
+    maxTunnelsPerMinute: limits.maxTunnelsPerMinute,
+  })
+  endRelaySession(session, session.sessionId ?? null, 'security_tunnel_rate_limit')
+  return false
+}
+
+function recordSessionBytes(session, byteCount, direction = 'unknown') {
+  if (!session || byteCount <= 0) return true
+  const now = Date.now()
+  const limits = sessionLimits(session.requesterTrustScore ?? 50)
+  if (!session.byteBurstWindowStart || now - session.byteBurstWindowStart > BYTE_BURST_WINDOW_MS) {
+    session.byteBurstWindowStart = now
+    session.byteBurstBytes = 0
+  }
+  session.byteBurstBytes = (session.byteBurstBytes ?? 0) + byteCount
+  if (session.byteBurstBytes <= limits.maxBytesPerMinute) return true
+  session.disconnectReason = 'security_bandwidth_burst_limit'
+  logSecurityEvent('session_security_ended', session, {
+    reason: session.disconnectReason,
+    direction,
+    byteBurstBytes: session.byteBurstBytes,
+    maxBytesPerMinute: limits.maxBytesPerMinute,
+  })
+  endRelaySession(session, session.sessionId ?? null, 'security_bandwidth_burst_limit')
+  return false
+}
 
 async function attemptReconnect(requesterWs, droppedSession) {
   const { country, dbSessionId, reconnectAttempts, providerUserId, requesterUserId, providerId, privateBaseDeviceId } = droppedSession
@@ -486,6 +644,46 @@ const server = createServer((req, res) => {
   // /providers?country=RW&secret=... — returns live free providers for a country.
   // Used by session/create to verify a relay has a matching provider before
   // sending the requester there. Requires relay secret.
+  if (url.pathname === '/provider-kill' && req.method === 'POST') {
+    const secret = req.headers['x-relay-secret'] ?? ''
+    if (RELAY_SECRET && secret !== RELAY_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+    let raw = ''
+    req.on('data', chunk => { raw += chunk.toString() })
+    req.on('end', () => {
+      let body = {}
+      try { body = raw ? JSON.parse(raw) : {} } catch {}
+      const providerUserId = typeof body.providerUserId === 'string' ? body.providerUserId : null
+      const providerDeviceId = typeof body.providerDeviceId === 'string' ? body.providerDeviceId : null
+      const dbSessionId = typeof body.sessionId === 'string' ? body.sessionId : null
+      let closed = 0
+
+      for (const [relaySessionId, session] of [...sessions.entries()]) {
+        const sessionMatches = !dbSessionId || session.dbSessionId === dbSessionId || relaySessionId === dbSessionId
+        const providerMatches = !providerUserId || session.providerUserId === providerUserId
+        const deviceMatches = !providerDeviceId || session.providerDeviceId === providerDeviceId || session.providerBaseDeviceId === providerDeviceId
+        if (!sessionMatches || !providerMatches || !deviceMatches) continue
+        endRelaySession(session, relaySessionId, 'provider_kill_switch')
+        closed += 1
+      }
+
+      for (const [, peer] of peers) {
+        if (peer.role !== 'provider') continue
+        if (providerUserId && peer.userId !== providerUserId) continue
+        if (providerDeviceId && peer.deviceId !== providerDeviceId && peer.baseDeviceId !== providerDeviceId) continue
+        send(peer, { type: 'error', message: 'Sharing stopped by provider kill switch' })
+        peer.close(1000, 'provider_kill_switch')
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, closed }))
+    })
+    return
+  }
+
   if (url.pathname === '/providers') {
     const secret = req.headers['x-relay-secret'] ?? ''
     if (RELAY_SECRET && secret !== RELAY_SECRET) {
@@ -573,6 +771,7 @@ server.on('upgrade', (req, socket, head) => {
 // is active. We authenticate via the session ID passed as proxy username,
 // then pipe the socket directly to the provider via the existing tunnel mechanism.
 server.on('connect', (req, clientSocket, head) => {
+  void (async () => {
   const proxyAuth = req.headers['proxy-authorization'] ?? ''
   const sessionId = proxyAuth.startsWith('Basic ')
     ? Buffer.from(proxyAuth.slice(6), 'base64').toString().split(':')[0]
@@ -601,8 +800,15 @@ server.on('connect', (req, clientSocket, head) => {
     return
   }
 
-  if (!isAllowedTarget(hostname, port)) {
+  const validation = await validateTarget(hostname, port)
+  if (!validation.ok) {
+    markBlockedTarget(session, { hostname, port, reason: validation.reason, address: validation.address ?? null })
     clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+    clientSocket.destroy()
+    return
+  }
+  if (!canOpenTunnel(session)) {
+    clientSocket.write('HTTP/1.1 429 Tunnel Rate Limited\r\n\r\n')
     clientSocket.destroy()
     return
   }
@@ -644,6 +850,13 @@ server.on('connect', (req, clientSocket, head) => {
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
   })
+  })().catch((err) => {
+    logErr('PROXY', 'CONNECT handler failed', err)
+    if (!clientSocket.destroyed) {
+      clientSocket.write('HTTP/1.1 500 PeerMesh Proxy Error\r\n\r\n')
+      clientSocket.destroy()
+    }
+  })
 })
 
 proxyWss.on('connection', (ws, req) => {
@@ -669,15 +882,22 @@ proxyWss.on('connection', (ws, req) => {
 
   let tunnelOpen = false
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     if (!tunnelOpen) {
       const text = Buffer.isBuffer(data) ? data.toString() : data
       const match = text.match(/^CONNECT ([^\s]+) HTTP/)
       if (match) {
         const [hostname, portStr] = match[1].split(':')
         const port = parseInt(portStr) || 443
-        if (!isAllowedTarget(hostname, port)) {
+        const currentSession = sessions.get(sessionId)
+        const validation = await validateTarget(hostname, port)
+        if (!validation.ok) {
+          markBlockedTarget(currentSession, { hostname, port, reason: validation.reason, address: validation.address ?? null })
           ws.close(1008, 'Target not allowed')
+          return
+        }
+        if (!currentSession || !canOpenTunnel(currentSession)) {
+          ws.close(1008, 'Tunnel rate limited')
           return
         }
         tunnelOpen = true
@@ -698,7 +918,10 @@ proxyWss.on('connection', (ws, req) => {
       return
     }
     if (provider.readyState === WebSocket.OPEN) {
-      const b64 = Buffer.isBuffer(data) ? data.toString('base64') : Buffer.from(data).toString('base64')
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      const currentSession = sessions.get(sessionId)
+      if (!recordSessionBytes(currentSession, chunk.length, 'requester_to_provider')) return
+      const b64 = chunk.toString('base64')
       send(provider, { type: 'tunnel_data', tunnelId, data: b64 })
     }
   })
@@ -847,6 +1070,18 @@ async function handleMessage(ws, msg) {
       const privateBaseDeviceId = auth.privateBaseDeviceId ?? null
       const privateProviderUserId = auth.privateProviderUserId ?? null
       const privateOnly = !!privateBaseDeviceId
+      ws.trustScore = auth.trustScore ?? 50
+      const limits = sessionLimits(ws.trustScore)
+      const activeRequesterSessions = activeSessionCountForRequester(auth.userId)
+      if (activeRequesterSessions >= limits.maxConcurrentSessions) {
+        logSecurityEvent('requester_concurrency_blocked', { requesterUserId: auth.userId, country: resolvedCountry }, {
+          activeRequesterSessions,
+          maxConcurrentSessions: limits.maxConcurrentSessions,
+          trustScore: ws.trustScore,
+        })
+        send(ws, { type: 'error', message: 'Too many active PeerMesh sessions for this account.' })
+        return
+      }
       log(ws.peerId.slice(0,8), `REQUEST_SESSION country=${resolvedCountry} userId=${auth.userId?.slice(0,8)}`)
       log(ws.peerId.slice(0,8), `PEERS AT REQUEST TIME`, peersSnapshot())
 
@@ -946,11 +1181,24 @@ async function handleMessage(ws, msg) {
       if (!provider || !provider.agentMode) return
       proxySession.lastActivity = Date.now()
       const reqBytes = JSON.stringify(msg.request ?? {}).length
+      if (!recordSessionBytes(proxySession, reqBytes, 'proxy_request')) return
       proxySession.bytesRequester = (proxySession.bytesRequester ?? 0) + reqBytes
       if (msg.request?.url) {
         try {
-          recordSessionHost(proxySession, new URL(msg.request.url).hostname, 'target_host')
-        } catch {}
+          const targetUrl = new URL(msg.request.url)
+          const port = Number.parseInt(targetUrl.port || (targetUrl.protocol === 'https:' ? '443' : '80'), 10)
+          const validation = await validateTarget(targetUrl.hostname, port)
+          if (!validation.ok) {
+            markBlockedTarget(proxySession, { hostname: targetUrl.hostname, port, reason: validation.reason, address: validation.address ?? null })
+            send(ws, { type: 'proxy_response', sessionId: msg.sessionId, response: { status: 403, headers: {}, body: '' } })
+            return
+          }
+          if (!canOpenTunnel(proxySession)) return
+          recordSessionHost(proxySession, targetUrl.hostname, 'target_host')
+        } catch {
+          markBlockedTarget(proxySession, { reason: 'invalid_url', url: String(msg.request.url).slice(0, 120) })
+          return
+        }
       }
       log(ws.peerId.slice(0,8), `PROXY_REQUEST → provider=${provider.peerId.slice(0,8)} url=${msg.request?.url?.slice(0,60)}`)
       send(provider, { type: 'proxy_request', sessionId: msg.sessionId, request: msg.request })
@@ -963,6 +1211,7 @@ async function handleMessage(ws, msg) {
       const requester = peers.get(respSession.requesterId)
       if (!requester) return
       const respBytes = msg.response?.body?.length ?? 0
+      if (!recordSessionBytes(respSession, respBytes, 'proxy_response')) return
       respSession.bytesRequester = (respSession.bytesRequester ?? 0) + respBytes
       respSession.bytesProvider = (respSession.bytesProvider ?? 0) + respBytes
       send(requester, { type: 'proxy_response', sessionId: msg.sessionId, response: msg.response })
@@ -992,6 +1241,7 @@ async function handleMessage(ws, msg) {
       if (!proxyClient) return
       const chunk = Buffer.from(msg.data, 'base64')
       const tunnelSession = ws.sessionId ? sessions.get(ws.sessionId) : null
+      if (!recordSessionBytes(tunnelSession, chunk.length, 'provider_to_requester')) return
       if (tunnelSession) {
         tunnelSession.lastActivity = Date.now()
         tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + chunk.length
@@ -1093,6 +1343,33 @@ function reportSessionEnd(session, sessionId) {
       log('RELAY', `SESSION_END_REPORT relaySession=${sessionId.slice(0,8)} dbSession=${dbSessionId.slice(0,8)} status=${r.status} bytes=${bytesUsed} provider=${session.providerUserId?.slice(0,8) ?? 'none'} host=${session.targetHost ?? 'none'}`)
     })
     .catch(err => logErr('RELAY', 'SESSION_END_REPORT failed', err))
+}
+
+function endRelaySession(session, sessionId, reason = 'session_ended') {
+  const relaySessionId = sessionId ?? session?.sessionId
+  if (!session || !relaySessionId) return
+  session.disconnectReason = reason
+  reportSessionEnd(session, relaySessionId)
+
+  const requester = peers.get(session.requesterId)
+  const provider = peers.get(session.providerId)
+
+  for (const [tunnelId, proxyClient] of proxyClients) {
+    if (proxyClient.sessionId !== relaySessionId) continue
+    closeProxyClient(proxyClient)
+    proxyClients.delete(tunnelId)
+    if (provider) send(provider, { type: 'tunnel_close', tunnelId })
+  }
+
+  if (requester) {
+    requester.sessionId = null
+    send(requester, { type: 'session_ended', reason })
+  }
+  if (provider) {
+    provider.sessionId = null
+    send(provider, { type: 'session_ended', reason })
+  }
+  sessions.delete(relaySessionId)
 }
 
 function cleanupSession(ws) {

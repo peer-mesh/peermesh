@@ -11,6 +11,10 @@ type ProviderSessionRecord = {
   target_host: string | null
   target_hosts: string[]
   status: string
+  request_auth_kind: string | null
+  provider_last_mbps: number | null
+  provider_avg_mbps: number | null
+  connection_quality: { currentMbps?: number; avgMbps?: number } | null
   bytes_used: number
   disconnect_reason: string | null
   started_at: string
@@ -26,6 +30,7 @@ export default function ProviderSessionsPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [reportingId, setReportingId] = useState<string | null>(null)
+  const [stoppingId, setStoppingId] = useState<string | null>(null)
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({})
 
   const getAccessToken = useCallback(async () => {
@@ -77,6 +82,30 @@ export default function ProviderSessionsPage() {
       setError(err instanceof Error ? err.message : 'Could not submit report')
     } finally {
       setReportingId(null)
+    }
+  }
+
+  async function stopSession(sessionId: string) {
+    if (!window.confirm('Stop this active requester session now?')) return
+    setStoppingId(sessionId)
+    setError('')
+    try {
+      const token = await getAccessToken()
+      const res = await fetch('/api/provider/sessions', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ sessionId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Could not stop provider session')
+      await loadSessions(appliedSearch)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not stop provider session')
+    } finally {
+      setStoppingId(null)
     }
   }
 
@@ -171,10 +200,22 @@ export default function ProviderSessionsPage() {
                   >
                     {reportingId === session.id ? 'REPORTING...' : 'REPORT REQUESTER'}
                   </button>
+                  {session.status === 'active' || session.status === 'reconnecting' ? (
+                    <button
+                      onClick={() => void stopSession(session.id)}
+                      disabled={stoppingId === session.id}
+                      style={{ padding: '8px 10px', borderRadius: '8px', border: '1px solid rgba(255,96,96,0.45)', background: 'rgba(255,96,96,0.14)', color: '#ffb0b0', fontFamily: 'var(--font-geist-mono)', fontSize: '10px', cursor: stoppingId === session.id ? 'not-allowed' : 'pointer' }}
+                    >
+                      {stoppingId === session.id ? 'STOPPING...' : 'STOP SESSION'}
+                    </button>
+                  ) : null}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '8px', fontSize: '12px', color: 'var(--muted)' }}>
                   <div>Traffic: <strong style={{ color: 'var(--text)' }}>{formatBytes(Number(session.bytes_used ?? 0))}</strong></div>
+                  <div>Requester: <strong style={{ color: 'var(--text)' }}>{(session.request_auth_kind ?? 'user').toUpperCase()}</strong></div>
+                  <div>Speed: <strong style={{ color: 'var(--text)' }}>{Number(session.provider_last_mbps ?? session.connection_quality?.currentMbps ?? 0).toFixed(2)} Mbps</strong></div>
+                  <div>Avg: <strong style={{ color: 'var(--text)' }}>{Number(session.provider_avg_mbps ?? session.connection_quality?.avgMbps ?? 0).toFixed(2)} Mbps</strong></div>
                   <div>Started: <strong style={{ color: 'var(--text)' }}>{new Date(session.started_at).toLocaleString()}</strong></div>
                   <div>Ended: <strong style={{ color: 'var(--text)' }}>{session.ended_at ? new Date(session.ended_at).toLocaleString() : 'Active'}</strong></div>
                   <div>Disconnect: <strong style={{ color: 'var(--text)' }}>{session.disconnect_reason ?? '-'}</strong></div>
