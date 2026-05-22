@@ -36,6 +36,7 @@ export function findLatestDesktopInstallerFile(files: string[], ext: string): st
 }
 
 export function findLatestDesktopVersionSync(dir: string, ext = '.exe'): string | null {
+  if (!dir || typeof dir !== 'string') return null
   try {
     const latest = findLatestDesktopInstallerFile(readdirSync(dir), ext)
     return latest ? getDesktopInstallerVersion(latest, ext) : null
