@@ -375,7 +375,11 @@ export async function POST(req: Request) {
     if (relayCountry) country = relayCountry
     preferredProviderUserId = privateShare.user_id
     privateProviderUserId = privateShare.user_id
-    privateBaseDeviceId = privateDeviceKey
+    // Use the base device ID (without _slot_N) so any online slot from this
+    // device can serve the requester — not just the specific slot the code
+    // was issued for. The relay matches on peer.baseDeviceId which is always
+    // the stripped base ID (e.g. pm_xxx, not pm_xxx_slot_0).
+    privateBaseDeviceId = privateBaseKey
     providerRelayUrls = orderRelayCandidates(RELAY_ENDPOINTS, orderedRelays, onlineRelays)
   }
 
