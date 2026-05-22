@@ -1,0 +1,24 @@
+type Bucket = {
+  count: number
+  resetAt: number
+}
+
+const buckets = new Map<string, Bucket>()
+
+export function checkServerRateLimit(key: string, limit: number, windowMs: number): { ok: boolean; retryAfterSeconds: number } {
+  const now = Date.now()
+  const bucket = buckets.get(key)
+
+  if (!bucket || bucket.resetAt <= now) {
+    buckets.set(key, { count: 1, resetAt: now + windowMs })
+    return { ok: true, retryAfterSeconds: 0 }
+  }
+
+  bucket.count += 1
+  if (bucket.count <= limit) return { ok: true, retryAfterSeconds: 0 }
+
+  return {
+    ok: false,
+    retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
+  }
+}

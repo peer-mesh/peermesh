@@ -3,6 +3,12 @@ export type ProviderDeviceRow = {
   device_id: string
   country_code: string
   relay_url: string | null
+  health_score?: number | null
+  provider_avg_mbps?: number | null
+  provider_last_mbps?: number | null
+  disconnect_count?: number | null
+  reconnect_count?: number | null
+  last_heartbeat?: string | null
 }
 
 export type SessionOccupancyRow = {

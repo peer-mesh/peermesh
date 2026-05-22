@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { adminClient } from '@/lib/supabase/admin'
 import { resolveRequesterAuth } from '@/lib/requester-auth'
 import { settleSessionUsage } from '@/lib/wallet'
+import { nextProviderHealthScore } from '@/lib/provider-health'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 
@@ -10,6 +11,56 @@ function logSession(level: 'info' | 'warn' | 'error', message: string, context: 
   if (level === 'error') console.error(line)
   else if (level === 'warn') console.warn(line)
   else console.info(line)
+}
+
+async function updateProviderHealth({
+  providerUserId,
+  providerDeviceId,
+  disconnectReason,
+  providerAvgMbps,
+  providerLastMbps,
+  connectionQuality,
+}: {
+  providerUserId: string | null
+  providerDeviceId: string | null
+  disconnectReason: string | null
+  providerAvgMbps: number
+  providerLastMbps: number
+  connectionQuality: unknown
+}) {
+  if (!providerUserId || !providerDeviceId) return
+
+  const { data: device } = await adminClient
+    .from('provider_devices')
+    .select('health_score, disconnect_count, reconnect_count')
+    .eq('user_id', providerUserId)
+    .eq('device_id', providerDeviceId)
+    .maybeSingle()
+
+  const reason = String(disconnectReason || '').toLowerCase()
+  const disconnectIncrement = reason.includes('provider') || reason.includes('timeout') || reason.includes('unresponsive') ? 1 : 0
+  const reconnectIncrement = reason === 'reconnected' ? 1 : 0
+  const healthScore = nextProviderHealthScore({
+    currentScore: device?.health_score,
+    disconnectReason,
+    avgMbps: providerAvgMbps,
+    lastMbps: providerLastMbps,
+  })
+
+  await adminClient
+    .from('provider_devices')
+    .update({
+      health_score: healthScore,
+      provider_avg_mbps: providerAvgMbps,
+      provider_last_mbps: providerLastMbps,
+      connection_quality: connectionQuality && typeof connectionQuality === 'object' ? connectionQuality : {},
+      disconnect_count: Number(device?.disconnect_count ?? 0) + disconnectIncrement,
+      reconnect_count: Number(device?.reconnect_count ?? 0) + reconnectIncrement,
+      last_disconnect_reason: disconnectReason,
+      last_session_at: new Date().toISOString(),
+    })
+    .eq('user_id', providerUserId)
+    .eq('device_id', providerDeviceId)
 }
 
 // PATCH: relay updates provider_id / provider_kind / relay_endpoint / target_host
@@ -36,6 +87,8 @@ export async function PATCH(req: Request) {
     providerAvgMbps,
     providerLastMbps,
     connectionQuality,
+    reconnectAttempts,
+    reconnectReason,
   } = await req.json().catch(() => ({}))
 
   const resolvedId = dbSessionId ?? sessionId ?? null
@@ -45,6 +98,8 @@ export async function PATCH(req: Request) {
     || typeof providerAvgMbps === 'number'
     || typeof providerLastMbps === 'number'
     || !!connectionQuality
+    || typeof reconnectAttempts === 'number'
+    || typeof reconnectReason === 'string'
     || typeof status === 'string'
 
   if (!resolvedId || !hasPatchField) {
@@ -66,13 +121,18 @@ export async function PATCH(req: Request) {
   if (typeof providerAvgMbps === 'number') patch.provider_avg_mbps = providerAvgMbps
   if (typeof providerLastMbps === 'number') patch.provider_last_mbps = providerLastMbps
   if (connectionQuality && typeof connectionQuality === 'object') patch.connection_quality = connectionQuality
+  if (typeof reconnectAttempts === 'number') patch.reconnect_attempts = Math.max(0, reconnectAttempts)
+  if (typeof reconnectReason === 'string') patch.reconnect_reason = reconnectReason
+  if (typeof reconnectAttempts === 'number' || typeof reconnectReason === 'string' || status === 'reconnecting') {
+    patch.last_reconnect_at = new Date().toISOString()
+  }
   if (typeof status === 'string') patch.status = status
 
   const { error, count } = await adminClient
     .from('sessions')
     .update(patch, { count: 'exact' })
     .eq('id', resolvedId)
-    .in('status', ['pending', 'active', 'ended'])
+    .in('status', ['pending', 'active', 'reconnecting', 'ended'])
 
   if (error) {
     logSession('error', 'PATCH failed', { resolvedId, providerUserId, relayEndpoint, targetHost, error: error.message })
@@ -186,7 +246,7 @@ export async function POST(req: Request) {
         connection_quality: finalConnectionQuality,
       })
       .eq('id', sessionId)
-      .in('status', ['pending', 'active', 'ended'])
+      .in('status', ['pending', 'active', 'reconnecting', 'ended'])
 
     if (advisoryError) {
       logSession('error', 'POST advisory update failed', { sessionId, error: advisoryError.message })
@@ -231,7 +291,7 @@ export async function POST(req: Request) {
       connection_quality: finalConnectionQuality,
     }, { count: 'exact' })
     .eq('id', sessionId)
-    .in('status', ['pending', 'active'])
+    .in('status', ['pending', 'active', 'reconnecting'])
 
   if (endError) {
     logSession('error', 'POST end failed', { sessionId, error: endError.message })
@@ -288,6 +348,15 @@ export async function POST(req: Request) {
       durationMinutes: finalDurationMinutes,
     })
   }
+
+  await updateProviderHealth({
+    providerUserId: finalProviderId,
+    providerDeviceId: finalProviderDeviceId,
+    disconnectReason: finalDisconnectReason,
+    providerAvgMbps: finalProviderAvgMbps,
+    providerLastMbps: finalProviderLastMbps,
+    connectionQuality: finalConnectionQuality,
+  })
 
   await Promise.all([
     shouldApplyCounters && finalBytes > 0 && finalRequesterId

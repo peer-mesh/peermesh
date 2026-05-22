@@ -6,6 +6,7 @@ import {
   buildProviderDeviceOccupancyLookupKeys,
   filterAvailableProviderDevices,
 } from '@/lib/provider-capacity'
+import { isProviderHealthy, sortProvidersByHealth } from '@/lib/provider-health'
 
 export async function GET(req: Request) {
   // Try cookie-based auth first, then Bearer token - both optional.
@@ -24,7 +25,7 @@ export async function GET(req: Request) {
 
   const { data, error } = await adminClient
     .from('provider_devices')
-    .select('country_code, user_id, device_id, relay_url')
+    .select('country_code, user_id, device_id, relay_url, health_score, provider_avg_mbps, provider_last_mbps, disconnect_count, reconnect_count, last_heartbeat')
     .gt('last_heartbeat', cutoff)
 
   if (error || !data) return NextResponse.json({ peers: [] })
@@ -38,7 +39,7 @@ export async function GET(req: Request) {
         .in('provider_device_id', candidateDeviceIds)
     : { data: [] as Array<{ provider_device_id: string | null }> }
   const occupiedDevices = buildOccupiedProviderDeviceSet(activeSessions)
-  const availableDevices = filterAvailableProviderDevices(data, occupiedDevices)
+  const availableDevices = sortProvidersByHealth(filterAvailableProviderDevices(data, occupiedDevices).filter(isProviderHealthy))
 
   // New rows are keyed by the exact slot deviceId. Legacy rows keyed by the base
   // device still hide every slot under that base device.

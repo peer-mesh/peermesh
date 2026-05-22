@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getRelayFallbackList } from '@/lib/relay-endpoints'
+import { getRelayFallbackList, getRelayHealthList } from '@/lib/relay-endpoints'
 
 // Public endpoint — no auth required.
 // Clients call this on startup to get the current relay pool.
@@ -8,9 +8,12 @@ import { getRelayFallbackList } from '@/lib/relay-endpoints'
 export const revalidate = 30
 
 export async function GET() {
-  const relays = await getRelayFallbackList()
+  const [relays, health] = await Promise.all([
+    getRelayFallbackList(),
+    getRelayHealthList(),
+  ])
   return NextResponse.json(
-    { relays, updatedAt: Date.now() },
+    { relays, health, updatedAt: Date.now() },
     { headers: { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=60' } }
   )
 }

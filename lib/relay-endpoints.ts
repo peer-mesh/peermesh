@@ -15,6 +15,13 @@ interface RelayHealth {
   alive: boolean
   peers: number
   sessions: number
+  providers: number
+  requesters: number
+  activeSessions: number
+  reconnectingSessions: number
+  countries: Record<string, number>
+  loadScore: number
+  uptimeSeconds: number
   latencyMs: number
   checkedAt: number
 }
@@ -34,9 +41,37 @@ async function checkRelay(wsUrl: string): Promise<RelayHealth> {
     const latencyMs = Date.now() - start
     if (!res.ok) throw new Error(`status=${res.status}`)
     const data = await res.json()
-    return { url: wsUrl, alive: true, peers: data.peers ?? 0, sessions: data.sessions ?? 0, latencyMs, checkedAt: Date.now() }
+    return {
+      url: wsUrl,
+      alive: true,
+      peers: data.peers ?? 0,
+      sessions: data.sessions ?? 0,
+      providers: data.providers ?? 0,
+      requesters: data.requesters ?? 0,
+      activeSessions: data.activeSessions ?? data.sessions ?? 0,
+      reconnectingSessions: data.reconnectingSessions ?? 0,
+      countries: data.countries && typeof data.countries === 'object' ? data.countries : {},
+      loadScore: data.loadScore ?? ((data.sessions ?? 0) * 10 + (data.peers ?? 0)),
+      uptimeSeconds: data.uptimeSeconds ?? 0,
+      latencyMs,
+      checkedAt: Date.now(),
+    }
   } catch {
-    return { url: wsUrl, alive: false, peers: 0, sessions: 0, latencyMs: 9999, checkedAt: Date.now() }
+    return {
+      url: wsUrl,
+      alive: false,
+      peers: 0,
+      sessions: 0,
+      providers: 0,
+      requesters: 0,
+      activeSessions: 0,
+      reconnectingSessions: 0,
+      countries: {},
+      loadScore: 9999,
+      uptimeSeconds: 0,
+      latencyMs: 9999,
+      checkedAt: Date.now(),
+    }
   }
 }
 
@@ -53,7 +88,7 @@ async function getHealth(wsUrl: string): Promise<RelayHealth> {
 // peers lightly (connected but idle), latency as tiebreaker.
 
 function score(h: RelayHealth): number {
-  return h.sessions * 10 + h.peers * 1 + h.latencyMs * 0.01
+  return h.loadScore + h.latencyMs * 0.01
 }
 
 // ── Pick best relay ───────────────────────────────────────────────────────────
@@ -79,6 +114,11 @@ export async function getRelayFallbackList(): Promise<string[]> {
   const pool = alive.length > 0 ? alive : results
   pool.sort((a, b) => score(a) - score(b))
   return pool.map(h => h.url)
+}
+
+export async function getRelayHealthList(): Promise<RelayHealth[]> {
+  const results = await Promise.all(RELAY_ENDPOINTS.map(getHealth))
+  return [...results].sort((a, b) => score(a) - score(b))
 }
 
 // ── Best HTTP base URL for a specific relay (for check-private etc.) ──────────

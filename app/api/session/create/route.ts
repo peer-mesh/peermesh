@@ -9,11 +9,14 @@ import {
   buildOccupiedProviderDeviceSet,
   buildProviderDeviceOccupancyLookupKeys,
   filterAvailableProviderDevices,
+  type ProviderDeviceRow,
 } from '@/lib/provider-capacity'
+import { isProviderHealthy, sortProvidersByHealth } from '@/lib/provider-health'
 import { getConnectionAccessRequirement, hasPaidAccess } from '@/lib/account-access'
 import { getEffectiveBandwidthLimitBytes, quoteApiUsage } from '@/lib/billing'
 import { touchApiKeyLastUsed } from '@/lib/api-keys'
 import { resolveRequesterAuth } from '@/lib/requester-auth'
+import { checkServerRateLimit } from '@/lib/server-rate-limit'
 
 function getReceiptSecret(): string {
   const secret = process.env.RECEIPT_SECRET ?? process.env.RELAY_SECRET ?? ''
@@ -76,6 +79,13 @@ export async function POST(req: Request) {
   const auth = await resolveRequesterAuth(req)
   if (!auth?.userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const userId = auth.userId
+  const rateLimit = checkServerRateLimit(`session:create:${userId}`, 30, 60_000)
+  if (!rateLimit.ok) {
+    return NextResponse.json(
+      { error: 'Too many session requests. Please retry shortly.', retryAfterSeconds: rateLimit.retryAfterSeconds },
+      { status: 429, headers: { 'Retry-After': String(rateLimit.retryAfterSeconds) } },
+    )
+  }
   const emailConfirmed = auth.emailConfirmed
   if (!emailConfirmed) {
     return NextResponse.json({
@@ -210,14 +220,14 @@ export async function POST(req: Request) {
   if (!hasPrivateCode) {
     const { data: liveProviders } = await adminClient
       .from('provider_devices')
-      .select('user_id, relay_url, device_id, country_code')
+      .select('user_id, relay_url, device_id, country_code, health_score, provider_avg_mbps, provider_last_mbps, disconnect_count, reconnect_count, last_heartbeat')
       .eq('country_code', country)
       .neq('user_id', userId)
       .gt('last_heartbeat', cutoff)
       .not('relay_url', 'is', null)
 
     const providerUserIds = [...new Set((liveProviders ?? []).map(row => row.user_id).filter(Boolean) as string[])]
-    let publicProviders = liveProviders ?? []
+    let publicProviders: ProviderDeviceRow[] = liveProviders ?? []
 
     if (providerUserIds.length > 0) {
       const { data: privateRows } = await adminClient
@@ -247,8 +257,10 @@ export async function POST(req: Request) {
         .eq('status', 'active')
         .in('provider_device_id', publicDeviceIds)
       const occupiedDevices = buildOccupiedProviderDeviceSet(activeSessions)
-      publicProviders = filterAvailableProviderDevices(publicProviders, occupiedDevices)
+      publicProviders = sortProvidersByHealth(filterAvailableProviderDevices(publicProviders, occupiedDevices).filter(isProviderHealthy))
     }
+
+    publicProviders = sortProvidersByHealth(publicProviders.filter(isProviderHealthy))
 
     const rawRelayUrls = [...new Set(publicProviders.map(row => row.relay_url).filter(Boolean) as string[])]
     const hasAnyProvider = publicProviders.length > 0

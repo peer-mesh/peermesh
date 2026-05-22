@@ -1101,10 +1101,23 @@ export async function PUT(req: Request) {
 
   if (rpcError) return NextResponse.json({ error: rpcError.message }, { status: 500 })
 
-  const providerUpdate: { state_actor: string; connection_slots?: number } = { state_actor: stateActor }
+  const providerUpdate: {
+    state_actor: string
+    connection_slots?: number
+    provider_last_mbps?: number
+    provider_avg_mbps?: number
+    connection_quality?: Record<string, unknown>
+  } = { state_actor: stateActor }
   const connectionSlots = Number.parseInt(String(body.connection_slots ?? ''), 10)
   if (Number.isInteger(connectionSlots) && connectionSlots >= 1 && connectionSlots <= 32) {
     providerUpdate.connection_slots = connectionSlots
+  }
+  const providerLastMbps = Number(body.provider_last_mbps ?? body.last_mbps ?? body.currentMbps)
+  const providerAvgMbps = Number(body.provider_avg_mbps ?? body.avg_mbps ?? body.avgMbps)
+  if (Number.isFinite(providerLastMbps) && providerLastMbps >= 0) providerUpdate.provider_last_mbps = Number(providerLastMbps.toFixed(3))
+  if (Number.isFinite(providerAvgMbps) && providerAvgMbps >= 0) providerUpdate.provider_avg_mbps = Number(providerAvgMbps.toFixed(3))
+  if (body.connection_quality && typeof body.connection_quality === 'object' && !Array.isArray(body.connection_quality)) {
+    providerUpdate.connection_quality = body.connection_quality
   }
 
   await adminClient

@@ -255,7 +255,8 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     agentReady: false,
     notificationMode,
     reconnectAttempt,
-    reconnectAttempts: 0,
+    reconnectAttempts: reconnectAttempt,
+    reconnectReason: reconnectAttempt > 0 ? 'provider_disconnected' : null,
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
   })
@@ -278,6 +279,11 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     provider.sessionId = null
     requesterWs.sessionId = null
     sessions.delete(sessionId)
+    session.status = 'reconnecting'
+    session.disconnectReason = 'provider_unresponsive'
+    session.reconnectAttempts = 1
+    session.reconnectReason = 'provider_unresponsive'
+    syncSessionMetadata(session, 'provider_unresponsive')
     send(requesterWs, { type: 'session_reconnecting', reason: 'provider_unresponsive', attempt: 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
     attemptReconnect(requesterWs, { ...session, sessionId, providerId: provider.peerId, reconnectAttempts: 0 })
   }, 10_000)
@@ -304,6 +310,8 @@ function syncSessionMetadata(session, reason = 'update') {
     providerAvgMbps: session.providerAvgMbps ?? null,
     providerLastMbps: session.providerLastMbps ?? null,
     connectionQuality: session.connectionQuality ?? null,
+    reconnectAttempts: session.reconnectAttempts ?? null,
+    reconnectReason: session.reconnectReason ?? null,
   }
 
   fetch(`${API_BASE}/api/session/end`, {
@@ -395,6 +403,7 @@ function sendSessionQuality(session, reason = 'traffic', force = false) {
 
 async function attemptReconnect(requesterWs, droppedSession) {
   const { country, dbSessionId, reconnectAttempts, providerUserId, requesterUserId, providerId, privateBaseDeviceId } = droppedSession
+  const attempt = (reconnectAttempts ?? 0) + 1
 
   if ((reconnectAttempts ?? 0) >= MAX_RECONNECT_ATTEMPTS) {
     log(requesterWs.peerId.slice(0,8), `RECONNECT giving up after ${MAX_RECONNECT_ATTEMPTS} attempts`)
@@ -420,22 +429,26 @@ async function attemptReconnect(requesterWs, droppedSession) {
   })
 
   if (!nextProvider) {
-    log(requesterWs.peerId.slice(0,8), `RECONNECT no provider available in ${country} attempt=${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS}`)
-    send(requesterWs, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt: (reconnectAttempts ?? 0) + 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
+    droppedSession.status = 'reconnecting'
+    droppedSession.reconnectAttempts = attempt
+    droppedSession.reconnectReason = 'provider_disconnected'
+    syncSessionMetadata(droppedSession, 'reconnect_wait')
+    log(requesterWs.peerId.slice(0,8), `RECONNECT no provider available in ${country} attempt=${attempt}/${MAX_RECONNECT_ATTEMPTS}`)
+    send(requesterWs, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt, maxAttempts: MAX_RECONNECT_ATTEMPTS })
     // Retry with backoff: 2s, 4s, 8s, 16s, 30s
     const delay = Math.min(2000 * Math.pow(2, reconnectAttempts ?? 0), 30000)
     setTimeout(() => {
       if (requesterWs.readyState !== WebSocket.OPEN || requesterWs.sessionId) return
-      attemptReconnect(requesterWs, { ...droppedSession, reconnectAttempts: (reconnectAttempts ?? 0) + 1 })
+      attemptReconnect(requesterWs, { ...droppedSession, reconnectAttempts: attempt })
     }, delay)
     return
   }
 
-  log(requesterWs.peerId.slice(0,8), `RECONNECT found new provider=${nextProvider.peerId.slice(0,8)} userId=${nextProvider.userId?.slice(0,8)} attempt=${(reconnectAttempts ?? 0) + 1}`)
+  log(requesterWs.peerId.slice(0,8), `RECONNECT found new provider=${nextProvider.peerId.slice(0,8)} userId=${nextProvider.userId?.slice(0,8)} attempt=${attempt}`)
 
   createSession(requesterWs, nextProvider, country, dbSessionId, {
     notificationMode: 'reconnect',
-    reconnectAttempt: (reconnectAttempts ?? 0) + 1,
+    reconnectAttempt: attempt,
     emitSessionCreated: false,
   })
 }
@@ -444,8 +457,29 @@ const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost')
 
   if (url.pathname === '/health') {
+    const allPeers = [...peers.values()]
+    const providers = allPeers.filter(peer => peer.role === 'provider')
+    const requesters = allPeers.filter(peer => peer.role === 'requester')
+    const countries = {}
+    for (const provider of providers) {
+      if (!provider.country) continue
+      countries[provider.country] = (countries[provider.country] ?? 0) + 1
+    }
+    const reconnectingSessions = [...sessions.values()].filter(session => session.status === 'reconnecting').length
+    const activeSessions = [...sessions.values()].filter(session => session.status === 'active').length
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ status: 'ok', peers: peers.size, sessions: sessions.size }))
+    res.end(JSON.stringify({
+      status: 'ok',
+      peers: peers.size,
+      sessions: sessions.size,
+      providers: providers.length,
+      requesters: requesters.length,
+      countries,
+      activeSessions,
+      reconnectingSessions,
+      uptimeSeconds: Math.floor(process.uptime()),
+      loadScore: sessions.size * 10 + peers.size,
+    }))
     return
   }
 
@@ -1102,6 +1136,10 @@ function cleanupSession(ws) {
   if (ws.role === 'provider' && other.readyState === WebSocket.OPEN) {
     log(other.peerId.slice(0,8), `PROVIDER_DROPPED — attempting auto-reconnect country=${session.country}`)
     sessions.delete(sessionId)
+    session.status = 'reconnecting'
+    session.reconnectAttempts = 1
+    session.reconnectReason = 'provider_disconnected'
+    syncSessionMetadata(session, 'provider_dropped')
     log(ws.peerId.slice(0,8), `SESSION_RECONNECT_PENDING id=${sessionId.slice(0,8)} bytes=${session.bytesRequester ?? 0}`)
     send(other, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt: 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
     attemptReconnect(other, { ...session, sessionId, reconnectAttempts: 0 })
@@ -1138,6 +1176,11 @@ const sessionWatchdog = setInterval(() => {
       log(requester.peerId.slice(0,8), `SESSION_WATCHDOG provider gone sessionId=${sessionId.slice(0,8)}`)
       requester.sessionId = null
       sessions.delete(sessionId)
+      session.status = 'reconnecting'
+      session.disconnectReason = 'provider_disconnected'
+      session.reconnectAttempts = 1
+      session.reconnectReason = 'provider_disconnected'
+      syncSessionMetadata(session, 'watchdog_reconnect')
       send(requester, { type: 'session_reconnecting', reason: 'provider_disconnected', attempt: 1, maxAttempts: MAX_RECONNECT_ATTEMPTS })
       attemptReconnect(requester, { ...session, sessionId, reconnectAttempts: 0 })
     }
