@@ -420,6 +420,14 @@ function showDisconnectOverlay(reason) {
 
 let sessionPanelTimer = null
 
+function formatPanelBytes(bytes) {
+  const b = Number(bytes) || 0
+  if (b < 1024) return `${b}B`
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)}KB`
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)}MB`
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)}GB`
+}
+
 function formatPanelMbps(value) {
   const speed = Number(value)
   if (!Number.isFinite(speed) || speed <= 0) return '0.00 Mbps'
@@ -455,6 +463,7 @@ function renderSessionPanelStatus(status = {}) {
   const connectionType = session?.connectionType || 'none'
   const currentSpeed = quality ? formatPanelMbps(quality.currentMbps) : '0.00 Mbps'
   const avgSpeed = quality ? formatPanelMbps(quality.avgMbps) : '0.00 Mbps'
+  const bytesUsed = quality?.transferredBytes != null ? formatPanelBytes(quality.transferredBytes) : '0B'
   const provider = quality?.providerKind || helper?.source || 'unknown'
   const sessionId = session?.sessionId || session?.id || ''
   const failReason = status.failClosedReason || (status.failClosed ? 'Traffic is blocked to protect your real connection.' : '')
@@ -466,12 +475,19 @@ function renderSessionPanelStatus(status = {}) {
   panel.querySelector('[data-pm-mode]').textContent = connectionType
   panel.querySelector('[data-pm-current]').textContent = currentSpeed
   panel.querySelector('[data-pm-avg]').textContent = avgSpeed
+  panel.querySelector('[data-pm-bytes]').textContent = bytesUsed
   panel.querySelector('[data-pm-provider]').textContent = provider
   panel.querySelector('[data-pm-session]').textContent = sessionId ? sessionId.slice(0, 8) : 'none'
   panel.querySelector('[data-pm-helper]').textContent = helper?.available
     ? `${helper.source || 'desktop'} ${helper.running ? 'sharing' : 'ready'}`
     : 'not available'
   panel.querySelector('[data-pm-reason]').textContent = failReason
+
+  // Show/hide unblock button based on fail-closed state
+  const unblockBtn = panel.querySelector('#peermesh-panel-unblock')
+  if (unblockBtn) {
+    unblockBtn.style.display = status.failClosed && !status.connected ? 'inline-block' : 'none'
+  }
 }
 
 async function refreshSessionPanelStatus() {
@@ -532,22 +548,41 @@ function showSessionPanel() {
       <div><div style="color:#777b8f;font-size:10px">MODE</div><div data-pm-mode style="margin-top:3px">none</div></div>
       <div><div style="color:#777b8f;font-size:10px">CURRENT SPEED</div><div data-pm-current style="margin-top:3px;color:#00ff88">0.00 Mbps</div></div>
       <div><div style="color:#777b8f;font-size:10px">AVG SPEED</div><div data-pm-avg style="margin-top:3px;color:#00ff88">0.00 Mbps</div></div>
+      <div><div style="color:#777b8f;font-size:10px">BYTES USED</div><div data-pm-bytes style="margin-top:3px">0B</div></div>
       <div><div style="color:#777b8f;font-size:10px">PROVIDER</div><div data-pm-provider style="margin-top:3px">unknown</div></div>
       <div><div style="color:#777b8f;font-size:10px">SESSION</div><div data-pm-session style="margin-top:3px">none</div></div>
-      <div style="grid-column:1 / -1"><div style="color:#777b8f;font-size:10px">LOCAL HELPER</div><div data-pm-helper style="margin-top:3px">checking</div></div>
+      <div><div style="color:#777b8f;font-size:10px">LOCAL HELPER</div><div data-pm-helper style="margin-top:3px">checking</div></div>
       <div style="grid-column:1 / -1;color:#ffaa00;font-size:11px;line-height:1.5;min-height:16px" data-pm-reason></div>
     </div>
     <div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;gap:10px">
-      <span style="font-size:10px;color:#777b8f">Shortcut: Ctrl+Shift+P</span>
+      <button id="peermesh-panel-unblock" style="display:none;border:1px solid rgba(255,170,0,0.4);background:transparent;color:#ffaa00;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:11px">UNBLOCK BROWSER</button>
+      <span style="font-size:10px;color:#777b8f">Ctrl+Shift+P to toggle</span>
       <button id="peermesh-session-panel-dismiss" style="border:none;background:transparent;color:#9090a8;cursor:pointer;font:inherit;font-size:10px;padding:0">DISMISS</button>
     </div>
   `
   body.appendChild(panel)
   document.getElementById('peermesh-session-panel-close')?.addEventListener('click', closeSessionPanel)
   document.getElementById('peermesh-session-panel-dismiss')?.addEventListener('click', closeSessionPanel)
+  document.getElementById('peermesh-panel-unblock')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'UNBLOCK_BROWSER' }).catch(() => {})
+    closeSessionPanel()
+  })
   refreshSessionPanelStatus()
   stopSessionPanelPolling()
-  sessionPanelTimer = setInterval(refreshSessionPanelStatus, 2000)
+  // Poll every 3s but debounce renders to avoid jitter — only update DOM
+  // when values actually change, not on every tick.
+  let _lastStatusJson = ''
+  sessionPanelTimer = setInterval(async () => {
+    try {
+      const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' })
+      const json = JSON.stringify(status)
+      if (json === _lastStatusJson) return
+      _lastStatusJson = json
+      renderSessionPanelStatus(status || {})
+    } catch {
+      renderSessionPanelStatus({ failClosed: true, failClosedReason: 'PeerMesh background is not reachable.' })
+    }
+  }, 3000)
 }
 
 document.addEventListener('keydown', (event) => {
@@ -568,21 +603,35 @@ chrome.storage.onChanged?.addListener((changes, areaName) => {
   syncProfile(changes.session.newValue ?? null)
 })
 
+let _overlayDebounceTimer = null
+let _lastOverlayState = null
+
 chrome.runtime.onMessage?.addListener((message) => {
   if (message?.type === 'PEERMESH_SESSION_ENDED') {
     showDisconnectOverlay(message.reason)
   }
   if (message?.type === 'PEERMESH_BROWSING_STATUS') {
     if (message.state === 'clear' || message.state === 'connected') {
+      _lastOverlayState = null
+      if (_overlayDebounceTimer) { clearTimeout(_overlayDebounceTimer); _overlayDebounceTimer = null }
       removePeerMeshOverlay()
       return
     }
-    showPeerMeshStatusOverlay({
-      state: message.state,
-      title: message.title,
-      message: message.message,
-      autoHideMs: message.state === 'reconnected' ? 4500 : 0,
-    })
-    refreshSessionPanelStatus()
+    // Debounce rapid state changes (e.g. reconnecting flicker) — only render
+    // after 400ms of stability so the overlay doesn't jitter during reconnect.
+    const stateKey = `${message.state}:${message.title}`
+    if (stateKey === _lastOverlayState) return
+    if (_overlayDebounceTimer) clearTimeout(_overlayDebounceTimer)
+    _overlayDebounceTimer = setTimeout(() => {
+      _overlayDebounceTimer = null
+      _lastOverlayState = stateKey
+      showPeerMeshStatusOverlay({
+        state: message.state,
+        title: message.title,
+        message: message.message,
+        autoHideMs: message.state === 'reconnected' ? 4500 : 0,
+      })
+      refreshSessionPanelStatus()
+    }, 400)
   }
 })

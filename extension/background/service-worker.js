@@ -654,18 +654,37 @@ async function tryRefreshExtensionToken() {
       body: JSON.stringify({ deviceSessionId, refreshToken }),
       signal: AbortSignal.timeout(5000),
     })
+    // 5xx or network errors — keep existing token, do not treat as revoked
+    if (res.status >= 500) {
+      log('warn', `[AUTH] token refresh server error status=${res.status} — keeping existing token`)
+      return false
+    }
+    // 403 with revoked=true — session was explicitly revoked, clear auth
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}))
+      if (body.revoked === true) {
+        log('warn', `[AUTH] device session revoked userId=${userId.slice(0,8)}`)
+        // Clear stored tokens but keep user object so UI shows signed-out state
+        const clearedUser = { ...stored.user, token: '', refreshToken: '', deviceSessionId: '' }
+        await chrome.storage.local.set({ user: clearedUser, supabaseToken: '', desktopToken: '' })
+        supabaseToken = null
+        desktopToken = null
+      }
+      return false
+    }
     if (!res.ok) return false
     const data = await res.json()
     if (data.token && data.refreshToken && data.deviceSessionId) {
       supabaseToken = data.token
       desktopToken = data.token
-      // Update stored user with new tokens
       const updatedUser = { ...stored.user, token: data.token, refreshToken: data.refreshToken, deviceSessionId: data.deviceSessionId }
       await chrome.storage.local.set({ supabaseToken: data.token, desktopToken: data.token, user: updatedUser })
       log('info', `[AUTH] extension token refreshed userId=${userId.slice(0,8)}`)
       return true
     }
-  } catch {}
+  } catch (err) {
+    log('warn', `[AUTH] token refresh failed (network?) — keeping existing token: ${err.message}`)
+  }
   return false
 }
 async function sendExtensionHeartbeat() {

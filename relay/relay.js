@@ -132,13 +132,53 @@ const providerShareStatusCache = new Map()
 
 const MAX_RECONNECT_ATTEMPTS = 12
 const MAX_BLOCKED_TARGETS_PER_SESSION = 5
-const TUNNEL_WINDOW_MS = 60_000
-const BYTE_BURST_WINDOW_MS = 60_000
+
+// ── Rate limit configuration — all values are env-overridable ────────────────
+// RELAY_TUNNEL_WINDOW_MS          : sliding window for tunnel open rate (default 60000ms)
+// RELAY_BYTE_BURST_WINDOW_MS      : sliding window for byte burst rate (default 60000ms)
+// RELAY_TUNNELS_HIGH_MED_LOW      : max tunnels/window as "high/med/low" (default 300/200/50)
+// RELAY_BYTES_HIGH_MED_LOW_MB     : max MB/window as "high/med/low" (default 750/250/60)
+// RELAY_SESSIONS_HIGH_MED_LOW     : max concurrent sessions as "high/med/low" (default 8/3/1)
+
+function getEnvInt(name, fallback) {
+  const v = parseInt(process.env[name] ?? '', 10)
+  return Number.isFinite(v) && v > 0 ? v : fallback
+}
+
+function parseSlashTrio(name, defaults) {
+  const raw = (process.env[name] ?? '').trim()
+  if (!raw) return defaults
+  const parts = raw.split('/').map(s => parseInt(s.trim(), 10))
+  return [
+    Number.isFinite(parts[0]) && parts[0] > 0 ? parts[0] : defaults[0],
+    Number.isFinite(parts[1]) && parts[1] > 0 ? parts[1] : defaults[1],
+    Number.isFinite(parts[2]) && parts[2] > 0 ? parts[2] : defaults[2],
+  ]
+}
+
+const TUNNEL_WINDOW_MS     = getEnvInt('RELAY_TUNNEL_WINDOW_MS', 60_000)
+const BYTE_BURST_WINDOW_MS = getEnvInt('RELAY_BYTE_BURST_WINDOW_MS', 60_000)
+
+const [TUNNELS_HIGH, TUNNELS_MED, TUNNELS_LOW]   = parseSlashTrio('RELAY_TUNNELS_HIGH_MED_LOW', [300, 200, 50])
+const [BYTES_HIGH_MB, BYTES_MED_MB, BYTES_LOW_MB] = parseSlashTrio('RELAY_BYTES_HIGH_MED_LOW_MB', [750, 250, 60])
+const [SESSIONS_HIGH, SESSIONS_MED, SESSIONS_LOW] = parseSlashTrio('RELAY_SESSIONS_HIGH_MED_LOW', [8, 3, 1])
 
 function sessionLimits(trustScore = 50) {
-  if (trustScore >= 80) return { maxConcurrentSessions: 8, maxTunnelsPerMinute: 180, maxBytesPerMinute: 750 * 1024 * 1024 }
-  if (trustScore >= 50) return { maxConcurrentSessions: 3, maxTunnelsPerMinute: 90, maxBytesPerMinute: 250 * 1024 * 1024 }
-  return { maxConcurrentSessions: 1, maxTunnelsPerMinute: 30, maxBytesPerMinute: 60 * 1024 * 1024 }
+  if (trustScore >= 80) return {
+    maxConcurrentSessions: SESSIONS_HIGH,
+    maxTunnelsPerMinute:   TUNNELS_HIGH,
+    maxBytesPerMinute:     BYTES_HIGH_MB * 1024 * 1024,
+  }
+  if (trustScore >= 50) return {
+    maxConcurrentSessions: SESSIONS_MED,
+    maxTunnelsPerMinute:   TUNNELS_MED,
+    maxBytesPerMinute:     BYTES_MED_MB * 1024 * 1024,
+  }
+  return {
+    maxConcurrentSessions: SESSIONS_LOW,
+    maxTunnelsPerMinute:   TUNNELS_LOW,
+    maxBytesPerMinute:     BYTES_LOW_MB * 1024 * 1024,
+  }
 }
 
 function log(tag, msg, extra = '') {
@@ -1477,6 +1517,14 @@ async function runSchedulerTick(reason = 'relay') {
   if (!API_BASE || !SCHEDULER_SECRET || schedulerTickInFlight) return
   schedulerTickInFlight = true
   try {
+    // Clean up stale DB sessions on every tick so stuck pending/reconnecting
+    // sessions don't accumulate and block requesters from creating new ones.
+    if (API_BASE && RELAY_SECRET) {
+      fetch(`${API_BASE}/api/session/cleanup`, {
+        method: 'POST',
+        headers: { 'x-relay-secret': RELAY_SECRET },
+      }).catch(() => {})
+    }
     const res = await fetch(`${API_BASE}/api/scheduler/tick?source=relay`, {
       method: 'POST',
       headers: {
