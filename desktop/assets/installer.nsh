@@ -1,17 +1,24 @@
 ; PeerMesh installer/uninstaller hooks
 
 !macro IsPeerMeshRunning RESULT
-  nsExec::ExecToStack '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $$_.ProcessName -eq ''PeerMesh'' -or $$_.ProcessName -like ''PeerMesh Helper*'' }) { exit 0 } else { exit 1 }"'
+  nsExec::ExecToStack '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "$$running = Get-CimInstance Win32_Process | Where-Object { ($$_.Name -eq ''PeerMesh.exe'' -or $$_.Name -like ''PeerMesh Helper*.exe'' -or $$_.ExecutablePath -like ''*\Programs\PeerMesh\*'' -or $$_.ExecutablePath -like ''*\Programs\peermesh-desktop\*'') -and $$_.Name -notlike ''PeerMesh-Setup*'' }; if ($$running) { exit 0 } else { exit 1 }"'
   Pop ${RESULT}
   Pop $R3
 !macroend
 
+!macro DisablePeerMeshAutoLaunch
+  ; Prevent an old app, startup entry, or extension native host from immediately
+  ; relaunching PeerMesh while the installer is replacing locked files.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PeerMesh"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "peermesh-desktop"
+  DeleteRegKey HKCU "Software\Google\Chrome\NativeMessagingHosts\com.peermesh.desktop"
+  DeleteRegKey HKCU "Software\Chromium\NativeMessagingHosts\com.peermesh.desktop"
+  DeleteRegKey HKCU "Software\Microsoft\Edge\NativeMessagingHosts\com.peermesh.desktop"
+!macroend
+
 ; Shared macro to kill all PeerMesh processes cleanly
 !macro KillPeerMesh
-  !insertmacro IsPeerMeshRunning $R0
-  ${If} $R0 != "0"
-    DetailPrint "No running PeerMesh process found."
-  ${Else}
+  !insertmacro DisablePeerMeshAutoLaunch
   ; 1. Ask both possible control ports to quit gracefully
   nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NonInteractive -WindowStyle Hidden -Command "try { Invoke-WebRequest -Uri http://127.0.0.1:7654/quit -Method POST -TimeoutSec 2 -UseBasicParsing | Out-Null } catch {}; try { Invoke-WebRequest -Uri http://127.0.0.1:7656/quit -Method POST -TimeoutSec 2 -UseBasicParsing | Out-Null } catch {}"'
   Sleep 2500
@@ -23,23 +30,24 @@
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Renderer).exe" /T'
   nsExec::ExecToLog '$SYSDIR\taskkill.exe /F /IM "PeerMesh Helper (Plugin).exe" /T'
   nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-Process -ErrorAction SilentlyContinue | Where-Object { $$_.ProcessName -eq ''PeerMesh'' -or $$_.ProcessName -like ''PeerMesh Helper*'' } | Stop-Process -Force -ErrorAction SilentlyContinue"'
+  nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "$$targets = Get-CimInstance Win32_Process | Where-Object { ($$_.Name -eq ''PeerMesh.exe'' -or $$_.Name -like ''PeerMesh Helper*.exe'' -or $$_.ExecutablePath -like ''*\Programs\PeerMesh\*'' -or $$_.ExecutablePath -like ''*\Programs\peermesh-desktop\*'') -and $$_.Name -notlike ''PeerMesh-Setup*'' }; foreach ($$p in $$targets) { try { Stop-Process -Id $$p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"'
 
-  ; 3. Wait until the process is actually gone (poll up to 10s)
+  ; 3. Wait until the process is actually gone (poll up to 30s)
   ; nsExec::ExecToStack pushes: exit-code then stdout — pop both, check exit code
   ; tasklist exits 0 when it finds a match, 1 when nothing matches
   StrCpy $R1 0
   ${Do}
     Sleep 500
+    nsExec::ExecToLog '$SYSDIR\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "$$targets = Get-CimInstance Win32_Process | Where-Object { ($$_.Name -eq ''PeerMesh.exe'' -or $$_.Name -like ''PeerMesh Helper*.exe'' -or $$_.ExecutablePath -like ''*\Programs\PeerMesh\*'' -or $$_.ExecutablePath -like ''*\Programs\peermesh-desktop\*'') -and $$_.Name -notlike ''PeerMesh-Setup*'' }; foreach ($$p in $$targets) { try { Stop-Process -Id $$p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"'
     !insertmacro IsPeerMeshRunning $R2
     ${If} $R2 != "0"
       ${Break}  ; process gone
     ${EndIf}
     IntOp $R1 $R1 + 1
-    ${If} $R1 >= 20
+    ${If} $R1 >= 60
       ${Break}
     ${EndIf}
   ${Loop}
-  ${EndIf}
 !macroend
 
 ; customInit runs before electron-builder's own CloseApplications/uninstall flow.

@@ -97,6 +97,9 @@ function setToggleVisual(element, { on = false, loading = false, disabled = fals
   if (loading) classes.push('loading')
   element.className = classes.join(' ')
   element.disabled = disabled || loading
+  const row = element.closest('.toggle-row')
+  if (row) row.classList.toggle('disabled', !!element.disabled)
+  element.setAttribute('aria-disabled', element.disabled ? 'true' : 'false')
 }
 
 function setOffline(isOffline) {
@@ -620,16 +623,20 @@ function renderStartupPreferences(state) {
   const isCurrentlySharing = !!state?.running || !!state?.shareEnabled
   const schedule = normalizeSharingSchedule(state?.sharingSchedule ?? config.sharingSchedule)
   const osWake = state?.osWake ?? { enabled: !!config.scheduleWakeEnabled, supported: false, platform: 'unknown', status: null }
+  const launchEnabled = !!config.launchOnStartup
+  const autoShareReady = signedIn && accepted && launchEnabled
+  const scheduleWakeReady = signedIn && schedule.enabled && autoShareReady && osWake.supported
+  const onDemandWakeReady = signedIn && !!config.allowPrivateOnDemandStart
 
   setToggleVisual(launchToggle, {
-    on: !!config.launchOnStartup,
+    on: launchEnabled,
     loading: startupBusy.launchOnStartup,
     disabled: startupBusy.launchOnStartup,
   })
   setToggleVisual(autoShareToggle, {
     on: !!config.autoShareOnLaunch,
     loading: startupBusy.autoShareOnLaunch,
-    disabled: !signedIn || (!accepted && !isCurrentlySharing) || startupBusy.autoShareOnLaunch,
+    disabled: !autoShareReady || startupBusy.autoShareOnLaunch,
   })
   setToggleVisual(preventSleepToggle, {
     on: !!config.preventSleepWhileSharing,
@@ -644,12 +651,12 @@ function renderStartupPreferences(state) {
   setToggleVisual(scheduleWakeToggle, {
     on: !!osWake.enabled,
     loading: startupBusy.scheduleWakeEnabled,
-    disabled: !signedIn || !schedule.enabled || !osWake.supported || startupBusy.scheduleWakeEnabled,
+    disabled: !scheduleWakeReady || startupBusy.scheduleWakeEnabled,
   })
   setToggleVisual(onDemandWakeToggle, {
     on: !!config.allowOnDemandWake,
     loading: startupBusy.onDemandWake,
-    disabled: !signedIn || !config.allowPrivateOnDemandStart || startupBusy.onDemandWake,
+    disabled: !onDemandWakeReady || startupBusy.onDemandWake,
   })
   setToggleVisual(privateOnDemandStartToggle, {
     on: !!config.allowPrivateOnDemandStart,
@@ -675,6 +682,8 @@ function renderStartupPreferences(state) {
   if (autoShareDesc) {
     if (!signedIn) {
       autoShareDesc.textContent = 'Sign in before enabling automatic sharing.'
+    } else if (!config.launchOnStartup) {
+      autoShareDesc.textContent = 'Enable launch on startup first so PeerMesh can start automatically.'
     } else if (!accepted) {
       autoShareDesc.textContent = 'Turn sharing on once and accept the disclosure before enabling this.'
     } else if (config.autoShareOnLaunch) {
@@ -717,6 +726,10 @@ function renderStartupPreferences(state) {
       scheduleWakeDesc.textContent = 'Sign in before enabling OS wake.'
     } else if (!schedule.enabled) {
       scheduleWakeDesc.textContent = 'Enable scheduled sharing first.'
+    } else if (!config.launchOnStartup) {
+      scheduleWakeDesc.textContent = 'Enable launch on startup first so wake has an app to start.'
+    } else if (!config.autoShareOnLaunch) {
+      scheduleWakeDesc.textContent = 'Enable start sharing on launch first so wake resumes provider sharing.'
     } else if (!osWake.supported) {
       scheduleWakeDesc.textContent = 'Automatic wake setup is not supported on this OS.'
     } else if (osWake.enabled && osWake.status?.error) {

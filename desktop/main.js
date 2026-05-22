@@ -128,6 +128,8 @@ let _scheduleWakeSyncBusy = false
 let _sharingScheduleCloudSyncBusy = false
 let _uptimeJobsTimer = null
 let _uptimeJobsBusy = false
+let _lastActiveBrowser = null
+let _browserFocusTimer = null
 let _uptimeJobsInterval = 30_000
 let _desktopUpdateState = null
 let _desktopUpdateBusy = false
@@ -985,6 +987,77 @@ function runProcess(command, args, { timeoutMs = 15000 } = {}) {
   })
 }
 
+const WINDOWS_BROWSER_NAMES = new Set([
+  'chrome.exe',
+  'msedge.exe',
+  'firefox.exe',
+  'brave.exe',
+  'bravebrowser.exe',
+  'opera.exe',
+  'opera_gx.exe',
+  'vivaldi.exe',
+])
+
+function isKnownBrowserProcessName(name) {
+  return WINDOWS_BROWSER_NAMES.has(String(name || '').toLowerCase())
+}
+
+async function pollLastActiveBrowser() {
+  if (process.platform !== 'win32') return
+  const script = [
+    'Add-Type -TypeDefinition @\'\nusing System;\nusing System.Runtime.InteropServices;\npublic class Win32Focus {\n  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();\n  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);\n}\n\'@ -ErrorAction SilentlyContinue',
+    '$hwnd = [Win32Focus]::GetForegroundWindow()',
+    '$fgPid = 0',
+    '[void][Win32Focus]::GetWindowThreadProcessId($hwnd, [ref]$fgPid)',
+    'if ($fgPid -le 0) { exit 0 }',
+    '$p = Get-CimInstance Win32_Process -Filter "ProcessId=$fgPid" -ErrorAction SilentlyContinue',
+    'if (-not $p) { exit 0 }',
+    '$name = [string]$p.Name',
+    '$path = [string]$p.ExecutablePath',
+    '$browsers = @("chrome.exe","msedge.exe","firefox.exe","brave.exe","bravebrowser.exe","opera.exe","opera_gx.exe","vivaldi.exe")',
+    'if ($browsers -notcontains $name.ToLowerInvariant()) { exit 0 }',
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8',
+    '@{ name=$name; path=$path } | ConvertTo-Json -Compress',
+  ].join('; ')
+  try {
+    const { stdout } = await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeoutMs: 4000 })
+    const raw = stdout.trim()
+    if (!raw) return
+    const data = JSON.parse(raw)
+    if (!data?.path || !isKnownBrowserProcessName(data.name) || !fs.existsSync(data.path)) return
+    _lastActiveBrowser = { name: data.name, path: data.path, seenAt: Date.now() }
+  } catch (e) {
+    log.debug('BROWSER', 'last active browser poll skipped', { err: e.message })
+  }
+}
+
+function startLastActiveBrowserTracker() {
+  if (process.platform !== 'win32' || _browserFocusTimer) return
+  void pollLastActiveBrowser()
+  _browserFocusTimer = setInterval(() => { void pollLastActiveBrowser() }, 2000)
+}
+
+function stopLastActiveBrowserTracker() {
+  if (!_browserFocusTimer) return
+  clearInterval(_browserFocusTimer)
+  _browserFocusTimer = null
+}
+
+function openUrlInLastActiveBrowser(url) {
+  const browser = _lastActiveBrowser
+  const recent = browser?.path && fs.existsSync(browser.path) && Date.now() - browser.seenAt < 30 * 60 * 1000
+  if (!recent) return false
+  try {
+    const child = spawn(browser.path, [url], { detached: true, stdio: 'ignore', windowsHide: false })
+    child.unref()
+    log.info('BROWSER', 'opened URL in last active browser', { browser: browser.name, path: browser.path })
+    return true
+  } catch (e) {
+    log.warn('BROWSER', 'last active browser open failed', { err: e.message, browser: browser.name })
+    return false
+  }
+}
+
 function scheduleTimeToMinutes(timeValue) {
   const normalized = normalizeScheduleTime(timeValue)
   const [hours, minutes] = normalized.split(':').map(part => Number.parseInt(part, 10))
@@ -1264,10 +1337,31 @@ async function setScheduleWakeEnabledPreference(enabled) {
       state: getPublicState(),
     }
   }
+  if (enabled && !config.launchOnStartup) {
+    return {
+      success: false,
+      error: 'Enable launch on startup before enabling OS wake.',
+      osWake: getScheduleWakePublicState(),
+      state: getPublicState(),
+    }
+  }
+  if (enabled && !config.autoShareOnLaunch) {
+    return {
+      success: false,
+      error: 'Enable start sharing on launch before enabling OS wake.',
+      osWake: getScheduleWakePublicState(),
+      state: getPublicState(),
+    }
+  }
 
   config.scheduleWakeEnabled = !!enabled
   saveConfig()
-  const status = await applyScheduleWakeIntegration('preference')
+  let status = await applyScheduleWakeIntegration('preference')
+  if (enabled && status?.error) {
+    log.warn('SCHEDULE', 'OS wake setup failed on first attempt - retrying once', { error: status.error })
+    await new Promise(resolve => setTimeout(resolve, 750))
+    status = await applyScheduleWakeIntegration('preference_retry')
+  }
   void syncSharingScheduleToServer('wake_preference')
   updateTray()
   if (enabled && status.error) {
@@ -1772,6 +1866,7 @@ function shutdownDesktopRuntime(reason = 'quit') {
   stopSharingScheduleLoop()
   stopSharingConfigSync()
   stopUptimeJobLoop()
+  stopLastActiveBrowserTracker()
   void flushPendingBytes()
   if (_cliWatchTimer) {
     clearInterval(_cliWatchTimer)
@@ -3244,8 +3339,12 @@ ipcMain.handle('poll-device-code', async (_, { device_code }) => {
 ipcMain.handle('open-auth', (_, url) => {
   const safeUrl = url && !url.startsWith('http://localhost') ? url : `${API_BASE}/extension?activate=1`
   logIpc('open-auth', { url: safeUrl })
-  shell.openExternal(safeUrl)
-  log.info('IPC', 'open-auth opened browser', { url: safeUrl })
+  if (openUrlInLastActiveBrowser(safeUrl)) {
+    log.info('IPC', 'open-auth opened last active browser', { url: safeUrl })
+  } else {
+    shell.openExternal(safeUrl)
+    log.info('IPC', 'open-auth opened default browser', { url: safeUrl })
+  }
 })
 
 
@@ -3259,8 +3358,13 @@ ipcMain.handle('get-state', () => {
 
 async function setLaunchOnStartupPreference(enabled) {
   config.launchOnStartup = !!enabled
+  if (!config.launchOnStartup) {
+    config.autoShareOnLaunch = false
+    config.scheduleWakeEnabled = false
+  }
   saveConfig()
   const result = applyLaunchOnStartupPreference(config.launchOnStartup)
+  if (!config.launchOnStartup) void applyScheduleWakeIntegration('launch_startup_disabled')
   updateTray()
   return {
     success: true,
@@ -3272,6 +3376,9 @@ async function setLaunchOnStartupPreference(enabled) {
 
 async function setAutoShareOnLaunchPreference(enabled) {
   if (enabled) {
+    if (!config.launchOnStartup) {
+      throw new Error('Enable launch on startup before enabling start sharing on launch')
+    }
     if (!config.token || !config.userId) {
       throw new Error('Sign in before enabling auto-start sharing')
     }
@@ -3285,7 +3392,9 @@ async function setAutoShareOnLaunchPreference(enabled) {
     }
   }
   config.autoShareOnLaunch = !!enabled
+  if (!config.autoShareOnLaunch) config.scheduleWakeEnabled = false
   saveConfig()
+  if (!config.autoShareOnLaunch) void applyScheduleWakeIntegration('auto_share_disabled')
   updateTray()
   return {
     success: true,
@@ -3504,6 +3613,7 @@ async function bootstrapDesktopApp() {
   })
   if (process.platform === 'win32') app.setAppUserModelId('com.peermesh.desktop')
   await initializeDesktopRuntime('desktop_app')
+  startLastActiveBrowserTracker()
   applyLaunchOnStartupPreference(config.launchOnStartup)
   startSharingScheduleLoop()
   app.on('resume', () => {
