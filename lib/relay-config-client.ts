@@ -3,7 +3,7 @@
 // server on startup. Falls back to hardcoded URLs if the server is unreachable.
 // Managed by build-save-relays.js — edit RELAY_ENDPOINTS in .env.local instead.
 
-const API_BASE = 'https://peermesh-beta.vercel.app'
+const API_BASE = 'https://peermesh-0unl.onrender.com'
 const CONFIG_URL = `${API_BASE}/api/relay/config`
 const CACHE_TTL = 5 * 60 * 1000 // re-fetch every 5 minutes
 

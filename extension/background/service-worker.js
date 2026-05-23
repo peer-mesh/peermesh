@@ -1,5 +1,5 @@
 // background/service-worker.js - PeerMesh Extension Service Worker
-const APP_URL = 'https://peermesh-beta.vercel.app'
+const APP_URL = 'https://peermesh-0unl.onrender.com'
 const APP_HOST = new URL(APP_URL).hostname
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version

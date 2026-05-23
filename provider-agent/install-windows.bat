@@ -3,7 +3,7 @@ title PeerMesh Setup
 color 0A
 
 set AGENT_DIR=%USERPROFILE%\peermesh-agent
-set AGENT_URL=https://peermesh-beta.vercel.app/api/agent-download
+set AGENT_URL=https://peermesh-0unl.onrender.com/api/agent-download
 set TASK_NAME=PeerMeshAgent
 set VBS_FILE=%AGENT_DIR%\start-silent.vbs
 

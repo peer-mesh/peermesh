@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 
-const BASE = 'https://peermesh-beta.vercel.app'
+const BASE = 'https://peermesh-0unl.onrender.com'
 const API = `${BASE}/api`
 
 type Endpoint = {

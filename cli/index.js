@@ -11,7 +11,7 @@ import http from 'http'
 import { randomUUID } from 'crypto'
 import { EventEmitter } from 'events'
 
-const API_BASE     = 'https://peermesh-beta.vercel.app'
+const API_BASE     = 'https://peermesh-0unl.onrender.com'
 
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0

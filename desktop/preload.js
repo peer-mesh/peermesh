@@ -5,7 +5,7 @@ try { _version = require('./package.json').version } catch {}
 
 contextBridge.exposeInMainWorld('peermesh', {
   version: _version,
-  appBaseUrl: 'https://peermesh-beta.vercel.app',
+  appBaseUrl: 'https://peermesh-0unl.onrender.com',
   getState: () => ipcRenderer.invoke('get-state'),
   getExtId: () => ipcRenderer.invoke('get-ext-id'),
   checkWebsiteAuth: () => ipcRenderer.invoke('check-website-auth'),

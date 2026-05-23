@@ -12,7 +12,7 @@ echo "  ╚═══════════════════════
 echo ""
 
 AGENT_DIR="$HOME/peermesh-agent"
-AGENT_URL="https://peermesh-beta.vercel.app/api/agent-download"
+AGENT_URL="https://peermesh-0unl.onrender.com/api/agent-download"
 
 # Step 1: Check Node.js
 echo "  [1/3] Checking for Node.js..."

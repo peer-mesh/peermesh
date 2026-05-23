@@ -6,7 +6,7 @@ primary_region = 'jnb'
 
 [env]
   PORT = '8080'
-  API_BASE = 'https://peermesh-beta.vercel.app'
+  API_BASE = 'https://peermesh-0unl.onrender.com'
 
 [[services]]
   protocol = 'tcp'

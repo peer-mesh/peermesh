@@ -69,7 +69,7 @@ process.on('uncaughtException', (err) => {
 })
 
 
-const API_BASE = 'https://peermesh-beta.vercel.app'
+const API_BASE = 'https://peermesh-0unl.onrender.com'
 let _liveRelays = null
 let _liveRelaysFetchedAt = 0
 const RELAY_CONFIG_TTL = 5 * 60 * 1000

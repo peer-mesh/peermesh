@@ -1,5 +1,5 @@
 // popup.js - PeerMesh Chrome Extension
-const API = 'https://peermesh-beta.vercel.app'
+const API = 'https://peermesh-0unl.onrender.com'
 
 // Countries - loaded from DB with pagination, error handling and retry
 const COUNTRIES_PAGE_SIZE = 30

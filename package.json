@@ -26,7 +26,8 @@
     "cli:major": "node build-save-cli.mjs major",
     "cli:dry": "node build-save-cli.mjs --dry-run",
     "relays": "node build-save-relays.mjs",
-    "fingerprint:audit": "node scripts/fingerprint-audit.mjs"
+    "fingerprint:audit": "node scripts/fingerprint-audit.mjs",
+    "api-base": "node build-save-api-base.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.2",
