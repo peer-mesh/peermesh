@@ -1406,6 +1406,7 @@ async function connectToRelay(opts, attempt, retries) {
 }
 
 async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token, privateCode, connectionType }) {
+  const requesterIdentity = await getExtensionIdentity().catch(() => ({ deviceId: null }))
   return new Promise((resolve, reject) => {
     const wsUrl = relayEndpoint
     log('info', `[CONNECT] WS connecting to ${wsUrl} country=${country} userId=${userId?.slice(0,8)}`)
@@ -1432,6 +1433,8 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         privateProviderUserId: privateProviderUserId ?? null,
         privateBaseDeviceId: privateBaseDeviceId ?? null,
         requireTunnel: true,
+        supportsDirect: true,
+        requesterDeviceId: requesterIdentity.deviceId ?? null,
       }))
       keepaliveTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
@@ -1459,6 +1462,12 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           token,
           privateCode: privateCode || null,
           connectionType: connectionType || (privateCode ? 'private' : 'public'),
+          mandate: msg.mandate ?? null,
+          relayPublicKey: msg.relayPublicKey ?? null,
+          sessionSigningKey: msg.sessionSigningKey ?? null,
+          sessionNonce: msg.sessionNonce ?? null,
+          transportTier: msg.transportTier ?? 0,
+          providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
           createdAt: Date.now(),
           reconnecting: false,
           lastDesktopSyncAt: 0,
@@ -1478,7 +1487,17 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: agentSessionId, relayEndpoint, country }),
+            body: JSON.stringify({
+              sessionId: agentSessionId,
+              relayEndpoint,
+              country,
+              mandate: msg.mandate ?? null,
+              relayPublicKey: msg.relayPublicKey ?? null,
+              sessionSigningKey: msg.sessionSigningKey ?? null,
+              sessionNonce: msg.sessionNonce ?? null,
+              transportTier: msg.transportTier ?? 0,
+              providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
+            }),
             signal: AbortSignal.timeout(4000),
           })
           desktopProxyReady = response.ok
@@ -1511,6 +1530,12 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
             sessionId: msg.sessionId,
             country: msg.country || currentSession.country,
             relayEndpoint: reconnectRelay,
+            mandate: msg.mandate ?? currentSession.mandate ?? null,
+            relayPublicKey: msg.relayPublicKey ?? currentSession.relayPublicKey ?? null,
+            sessionSigningKey: msg.sessionSigningKey ?? currentSession.sessionSigningKey ?? null,
+            sessionNonce: msg.sessionNonce ?? currentSession.sessionNonce ?? null,
+            transportTier: msg.transportTier ?? currentSession.transportTier ?? 0,
+            providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession.providerDirectEndpoint ?? null,
             createdAt: Date.now(),
             reconnecting: false,
             lastDesktopSyncAt: 0,
@@ -1523,7 +1548,17 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: msg.sessionId, relayEndpoint: reconnectRelay, country: msg.country }),
+            body: JSON.stringify({
+              sessionId: msg.sessionId,
+              relayEndpoint: reconnectRelay,
+              country: msg.country,
+              mandate: msg.mandate ?? currentSession?.mandate ?? null,
+              relayPublicKey: msg.relayPublicKey ?? currentSession?.relayPublicKey ?? null,
+              sessionSigningKey: msg.sessionSigningKey ?? currentSession?.sessionSigningKey ?? null,
+              sessionNonce: msg.sessionNonce ?? currentSession?.sessionNonce ?? null,
+              transportTier: msg.transportTier ?? currentSession?.transportTier ?? 0,
+              providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession?.providerDirectEndpoint ?? null,
+            }),
             signal: AbortSignal.timeout(4000),
           })
           if (!response.ok) throw new Error(`desktop proxy status=${response.status}`)

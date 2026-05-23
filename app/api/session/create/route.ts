@@ -464,5 +464,11 @@ export async function POST(req: Request) {
     preferredProviderUserId,
     privateProviderUserId,
     privateBaseDeviceId,
+    mandateArchitecture: true,
+    mandateTransport: {
+      defaultTier: 0,
+      directEligibleAfterRelayMandate: true,
+      relayFallbackPreserved: true,
+    },
   })
 }

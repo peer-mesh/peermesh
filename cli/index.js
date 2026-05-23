@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { WebSocket } from 'ws'
+import { WebSocket, WebSocketServer } from 'ws'
 import { connect, isIP } from 'net'
 import { lookup } from 'dns/promises'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs'
-import { homedir } from 'os'
+import { homedir, networkInterfaces } from 'os'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import http from 'http'
@@ -1099,7 +1099,7 @@ async function handleFetch(slot, request, limitBytes) {
 }
 
 function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
-  ws.on('open', () => {
+  ws.on('open', async () => {
     // Stale socket: stopRelay ran or a newer socket replaced this one
     if (!config.shareEnabled || slot.ws !== ws) {
       ws.close(1000)
@@ -1109,6 +1109,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
     slot.reconnectDelay = 2000
     slot.connectedAt = new Date().toISOString()
     slotLog(slot, `connected to relay (${slot.deviceId})`)
+    const endpoint = await startDirectTunnelServer()
     const reg = {
       type: 'register_provider',
       userId: config.userId,
@@ -1119,6 +1120,8 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
       providerKind: 'cli',
       supportsHttp: true,
       supportsTunnel: true,
+      supportsDirect: !!endpoint,
+      directEndpoint: endpoint,
       deviceId: slot.deviceId,
       baseDeviceId: getBaseDeviceId(),
     }
@@ -1175,6 +1178,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
           break
 
         case 'session_request':
+          registerDirectSession(slot, msg)
           sendMsg(slot, { type: 'agent_ready', sessionId: msg.sessionId })
           break
 
@@ -1224,6 +1228,8 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
           break
 
         case 'session_ended':
+          if (msg.sessionId) closeDirectSession(msg.sessionId)
+          else closeDirectSessionsForSlot(slot, 'session_ended')
           closeAllTunnels(slot)
           break
       }
@@ -1239,6 +1245,7 @@ function attachSlotSocketHandlers(slot, limitBytes, ws, relay) {
     slot.running = false
     slot.connectedAt = null
     closeAllTunnels(slot)
+    closeDirectSessionsForSlot(slot, 'relay_signaling_lost')
     slot.ws = null
     if (code !== 1000 && !limitHit && !_userStopped && config.shareEnabled) {
       slot.reconnectTimer = setTimeout(() => connectSlot(slot, limitBytes), slot.reconnectDelay)
@@ -1340,6 +1347,7 @@ function stopRelay() {
     slot.running = false
     slot.connectedAt = null
     closeAllTunnels(slot)
+    closeDirectSessionsForSlot(slot, 'sharing_stopped')
   }
 
   if (config.token) persistSharingState(false)
@@ -1347,13 +1355,179 @@ function stopRelay() {
 
 let _proxySession = null
 
+const directSessions = new Map()
+let directServer = null
+let directWss = null
+let directEndpoint = null
+let directServerStarting = null
+
+function encodeDirectMandate(mandate) {
+  if (!mandate) return ''
+  return Buffer.from(JSON.stringify(mandate)).toString('base64url')
+}
+
+function getLanAddress() {
+  const nets = networkInterfaces()
+  for (const entries of Object.values(nets)) {
+    for (const entry of entries || []) {
+      if (entry.family === 'IPv4' && !entry.internal) return entry.address
+    }
+  }
+  return '127.0.0.1'
+}
+
+async function startDirectTunnelServer() {
+  if (directEndpoint) return directEndpoint
+  if (directServerStarting) return directServerStarting
+
+  directServerStarting = new Promise((resolve) => {
+    directServer = http.createServer()
+    directWss = new WebSocketServer({ noServer: true })
+
+    directServer.on('upgrade', (req, socket, head) => {
+      const url = new URL(req.url || '/', 'http://localhost')
+      if (url.pathname !== '/tunnel') {
+        socket.destroy()
+        return
+      }
+      directWss.handleUpgrade(req, socket, head, (ws) => directWss.emit('connection', ws, req))
+    })
+
+    directWss.on('connection', handleDirectTunnelConnection)
+    directServer.on('error', (err) => {
+      clog.warn('DIRECT', 'direct tunnel server unavailable', { err: err.message })
+      directEndpoint = null
+      resolve(null)
+    })
+
+    directServer.listen(0, '0.0.0.0', () => {
+      const address = directServer.address()
+      const port = typeof address === 'object' && address ? address.port : null
+      directEndpoint = port ? `ws://${getLanAddress()}:${port}/tunnel` : null
+      clog.info('DIRECT', 'direct tunnel server listening', { endpoint: directEndpoint })
+      resolve(directEndpoint)
+    })
+  }).finally(() => {
+    directServerStarting = null
+  })
+
+  return directServerStarting
+}
+
+function registerDirectSession(slot, msg) {
+  if (!msg?.sessionId || !msg.mandate) return
+  directSessions.set(msg.sessionId, {
+    slot,
+    sessionId: msg.sessionId,
+    mandate: msg.mandate,
+    wireMandate: encodeDirectMandate(msg.mandate),
+    expiresAt: Number(msg.mandate?.expiresAt ?? 0),
+    connections: new Set(),
+  })
+}
+
+function closeDirectSession(sessionId, reason = 'session_ended') {
+  const entry = directSessions.get(sessionId)
+  if (!entry) return
+  directSessions.delete(sessionId)
+  for (const ws of entry.connections) {
+    try { ws.close(1000, reason) } catch {}
+  }
+}
+
+function closeDirectSessionsForSlot(slot, reason = 'relay_signaling_lost') {
+  for (const [sessionId, entry] of directSessions) {
+    if (entry.slot === slot) closeDirectSession(sessionId, reason)
+  }
+}
+
+function handleDirectTunnelConnection(ws, req) {
+  const url = new URL(req.url || '/', 'http://localhost')
+  const sessionId = url.searchParams.get('session') || req.headers['x-session-id']
+  const mandateHeader = req.headers['x-mandate']
+  const entry = directSessions.get(sessionId)
+  if (!entry || !mandateHeader || mandateHeader !== entry.wireMandate || (entry.expiresAt && entry.expiresAt <= Date.now())) {
+    ws.close(1008, 'Invalid mandate')
+    return
+  }
+
+  entry.connections.add(ws)
+  let socket = null
+  let opened = false
+  let tunnelTarget = ''
+
+  ws.on('message', async (data) => {
+    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    if (!opened) {
+      const text = chunk.toString()
+      const match = text.match(/^CONNECT ([^\s]+) HTTP\//)
+      if (!match) {
+        ws.close(1008, 'CONNECT required')
+        return
+      }
+      const [hostname, portStr] = match[1].split(':')
+      const port = Number.parseInt(portStr, 10) || 443
+      tunnelTarget = `${hostname}:${port}`
+      if (!(await isAllowedResolved(hostname, port))) {
+        ws.send('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+        ws.close(1008, 'Target not allowed')
+        return
+      }
+      opened = true
+      entry.slot.requestsHandled++
+      syncUsageDay()
+      config.todayRequestsHandled = (config.todayRequestsHandled ?? 0) + 1
+      saveConfig(config)
+      socket = connect(port, hostname)
+      socket.on('connect', () => ws.readyState === WebSocket.OPEN && ws.send('HTTP/1.1 200 Connection Established\r\n\r\n'))
+      socket.on('data', (socketChunk) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(socketChunk)
+        addBytes(entry.slot, socketChunk.length, _controlLimitBytes)
+      })
+      socket.on('end', () => ws.close(1000))
+      socket.on('close', () => ws.close(1000))
+      socket.on('error', () => ws.close(1011, 'Target connection failed'))
+      return
+    }
+
+    if (socket && !socket.destroyed) socket.write(chunk)
+  })
+
+  ws.on('close', () => {
+    entry.connections.delete(ws)
+    if (socket && !socket.destroyed) socket.destroy()
+  })
+  ws.on('error', (err) => {
+    clog.warn('DIRECT', 'direct tunnel error', { target: tunnelTarget, err: err.message })
+    entry.connections.delete(ws)
+    if (socket && !socket.destroyed) socket.destroy()
+  })
+}
+
 function openTunnelWs(hostname, port, onOpen) {
   if (!_proxySession?.sessionId) return null
-  const relayRaw = _proxySession.relayEndpoint
-  const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-  const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
-  const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
-  const tunnelWs = new WebSocket(proxyUrl)
+  const useDirect = Number(_proxySession.transportTier ?? 0) > 0 &&
+    _proxySession.providerDirectEndpoint &&
+    _proxySession.mandate
+  let proxyUrl
+  let options
+  if (useDirect) {
+    const directUrl = new URL(_proxySession.providerDirectEndpoint)
+    directUrl.searchParams.set('session', _proxySession.sessionId)
+    proxyUrl = directUrl.toString()
+    options = {
+      headers: {
+        'X-Session-Id': _proxySession.sessionId,
+        'X-Mandate': encodeDirectMandate(_proxySession.mandate),
+      },
+    }
+  } else {
+    const relayRaw = _proxySession.relayEndpoint
+    const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
+    proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
+  }
+  const tunnelWs = new WebSocket(proxyUrl, options)
   tunnelWs.on('open', () => {
     tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
     if (onOpen) onOpen()
@@ -1376,17 +1550,11 @@ const localProxyServer = http.createServer(async (req, res) => {
   req.on('data', c => chunks.push(c))
   req.on('end', () => {
     const body = Buffer.concat(chunks)
-    const relayRaw = _proxySession.relayEndpoint
-    const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
-    const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
-    const tunnelWs = new WebSocket(proxyUrl)
+    const tunnelWs = openTunnelWs(hostname, port)
+    if (!tunnelWs) { res.writeHead(503); res.end('No PeerMesh session'); return }
     let ready = false
     let responseData = Buffer.alloc(0)
 
-    tunnelWs.on('open', () => {
-      tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
-    })
     tunnelWs.on('message', (data) => {
       const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
       if (!ready) {
@@ -1452,15 +1620,9 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
     clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
     clientSocket.destroy(); return
   }
-  const relayRaw = _proxySession.relayEndpoint
-  const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-  const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
-  const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(_proxySession.sessionId)}`
   let opened = false
-  const tunnelWs = new WebSocket(proxyUrl)
-  tunnelWs.on('open', () => {
-    tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
-  })
+  const tunnelWs = openTunnelWs(hostname, port)
+  if (!tunnelWs) { clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n'); clientSocket.destroy(); return }
   tunnelWs.on('message', (data) => {
     const text = Buffer.isBuffer(data) ? data.toString() : data
     if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {

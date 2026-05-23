@@ -6,7 +6,9 @@ const OPS_SECRET = process.env.OPS_SECRET ?? process.env.RELAY_SECRET ?? ''
 
 export const dynamic = 'force-dynamic'
 
-async function countRows(table: string, apply: (query: any) => any) {
+type CountQuery = ReturnType<ReturnType<typeof adminClient.from>['select']>
+
+async function countRows(table: string, apply: (query: CountQuery) => CountQuery) {
   const query = adminClient
     .from(table)
     .select('*', { count: 'exact', head: true })

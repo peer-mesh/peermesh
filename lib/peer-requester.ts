@@ -11,6 +11,9 @@ export type SessionInfo = {
   sessionId: string
   country: string
   relayEndpoint: string
+  mandate?: unknown
+  transportTier?: number
+  providerDirectEndpoint?: string | null
 }
 
 type PendingRequest = {
@@ -108,6 +111,7 @@ export class PeerRequester {
             preferredProviderUserId: preferredProviderUserId ?? null,
             privateProviderUserId: privateProviderUserId ?? null,
             privateBaseDeviceId: privateBaseDeviceId ?? null,
+            supportsDirect: true,
           }))
         }
 
@@ -115,7 +119,14 @@ export class PeerRequester {
           const msg = JSON.parse(event.data)
 
           if (msg.type === 'session_created') {
-            this.sessionInfo = { sessionId: msg.sessionId, country, relayEndpoint: relay }
+            this.sessionInfo = {
+              sessionId: msg.sessionId,
+              country,
+              relayEndpoint: relay,
+              mandate: msg.mandate ?? null,
+              transportTier: msg.transportTier ?? 0,
+              providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
+            }
           }
 
           if (msg.type === 'agent_session_ready') {
@@ -130,6 +141,9 @@ export class PeerRequester {
               sessionId: msg.sessionId,
               country: msg.country ?? country,
               relayEndpoint: reconnectRelay,
+              mandate: msg.mandate ?? null,
+              transportTier: msg.transportTier ?? 0,
+              providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
             }
             this.onReconnect?.(this.sessionInfo, msg.attempt)
           }

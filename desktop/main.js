@@ -1,5 +1,5 @@
 const { app, Tray, Menu, BrowserWindow, nativeImage, ipcMain, shell, Notification, powerSaveBlocker } = require('electron')
-const { WebSocket } = require('ws')
+const { WebSocket, WebSocketServer } = require('ws')
 const {
   readBatteryStatus,
   scheduleHardwareWake,
@@ -2490,7 +2490,7 @@ function connectSlot(slot) {
     log.info('RELAY', `${slotPrefix(slot)} connecting`, { deviceId: slot.deviceId, relay })
     slot.ws = new WebSocket(relay)
 
-    slot.ws.on('open', () => {
+    slot.ws.on('open', async () => {
     if (slot.reconnectTimer) {
       clearTimeout(slot.reconnectTimer)
       slot.reconnectTimer = null
@@ -2501,6 +2501,7 @@ function connectSlot(slot) {
       slot.ws.close(1000)
       return
     }
+    const endpoint = await startDirectTunnelServer()
     const reg = {
       type: 'register_provider',
       userId: config.userId,
@@ -2511,6 +2512,8 @@ function connectSlot(slot) {
       providerKind: 'desktop',
       supportsHttp: true,
       supportsTunnel: true,
+      supportsDirect: !!endpoint,
+      directEndpoint: endpoint,
       deviceId: slot.deviceId,
       baseDeviceId: config.baseDeviceId,
     }
@@ -2587,6 +2590,7 @@ function connectSlot(slot) {
         const tunnel = activeTunnels.get(`ws_${msg.sessionId}`)
         if (tunnel) { if (!tunnel.socket.destroyed) tunnel.socket.destroy(); activeTunnels.delete(`ws_${msg.sessionId}`) }
       } else if (msg.type === 'session_request') {
+        registerDirectSession(slot, msg)
         sendRelayMessage(slot, { type: 'agent_ready', sessionId: msg.sessionId })
       } else if (msg.type === 'proxy_request') {
         slot.requestsHandled++
@@ -2620,6 +2624,8 @@ function connectSlot(slot) {
       } else if (msg.type === 'tunnel_close') {
         closeTunnel(slot, msg.tunnelId, false)
       } else if (msg.type === 'session_ended') {
+        if (msg.sessionId) closeDirectSession(msg.sessionId)
+        else closeDirectSessionsForSlot(slot, 'session_ended')
         closeAllTunnels(slot, false)
         updateTray()
       }
@@ -2632,6 +2638,7 @@ function connectSlot(slot) {
     slot.running = false
     slot.connectedAt = null
     closeAllTunnels(slot, false)
+    closeDirectSessionsForSlot(slot, 'relay_signaling_lost')
     slot.ws = null
     syncAggregateState()
     updateTray()
@@ -2706,6 +2713,7 @@ function suspendRelayForShutdown(reason = 'shutdown') {
     if (slot.heartbeatTimer) { clearInterval(slot.heartbeatTimer); slot.heartbeatTimer = null }
     if (slot.ws) { slot.ws.removeAllListeners('close'); slot.ws.close(1000); slot.ws = null }
     closeAllTunnels(slot, false)
+    closeDirectSessionsForSlot(slot, 'shutdown')
     slot.running = false
     slot.connectedAt = null
   }
@@ -2725,6 +2733,7 @@ function stopRelay() {
     stopHeartbeat(slot)
     if (slot.ws) { slot.ws.removeAllListeners('close'); slot.ws.close(1000); slot.ws = null }
     closeAllTunnels(slot, false)
+    closeDirectSessionsForSlot(slot, 'sharing_stopped')
     slot.running = false
     slot.connectedAt = null
     slot.sessionBytes = 0
@@ -2738,13 +2747,181 @@ function stopRelay() {
 
 let proxySession = null
 
+const directSessions = new Map()
+let directServer = null
+let directWss = null
+let directEndpoint = null
+let directServerStarting = null
+
+function encodeDirectMandate(mandate) {
+  if (!mandate) return ''
+  return Buffer.from(JSON.stringify(mandate)).toString('base64url')
+}
+
+function getLanAddress() {
+  const nets = os.networkInterfaces()
+  for (const entries of Object.values(nets)) {
+    for (const entry of entries || []) {
+      if (entry.family === 'IPv4' && !entry.internal) return entry.address
+    }
+  }
+  return '127.0.0.1'
+}
+
+async function startDirectTunnelServer() {
+  if (directEndpoint) return directEndpoint
+  if (directServerStarting) return directServerStarting
+
+  directServerStarting = new Promise((resolve) => {
+    directServer = http.createServer()
+    directWss = new WebSocketServer({ noServer: true })
+
+    directServer.on('upgrade', (req, socket, head) => {
+      const url = new URL(req.url || '/', 'http://localhost')
+      if (url.pathname !== '/tunnel') {
+        socket.destroy()
+        return
+      }
+      directWss.handleUpgrade(req, socket, head, (ws) => directWss.emit('connection', ws, req))
+    })
+
+    directWss.on('connection', handleDirectTunnelConnection)
+    directServer.on('error', (err) => {
+      log.warn('DIRECT', 'direct tunnel server unavailable', { err: err.message })
+      directEndpoint = null
+      resolve(null)
+    })
+
+    directServer.listen(0, '0.0.0.0', () => {
+      const address = directServer.address()
+      const port = typeof address === 'object' && address ? address.port : null
+      directEndpoint = port ? `ws://${getLanAddress()}:${port}/tunnel` : null
+      log.info('DIRECT', 'direct tunnel server listening', { endpoint: directEndpoint })
+      resolve(directEndpoint)
+    })
+  }).finally(() => {
+    directServerStarting = null
+  })
+
+  return directServerStarting
+}
+
+function registerDirectSession(slot, msg) {
+  if (!msg?.sessionId || !msg.mandate) return
+  directSessions.set(msg.sessionId, {
+    slot,
+    sessionId: msg.sessionId,
+    mandate: msg.mandate,
+    wireMandate: encodeDirectMandate(msg.mandate),
+    expiresAt: Number(msg.mandate?.expiresAt ?? 0),
+    connections: new Set(),
+  })
+}
+
+function closeDirectSession(sessionId, reason = 'session_ended') {
+  const entry = directSessions.get(sessionId)
+  if (!entry) return
+  directSessions.delete(sessionId)
+  for (const ws of entry.connections) {
+    try { ws.close(1000, reason) } catch {}
+  }
+}
+
+function closeDirectSessionsForSlot(slot, reason = 'relay_signaling_lost') {
+  for (const [sessionId, entry] of directSessions) {
+    if (entry.slot === slot) closeDirectSession(sessionId, reason)
+  }
+}
+
+function handleDirectTunnelConnection(ws, req) {
+  const url = new URL(req.url || '/', 'http://localhost')
+  const sessionId = url.searchParams.get('session') || req.headers['x-session-id']
+  const mandateHeader = req.headers['x-mandate']
+  const entry = directSessions.get(sessionId)
+  if (!entry || !mandateHeader || mandateHeader !== entry.wireMandate || (entry.expiresAt && entry.expiresAt <= Date.now())) {
+    ws.close(1008, 'Invalid mandate')
+    return
+  }
+
+  entry.connections.add(ws)
+  let socket = null
+  let opened = false
+  let tunnelTarget = ''
+
+  ws.on('message', async (data) => {
+    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    if (!opened) {
+      const text = chunk.toString()
+      const match = text.match(/^CONNECT ([^\s]+) HTTP\//)
+      if (!match) {
+        ws.close(1008, 'CONNECT required')
+        return
+      }
+      const [hostname, portStr] = match[1].split(':')
+      const port = Number.parseInt(portStr, 10) || 443
+      tunnelTarget = `${hostname}:${port}`
+      if (!(await isAllowedResolved(hostname, port))) {
+        ws.send('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+        ws.close(1008, 'Target not allowed')
+        return
+      }
+      opened = true
+      entry.slot.requestsHandled++
+      syncAggregateState()
+      socket = net.connect(port, hostname)
+      socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
+      socket.on('connect', () => {
+        socket.setTimeout(0)
+        if (ws.readyState === WebSocket.OPEN) ws.send('HTTP/1.1 200 Connection Established\r\n\r\n')
+      })
+      socket.on('data', (socketChunk) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(socketChunk)
+        addBytes(entry.slot, socketChunk.length)
+      })
+      socket.on('end', () => ws.close(1000))
+      socket.on('close', () => ws.close(1000))
+      socket.on('error', () => ws.close(1011, 'Target connection failed'))
+      return
+    }
+
+    if (socket && !socket.destroyed) socket.write(chunk)
+  })
+
+  ws.on('close', () => {
+    entry.connections.delete(ws)
+    if (socket && !socket.destroyed) socket.destroy()
+  })
+  ws.on('error', (err) => {
+    log.warn('DIRECT', 'direct tunnel error', { target: tunnelTarget, err: err.message })
+    entry.connections.delete(ws)
+    if (socket && !socket.destroyed) socket.destroy()
+  })
+}
+
 function openTunnelWs(hostname, port, onOpen) {
   if (!proxySession?.sessionId) return null
-  const relayRaw = proxySession.relayEndpoint
-  const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-  const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
-  const proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
-  const tunnelWs = new WebSocket(proxyUrl)
+  const useDirect = Number(proxySession.transportTier ?? 0) > 0 &&
+    proxySession.providerDirectEndpoint &&
+    proxySession.mandate
+  let proxyUrl
+  let options
+  if (useDirect) {
+    const directUrl = new URL(proxySession.providerDirectEndpoint)
+    directUrl.searchParams.set('session', proxySession.sessionId)
+    proxyUrl = directUrl.toString()
+    options = {
+      headers: {
+        'X-Session-Id': proxySession.sessionId,
+        'X-Mandate': encodeDirectMandate(proxySession.mandate),
+      },
+    }
+  } else {
+    const relayRaw = proxySession.relayEndpoint
+    const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
+    proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
+  }
+  const tunnelWs = new WebSocket(proxyUrl, options)
   tunnelWs.on('open', () => {
     tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
     if (onOpen) onOpen()

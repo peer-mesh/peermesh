@@ -36,3 +36,42 @@ test('requester refresh remains reachable while relay socket is open', () => {
   assert.notEqual(healthIndex, -1)
   assert.ok(refreshIndex < healthIndex)
 })
+
+test('mandate relay schema and relay assignment path are present', () => {
+  const sql = readRepoFile('supabase.sql')
+  const relay = readRepoFile('relay/relay.js')
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+
+  assert.match(sql, /create table if not exists device_keys/)
+  assert.match(sql, /create table if not exists session_mandates/)
+  assert.match(sql, /create table if not exists session_receipts/)
+  assert.match(sql, /create table if not exists byte_tokens/)
+  assert.match(sql, /create table if not exists period_commitments/)
+  assert.match(sql, /create table if not exists trust_scores/)
+  assert.match(sql, /create table if not exists trust_events/)
+
+  assert.match(relay, /createSignedMandate/)
+  assert.match(relay, /mandateClientPayload/)
+  assert.match(relay, /nextByteToken/)
+  assert.match(relay, /case 'audit_commit'/)
+  assert.match(relay, /case 'requester_wrapped_receipt'/)
+  assert.match(relay, /supportsDirect/)
+  assert.match(relay, /providerDirectEndpoint/)
+
+  assert.match(serviceWorker, /supportsDirect: true/)
+  assert.match(serviceWorker, /providerDirectEndpoint/)
+  assert.match(serviceWorker, /sessionSigningKey/)
+})
+
+test('desktop and CLI expose same-network direct tunnel capability behind relay fallback', () => {
+  const cli = readRepoFile('cli/index.js')
+  const desktop = readRepoFile('desktop/main.js')
+
+  for (const source of [cli, desktop]) {
+    assert.match(source, /new WebSocketServer\(\{ noServer: true \}\)/)
+    assert.match(source, /registerDirectSession/)
+    assert.match(source, /X-Mandate/)
+    assert.match(source, /supportsDirect: !!endpoint/)
+    assert.match(source, /closeDirectSessionsForSlot\(slot, 'relay_signaling_lost'\)/)
+  }
+})

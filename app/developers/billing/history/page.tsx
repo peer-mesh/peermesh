@@ -20,6 +20,7 @@ export default function HistoryPage() {
     setLoading(false)
   }, [supabase])
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load() }, [load])
 
   const statusColor = (s: string) => s === 'successful' ? 'var(--accent)' : s === 'processing' ? '#f59e0b' : s === 'failed' ? '#f87171' : 'var(--muted)'

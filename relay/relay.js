@@ -3,6 +3,18 @@ import { createServer } from 'http'
 import { randomUUID } from 'crypto'
 import { lookup } from 'dns/promises'
 import { isIP } from 'net'
+import {
+  BYTE_TOKEN_GRANULARITY,
+  DEFAULT_MANDATE_POLICY,
+  advanceHashChain,
+  createByteToken,
+  createSessionNonce,
+  createSessionSigningKey,
+  createSignedMandate,
+  getReachedTokenIndexes,
+  getRelaySigningMaterial,
+  verifyCommitmentReveal,
+} from '../lib/mandate-relay.mjs'
 
 const PORT        = parseInt(process.env.PORT ?? '8080')
 const API_BASE    = process.env.API_BASE ?? ''
@@ -10,6 +22,9 @@ const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET ?? RELAY_SECRET
 const SCHEDULER_TICK_INTERVAL_MS = Math.max(0, parseInt(process.env.SCHEDULER_TICK_INTERVAL_MS ?? '60000', 10) || 0)
 const SESSION_DB_TOUCH_MS = Math.max(30_000, parseInt(process.env.SESSION_DB_TOUCH_MS ?? '60000', 10) || 60_000)
+const DIRECT_TRANSPORT_ENABLED = process.env.RELAY_DIRECT_TRANSPORT !== '0'
+
+const relaySigningMaterial = getRelaySigningMaterial(process.env)
 
 const peers = new Map()
 const sessions = new Map()
@@ -180,6 +195,136 @@ function sessionLimits(trustScore = 50) {
     maxTunnelsPerMinute:   TUNNELS_LOW,
     maxBytesPerMinute:     BYTES_LOW_MB * 1024 * 1024,
   }
+}
+
+function mandatePolicyForTrust(trustScore = 50) {
+  const limits = sessionLimits(trustScore)
+  return {
+    ...DEFAULT_MANDATE_POLICY,
+    maxBytesPerMinute: limits.maxBytesPerMinute,
+    maxTunnelsPerMinute: limits.maxTunnelsPerMinute,
+  }
+}
+
+function samePublicNetwork(requester, provider) {
+  return !!requester?.clientIp && !!provider?.clientIp && requester.clientIp === provider.clientIp
+}
+
+function canUseDirectTransport(requester, provider) {
+  return DIRECT_TRANSPORT_ENABLED &&
+    requester?.supportsDirect === true &&
+    provider?.supportsDirect === true &&
+    !!provider?.directEndpoint &&
+    samePublicNetwork(requester, provider)
+}
+
+function buildAuditState(sessionId, sessionNonce, sessionSigningKey) {
+  return {
+    sessionNonce,
+    sessionSigningKey,
+    tokenSecret: createSessionSigningKey(),
+    bytesForwarded: 0,
+    tokenFloorBytes: 0,
+    tokenLog: [],
+    chainValue: sessionNonce,
+    commitments: new Map(),
+    receipts: new Map(),
+    lastRelaySignalAt: Date.now(),
+  }
+}
+
+function nextByteToken(audit, sessionId, tokenIndex) {
+  return {
+    tokenIndex,
+    nextTokenAt: tokenIndex * BYTE_TOKEN_GRANULARITY,
+    token: createByteToken(audit.tokenSecret, sessionId, tokenIndex),
+  }
+}
+
+function recordAuditBytes(session, byteCount, direction = 'unknown') {
+  if (!session?.audit || byteCount <= 0) return
+  const timestampMs = Date.now()
+  session.audit.chainValue = advanceHashChain(
+    session.audit.chainValue,
+    byteCount,
+    timestampMs,
+    session.audit.sessionSigningKey,
+  )
+
+  const countsAsProviderFlow = direction === 'provider_to_requester' || direction === 'proxy_response'
+  if (!countsAsProviderFlow) return
+
+  const previous = session.audit.bytesForwarded
+  const next = previous + byteCount
+  session.audit.bytesForwarded = next
+
+  for (const tokenIndex of getReachedTokenIndexes(previous, next)) {
+    const tokenValue = createByteToken(session.audit.tokenSecret, session.sessionId, tokenIndex)
+    session.audit.tokenFloorBytes = Math.max(session.audit.tokenFloorBytes, tokenIndex * BYTE_TOKEN_GRANULARITY)
+    session.audit.tokenLog.push({
+      tokenIndex,
+      tokenValue,
+      issuedAt: new Date(timestampMs).toISOString(),
+      receivedAt: new Date(timestampMs).toISOString(),
+      source: 'relay_forwarded',
+    })
+  }
+}
+
+function buildMandatePayload(session, requester, provider) {
+  const transportTier = canUseDirectTransport(requester, provider) ? 2 : 0
+  const sessionSigningKey = createSessionSigningKey()
+  const sessionNonce = createSessionNonce()
+  const providerDirectEndpoint = transportTier > 0 ? provider.directEndpoint : null
+  const mandate = createSignedMandate({
+    sessionId: session.sessionId,
+    dbSessionId: session.dbSessionId ?? null,
+    requesterUserId: session.requesterUserId,
+    requesterDeviceId: requester.deviceId ?? requester.userId ?? null,
+    providerUserId: session.providerUserId,
+    providerDeviceId: session.providerDeviceId,
+    policy: mandatePolicyForTrust(session.requesterTrustScore ?? 50),
+    sessionSigningKey,
+    sessionSigningKeyMode: 'relay_delivered',
+    sessionNonce,
+    hardExpiryOnSignalingLoss: 30,
+    providerDirectEndpoint,
+    relayFallback: session.relayEndpoint ?? requester.relayUrl ?? null,
+    transportTier,
+    binaryHash: null,
+  }, relaySigningMaterial)
+
+  return {
+    mandate,
+    relayPublicKey: relaySigningMaterial.publicKeyPem,
+    sessionSigningKey,
+    sessionNonce,
+    transportTier,
+    providerDirectEndpoint,
+    forcedRelay: transportTier === 0,
+  }
+}
+
+function mandateClientPayload(session) {
+  return {
+    mandate: session.mandate ?? null,
+    relayPublicKey: session.relayPublicKey ?? null,
+    sessionSigningKey: session.audit?.sessionSigningKey ?? null,
+    sessionNonce: session.audit?.sessionNonce ?? null,
+    transportTier: session.transportTier ?? 0,
+    providerDirectEndpoint: session.providerDirectEndpoint ?? null,
+    relayFallback: session.relayEndpoint ?? null,
+    mandateArchitecture: true,
+  }
+}
+
+function reportAuditEvent(event, payload) {
+  if (!API_BASE || !RELAY_SECRET) return
+  fetch(`${API_BASE}/api/relay/audit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+    body: JSON.stringify({ event, ...payload }),
+  }).catch(() => {})
 }
 
 function log(tag, msg, extra = '') {
@@ -417,15 +562,47 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
     lastDbActivitySyncAt: 0,
+    transportTier: 0,
+    providerDirectEndpoint: null,
+    mandate: null,
+    relayPublicKey: null,
+    audit: null,
   })
 
-  send(provider, { type: 'session_request', sessionId })
+  const createdSession = sessions.get(sessionId)
+  const mandatePayload = buildMandatePayload(createdSession, requesterWs, provider)
+  createdSession.transportTier = mandatePayload.transportTier
+  createdSession.providerDirectEndpoint = mandatePayload.providerDirectEndpoint
+  createdSession.mandate = mandatePayload.mandate
+  createdSession.relayPublicKey = mandatePayload.relayPublicKey
+  createdSession.audit = buildAuditState(
+    sessionId,
+    mandatePayload.sessionNonce,
+    mandatePayload.sessionSigningKey,
+  )
+  const firstByteToken = nextByteToken(createdSession.audit, sessionId, 1)
+
+  send(provider, {
+    type: 'session_request',
+    sessionId,
+    ...mandateClientPayload(createdSession),
+    nextByteToken: firstByteToken,
+  })
   if (emitSessionCreated) {
-    send(requesterWs, { type: 'session_created', sessionId })
+    send(requesterWs, { type: 'session_created', sessionId, ...mandateClientPayload(createdSession) })
   }
-  log(requesterWs.peerId.slice(0,8), `SESSION_CREATED id=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)} country=${country}`)
-  syncSessionMetadata(sessions.get(sessionId), 'relay_assign')
-  touchSessionActivity(sessions.get(sessionId), 'relay_assign', true)
+  log(requesterWs.peerId.slice(0,8), `SESSION_CREATED id=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)} country=${country} tier=${createdSession.transportTier}`)
+  syncSessionMetadata(createdSession, 'relay_assign')
+  touchSessionActivity(createdSession, 'relay_assign', true)
+  if (dbSessionId) {
+    reportAuditEvent('mandate_issued', {
+      sessionId: dbSessionId,
+      relaySessionId: sessionId,
+      mandate: createdSession.mandate,
+      transportTier: createdSession.transportTier,
+      forcedRelay: createdSession.transportTier === 0,
+    })
+  }
 
   // If the provider doesn't respond with agent_ready within 10s, treat it as
   // unresponsive and attempt reconnect to a different provider.
@@ -638,7 +815,10 @@ function recordSessionBytes(session, byteCount, direction = 'unknown') {
   let windowBytes = 0
   for (let i = 0; i < session.byteBurstSamples.length; i++) windowBytes += session.byteBurstSamples[i].b
 
-  if (windowBytes <= limits.maxBytesPerMinute) return true
+  if (windowBytes <= limits.maxBytesPerMinute) {
+    recordAuditBytes(session, byteCount, direction)
+    return true
+  }
 
   session.disconnectReason = 'security_bandwidth_burst_limit'
   logSecurityEvent('session_security_ended', session, {
@@ -798,6 +978,7 @@ const server = createServer((req, res) => {
         free: !peer.sessionId,
         trustScore: peer.trustScore,
         privateOnly: peer.privateOnly,
+        supportsDirect: peer.supportsDirect === true,
       })
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1039,8 +1220,9 @@ wss.on('connection', (ws, req) => {
   Object.assign(ws, {
     peerId, role: null, country: null, userId: null,
     trustScore: 50, sessionId: null, providerKind: 'unknown',
-    baseDeviceId: null,
+    deviceId: null, baseDeviceId: null,
     supportsHttp: true, supportsTunnel: false,
+    supportsDirect: false, directEndpoint: null,
     privateOnly: false,
     bytesTransferred: 0, isAlive: true,
     relayUrl,
@@ -1118,6 +1300,8 @@ async function handleMessage(ws, msg) {
       ws.providerKind = msg.providerKind ?? 'unknown'
       ws.supportsHttp = msg.supportsHttp ?? true
       ws.supportsTunnel = msg.supportsTunnel ?? false
+      ws.supportsDirect = msg.supportsDirect === true && typeof msg.directEndpoint === 'string' && /^wss?:\/\//i.test(msg.directEndpoint)
+      ws.directEndpoint = ws.supportsDirect ? msg.directEndpoint : null
       ws.privateOnly = false
       // Fetch private share status BEFORE adding to pool to avoid race window
       if (ws.userId && (ws.deviceId || ws.baseDeviceId) && API_BASE && RELAY_SECRET) {
@@ -1158,6 +1342,8 @@ async function handleMessage(ws, msg) {
       const privateProviderUserId = auth.privateProviderUserId ?? null
       const privateOnly = !!privateBaseDeviceId
       ws.trustScore = auth.trustScore ?? 50
+      ws.supportsDirect = msg.supportsDirect === true
+      ws.deviceId = msg.requesterDeviceId ?? msg.deviceId ?? null
       const limits = sessionLimits(ws.trustScore)
       const activeRequesterSessions = activeSessionCountForRequester(auth.userId)
       if (activeRequesterSessions >= limits.maxConcurrentSessions) {
@@ -1235,6 +1421,7 @@ async function handleMessage(ws, msg) {
             country: agentSession.country,
             relayEndpoint: requester.relayUrl ?? '',
             attempt: 1,
+            ...mandateClientPayload(agentSession),
           })
         } else if (agentSession.notificationMode === 'reconnect') {
           send(requester, {
@@ -1243,9 +1430,10 @@ async function handleMessage(ws, msg) {
             country: agentSession.country,
             relayEndpoint: requester.relayUrl ?? '',
             attempt: agentSession.reconnectAttempt ?? 1,
+            ...mandateClientPayload(agentSession),
           })
         } else {
-          send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId })
+          send(requester, { type: 'agent_session_ready', sessionId: msg.sessionId, ...mandateClientPayload(agentSession) })
         }
         log(ws.peerId.slice(0,8), `AGENT_READY session=${msg.sessionId.slice(0,8)} → requester notified`)
       }
@@ -1359,6 +1547,145 @@ async function handleMessage(ws, msg) {
       break
     }
 
+    case 'relay_keepalive': {
+      const keepaliveSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (keepaliveSession?.audit) keepaliveSession.audit.lastRelaySignalAt = Date.now()
+      send(ws, { type: 'relay_keepalive_ack', sessionId: msg.sessionId ?? ws.sessionId ?? null, at: Date.now() })
+      break
+    }
+
+    case 'byte_token_return': {
+      const tokenSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!tokenSession?.audit) break
+      const tokenIndex = Math.max(1, Number.parseInt(msg.tokenIndex ?? '0', 10) || 0)
+      const tokenValue = String(msg.tokenValue ?? msg.token ?? '')
+      const expected = tokenIndex > 0
+        ? createByteToken(tokenSession.audit.tokenSecret, tokenSession.sessionId, tokenIndex)
+        : null
+      if (!expected || expected !== tokenValue) {
+        logSecurityEvent('byte_token_invalid', tokenSession, { tokenIndex, role: ws.role })
+        break
+      }
+      const receivedAt = new Date().toISOString()
+      tokenSession.audit.tokenFloorBytes = Math.max(tokenSession.audit.tokenFloorBytes, tokenIndex * BYTE_TOKEN_GRANULARITY)
+      tokenSession.audit.tokenLog.push({ tokenIndex, tokenValue, receivedAt, source: 'direct_return' })
+      reportAuditEvent('byte_token', {
+        sessionId: tokenSession.dbSessionId,
+        tokenIndex,
+        tokenValue,
+        receivedAt,
+      })
+      const provider = peers.get(tokenSession.providerId)
+      if (provider) send(provider, { type: 'next_byte_token', sessionId: tokenSession.sessionId, ...nextByteToken(tokenSession.audit, tokenSession.sessionId, tokenIndex + 1) })
+      break
+    }
+
+    case 'audit_commit': {
+      const commitSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!commitSession?.audit) break
+      const periodNonce = String(msg.periodNonce ?? '')
+      const commitment = String(msg.commitment ?? '')
+      if (!periodNonce || !commitment) break
+      const key = `${periodNonce}:${ws.peerId}`
+      commitSession.audit.commitments.set(key, {
+        deviceId: ws.deviceId ?? ws.userId ?? ws.peerId,
+        role: ws.role,
+        periodNonce,
+        commitment,
+        committedAt: new Date().toISOString(),
+      })
+      reportAuditEvent('commitment', {
+        sessionId: commitSession.dbSessionId,
+        deviceId: ws.deviceId ?? ws.userId ?? ws.peerId,
+        periodNonce,
+        commitment,
+        committedAt: new Date().toISOString(),
+      })
+      break
+    }
+
+    case 'audit_reveal': {
+      const revealSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!revealSession?.audit) break
+      const periodNonce = String(msg.periodNonce ?? '')
+      const chainValue = String(msg.chainValue ?? '')
+      const key = `${periodNonce}:${ws.peerId}`
+      const record = revealSession.audit.commitments.get(key)
+      if (!record || !chainValue) {
+        logSecurityEvent('commitment_timeout', revealSession, { role: ws.role, periodNonce })
+        break
+      }
+      const valid = verifyCommitmentReveal(record.commitment, chainValue, periodNonce, revealSession.audit.sessionSigningKey)
+      record.revealedChain = chainValue
+      record.revealedAt = new Date().toISOString()
+      record.commitmentValid = valid
+      if (!valid) logSecurityEvent('commitment_mismatch', revealSession, { role: ws.role, periodNonce })
+      reportAuditEvent('commitment', {
+        sessionId: revealSession.dbSessionId,
+        deviceId: record.deviceId,
+        periodNonce,
+        commitment: record.commitment,
+        committedAt: record.committedAt,
+        revealedChain: chainValue,
+        revealedAt: record.revealedAt,
+        commitmentValid: valid,
+      })
+      break
+    }
+
+    case 'provider_receipt': {
+      const receiptSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!receiptSession?.audit) break
+      receiptSession.audit.receipts.set(`provider:${msg.nonce ?? Date.now()}`, msg.receipt ?? msg)
+      reportAuditEvent('receipt', {
+        sessionId: receiptSession.dbSessionId,
+        role: 'provider',
+        deviceId: ws.deviceId ?? receiptSession.providerDeviceId,
+        periodStart: msg.periodStart,
+        periodEnd: msg.periodEnd,
+        bytesReported: msg.bytesForwarded ?? msg.bytesReported ?? 0,
+        chainValue: msg.chainValue,
+        tokensCount: msg.tokensIssued ?? msg.tokensCount ?? 0,
+        nonce: msg.nonce ?? randomUUID(),
+        deviceSig: msg.device_sig ?? msg.deviceSig ?? '',
+        sessionSig: msg.session_sig ?? msg.sessionSig ?? '',
+        verified: false,
+      })
+      break
+    }
+
+    case 'requester_wrapped_receipt': {
+      const wrappedSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!wrappedSession?.audit) break
+      wrappedSession.audit.receipts.set(`requester:${msg.nonce ?? Date.now()}`, msg.receipt ?? msg)
+      reportAuditEvent('receipt', {
+        sessionId: wrappedSession.dbSessionId,
+        role: 'requester',
+        deviceId: ws.deviceId ?? wrappedSession.requesterUserId,
+        periodStart: msg.periodStart,
+        periodEnd: msg.periodEnd,
+        bytesReported: msg.bytesReceived ?? msg.bytesReported ?? 0,
+        chainValue: msg.chainValue,
+        tokensCount: msg.tokensReceived ?? msg.tokensCount ?? 0,
+        nonce: msg.nonce ?? randomUUID(),
+        deviceSig: msg.device_sig ?? msg.deviceSig ?? '',
+        sessionSig: msg.session_sig ?? msg.sessionSig ?? '',
+        transitIntact: msg.transitIntact === true,
+        verified: false,
+      })
+      break
+    }
+
+    case 'security_event': {
+      const securitySession = sessions.get(msg.sessionId ?? ws.sessionId)
+      logSecurityEvent(String(msg.eventType ?? 'client_security_event'), securitySession, {
+        hostname: msg.hostname ?? null,
+        port: msg.port ?? null,
+        role: ws.role,
+      })
+      break
+    }
+
     case 'end_session':
       cleanupSession(ws)
       break
@@ -1423,7 +1750,13 @@ function reportSessionEnd(session, sessionId) {
       disconnectReason: session.disconnectReason ?? null,
       providerAvgMbps: session.providerAvgMbps ?? null,
       providerLastMbps: session.providerLastMbps ?? null,
-      connectionQuality: session.connectionQuality ?? null,
+      connectionQuality: {
+        ...(session.connectionQuality && typeof session.connectionQuality === 'object' ? session.connectionQuality : {}),
+        mandateArchitecture: true,
+        transportTier: session.transportTier ?? 0,
+        tokenFloorBytes: session.audit?.tokenFloorBytes ?? 0,
+        auditBytesForwarded: session.audit?.bytesForwarded ?? 0,
+      },
     }),
   })
     .then(async (r) => {
