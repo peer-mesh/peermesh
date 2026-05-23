@@ -21,7 +21,7 @@ import {
   verifyCommitmentReveal,
   verifyReceiptSplitSignatures,
   verifySignedMandate,
-} from '../lib/mandate-relay.mjs'
+} from '../relay/lib/mandate-relay.mjs'
 
 test('signed mandate verifies and rejects policy tampering', () => {
   const relayKeys = generateRelaySigningKeyPair()
