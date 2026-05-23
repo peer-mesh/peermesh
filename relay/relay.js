@@ -206,16 +206,11 @@ function mandatePolicyForTrust(trustScore = 50) {
   }
 }
 
-function samePublicNetwork(requester, provider) {
-  return !!requester?.clientIp && !!provider?.clientIp && requester.clientIp === provider.clientIp
-}
-
 function canUseDirectTransport(requester, provider) {
   return DIRECT_TRANSPORT_ENABLED &&
     requester?.supportsDirect === true &&
     provider?.supportsDirect === true &&
-    !!provider?.directEndpoint &&
-    samePublicNetwork(requester, provider)
+    !!provider?.directEndpoint
 }
 
 function buildAuditState(sessionId, sessionNonce, sessionSigningKey) {
@@ -275,6 +270,7 @@ function buildMandatePayload(session, requester, provider) {
   const transportTier = canUseDirectTransport(requester, provider) ? 2 : 0
   const sessionSigningKey = createSessionSigningKey()
   const sessionNonce = createSessionNonce()
+  const directChallenge = createSessionNonce()
   const providerDirectEndpoint = transportTier > 0 ? provider.directEndpoint : null
   const mandate = createSignedMandate({
     sessionId: session.sessionId,
@@ -287,10 +283,14 @@ function buildMandatePayload(session, requester, provider) {
     sessionSigningKey,
     sessionSigningKeyMode: 'relay_delivered',
     sessionNonce,
+    directChallenge,
     hardExpiryOnSignalingLoss: 30,
     providerDirectEndpoint,
     relayFallback: session.relayEndpoint ?? requester.relayUrl ?? null,
+    relayPublicKey: relaySigningMaterial.publicKeyPem,
     transportTier,
+    transportPreference: transportTier > 0 ? ['direct', 'relay'] : ['relay'],
+    relayFallbackRequired: true,
     binaryHash: null,
   }, relaySigningMaterial)
 
@@ -302,6 +302,7 @@ function buildMandatePayload(session, requester, provider) {
     transportTier,
     providerDirectEndpoint,
     forcedRelay: transportTier === 0,
+    directChallenge,
   }
 }
 
@@ -314,6 +315,7 @@ function mandateClientPayload(session) {
     transportTier: session.transportTier ?? 0,
     providerDirectEndpoint: session.providerDirectEndpoint ?? null,
     relayFallback: session.relayEndpoint ?? null,
+    transportPreference: session.mandate?.transportPreference ?? ['relay'],
     mandateArchitecture: true,
   }
 }
@@ -1446,6 +1448,36 @@ async function handleMessage(ws, msg) {
       agentSession.disconnectReason = null
       syncSessionMetadata(agentSession, 'provider_assign')
       sendSessionQuality(agentSession, 'provider_assign', true)
+      break
+    }
+
+    case 'direct_tunnel_open': {
+      const directSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!directSession || directSession.providerId !== ws.peerId) return
+      const hostname = String(msg.hostname ?? '').trim()
+      const port = Number.parseInt(msg.port ?? '443', 10) || 443
+      directSession.lastActivity = Date.now()
+      if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
+      const validation = await validateTarget(hostname, port)
+      if (!validation.ok) {
+        markBlockedTarget(directSession, { hostname, port, reason: validation.reason, address: validation.address ?? null, transport: 'direct' })
+        return
+      }
+      if (!canOpenTunnel(directSession)) return
+      recordSessionHost(directSession, hostname, 'direct_target_host')
+      break
+    }
+
+    case 'direct_bytes': {
+      const directSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!directSession || directSession.providerId !== ws.peerId) return
+      const byteCount = Math.max(0, Math.min(Number(msg.bytes) || 0, 128 * 1024 * 1024))
+      if (byteCount <= 0) return
+      directSession.lastActivity = Date.now()
+      if (!recordSessionBytes(directSession, byteCount, 'provider_to_requester')) return
+      directSession.bytesProvider = (directSession.bytesProvider ?? 0) + byteCount
+      directSession.bytesRequester = (directSession.bytesRequester ?? 0) + byteCount
+      sendSessionQuality(directSession, 'direct_bytes')
       break
     }
 

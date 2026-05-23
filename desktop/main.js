@@ -11,6 +11,8 @@ const net = require('net')
 const dns = require('dns').promises
 const fs = require('fs')
 const os = require('os')
+const crypto = require('crypto')
+const { EventEmitter } = require('events')
 const { spawn, spawnSync } = require('child_process')
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Logger Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -2752,10 +2754,60 @@ let directServer = null
 let directWss = null
 let directEndpoint = null
 let directServerStarting = null
+const DIRECT_FALLBACK_CONNECT_MS = 2500
+const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
+const DIRECT_HANDSHAKE_CONTEXT = 'peermesh/direct-handshake/v1'
 
 function encodeDirectMandate(mandate) {
   if (!mandate) return ''
   return Buffer.from(JSON.stringify(mandate)).toString('base64url')
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+function mandateDigest(mandate) {
+  const unsignedMandate = { ...(mandate || {}) }
+  delete unsignedMandate.signature
+  return crypto.createHash('sha256').update(canonicalJson(unsignedMandate)).digest('hex')
+}
+
+function directHandshakePayload(mandate) {
+  return canonicalJson({
+    context: DIRECT_HANDSHAKE_CONTEXT,
+    sessionId: mandate?.sessionId ?? null,
+    directChallenge: mandate?.directChallenge ?? null,
+    requesterDeviceId: mandate?.requesterDeviceId ?? null,
+    providerDeviceId: mandate?.providerDeviceId ?? null,
+    providerDirectEndpoint: mandate?.providerDirectEndpoint ?? null,
+    relayFallback: mandate?.relayFallback ?? null,
+    mandateDigest: mandateDigest(mandate),
+  })
+}
+
+function createDirectProof(mandate) {
+  if (!mandate?.sessionSigningKey) return ''
+  return crypto.createHmac('sha256', String(mandate.sessionSigningKey))
+    .update(directHandshakePayload(mandate))
+    .digest('base64url')
+}
+
+function safeEqualString(a, b) {
+  const left = Buffer.from(String(a))
+  const right = Buffer.from(String(b))
+  return left.length === right.length && crypto.timingSafeEqual(left, right)
+}
+
+function relayProxyUrlForSession(session) {
+  const relayRaw = session?.relayEndpoint
+  if (!relayRaw || !session?.sessionId) return null
+  const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+  const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
+  return `${relayOrigin}/proxy?session=${encodeURIComponent(session.sessionId)}`
 }
 
 function getLanAddress() {
@@ -2813,14 +2865,22 @@ function registerDirectSession(slot, msg) {
     sessionId: msg.sessionId,
     mandate: msg.mandate,
     wireMandate: encodeDirectMandate(msg.mandate),
+    directProof: createDirectProof(msg.mandate),
     expiresAt: Number(msg.mandate?.expiresAt ?? 0),
     connections: new Set(),
+    pendingDirectBytes: 0,
+    byteReportTimer: null,
   })
 }
 
 function closeDirectSession(sessionId, reason = 'session_ended') {
   const entry = directSessions.get(sessionId)
   if (!entry) return
+  flushDirectByteReport(entry)
+  if (entry.byteReportTimer) {
+    clearTimeout(entry.byteReportTimer)
+    entry.byteReportTimer = null
+  }
   directSessions.delete(sessionId)
   for (const ws of entry.connections) {
     try { ws.close(1000, reason) } catch {}
@@ -2833,12 +2893,43 @@ function closeDirectSessionsForSlot(slot, reason = 'relay_signaling_lost') {
   }
 }
 
+function flushDirectByteReport(entry) {
+  const bytes = Math.max(0, Number(entry?.pendingDirectBytes) || 0)
+  if (!entry || bytes <= 0) return
+  entry.pendingDirectBytes = 0
+  if (entry.byteReportTimer) {
+    clearTimeout(entry.byteReportTimer)
+    entry.byteReportTimer = null
+  }
+  sendRelayMessage(entry.slot, {
+    type: 'direct_bytes',
+    sessionId: entry.sessionId,
+    bytes,
+  })
+}
+
+function queueDirectByteReport(entry, bytes) {
+  if (!entry || bytes <= 0) return
+  entry.pendingDirectBytes = (entry.pendingDirectBytes || 0) + bytes
+  if (entry.byteReportTimer) return
+  entry.byteReportTimer = setTimeout(() => flushDirectByteReport(entry), DIRECT_BYTE_REPORT_INTERVAL_MS)
+}
+
 function handleDirectTunnelConnection(ws, req) {
   const url = new URL(req.url || '/', 'http://localhost')
   const sessionId = url.searchParams.get('session') || req.headers['x-session-id']
   const mandateHeader = req.headers['x-mandate']
+  const directProofHeader = req.headers['x-direct-proof']
   const entry = directSessions.get(sessionId)
-  if (!entry || !mandateHeader || mandateHeader !== entry.wireMandate || (entry.expiresAt && entry.expiresAt <= Date.now())) {
+  const directProof = Array.isArray(directProofHeader) ? directProofHeader[0] : directProofHeader
+  if (
+    !entry ||
+    !mandateHeader ||
+    mandateHeader !== entry.wireMandate ||
+    !directProof ||
+    !safeEqualString(directProof, entry.directProof) ||
+    (entry.expiresAt && entry.expiresAt <= Date.now())
+  ) {
     ws.close(1008, 'Invalid mandate')
     return
   }
@@ -2865,6 +2956,7 @@ function handleDirectTunnelConnection(ws, req) {
         ws.close(1008, 'Target not allowed')
         return
       }
+      sendRelayMessage(entry.slot, { type: 'direct_tunnel_open', sessionId, hostname, port })
       opened = true
       entry.slot.requestsHandled++
       syncAggregateState()
@@ -2877,6 +2969,7 @@ function handleDirectTunnelConnection(ws, req) {
       socket.on('data', (socketChunk) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(socketChunk)
         addBytes(entry.slot, socketChunk.length)
+        queueDirectByteReport(entry, socketChunk.length)
       })
       socket.on('end', () => ws.close(1000))
       socket.on('close', () => ws.close(1000))
@@ -2889,11 +2982,13 @@ function handleDirectTunnelConnection(ws, req) {
 
   ws.on('close', () => {
     entry.connections.delete(ws)
+    flushDirectByteReport(entry)
     if (socket && !socket.destroyed) socket.destroy()
   })
   ws.on('error', (err) => {
     log.warn('DIRECT', 'direct tunnel error', { target: tunnelTarget, err: err.message })
     entry.connections.delete(ws)
+    flushDirectByteReport(entry)
     if (socket && !socket.destroyed) socket.destroy()
   })
 }
@@ -2903,30 +2998,96 @@ function openTunnelWs(hostname, port, onOpen) {
   const useDirect = Number(proxySession.transportTier ?? 0) > 0 &&
     proxySession.providerDirectEndpoint &&
     proxySession.mandate
-  let proxyUrl
-  let options
-  if (useDirect) {
-    const directUrl = new URL(proxySession.providerDirectEndpoint)
-    directUrl.searchParams.set('session', proxySession.sessionId)
-    proxyUrl = directUrl.toString()
-    options = {
-      headers: {
-        'X-Session-Id': proxySession.sessionId,
-        'X-Mandate': encodeDirectMandate(proxySession.mandate),
-      },
-    }
-  } else {
-    const relayRaw = proxySession.relayEndpoint
-    const relayHttp = relayRaw.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
-    const relayOrigin = new URL(relayHttp).origin.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:')
-    proxyUrl = `${relayOrigin}/proxy?session=${encodeURIComponent(proxySession.sessionId)}`
+  const relayUrl = relayProxyUrlForSession(proxySession)
+  const connectRequest = `CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`
+
+  if (!useDirect) {
+    if (!relayUrl) return null
+    const tunnelWs = new WebSocket(relayUrl)
+    tunnelWs.on('open', () => {
+      tunnelWs.send(connectRequest)
+      if (onOpen) onOpen()
+    })
+    return tunnelWs
   }
-  const tunnelWs = new WebSocket(proxyUrl, options)
-  tunnelWs.on('open', () => {
-    tunnelWs.send(`CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`)
-    if (onOpen) onOpen()
-  })
-  return tunnelWs
+
+  const directUrl = new URL(proxySession.providerDirectEndpoint)
+  directUrl.searchParams.set('session', proxySession.sessionId)
+  const wireMandate = encodeDirectMandate(proxySession.mandate)
+  const directOptions = {
+    headers: {
+      'X-Session-Id': proxySession.sessionId,
+      'X-Mandate': wireMandate,
+      'X-Direct-Proof': createDirectProof(proxySession.mandate),
+    },
+  }
+  const bridge = new EventEmitter()
+  bridge.readyState = WebSocket.CONNECTING
+  bridge._active = null
+  bridge._closedByCaller = false
+  bridge.send = (data) => {
+    if (bridge._active?.readyState === WebSocket.OPEN) bridge._active.send(data)
+  }
+  bridge.close = (code, reason) => {
+    bridge._closedByCaller = true
+    if (bridge._active && bridge._active.readyState < WebSocket.CLOSING) bridge._active.close(code, reason)
+  }
+  bridge.terminate = () => {
+    bridge._closedByCaller = true
+    bridge._active?.terminate?.()
+  }
+
+  let fallbackStarted = false
+  const start = (url, options, transport) => {
+    let opened = false
+    let receivedAnyMessage = false
+    let connectTimer = null
+    const ws = new WebSocket(url, options)
+    bridge._active = ws
+    bridge.readyState = ws.readyState
+
+    const fallbackToRelay = (reason) => {
+      if (transport !== 'direct' || fallbackStarted || bridge._closedByCaller || receivedAnyMessage || !relayUrl) return false
+      fallbackStarted = true
+      try { ws.terminate?.() } catch {}
+      log.warn('DIRECT', 'direct tunnel unavailable, falling back to relay', { reason, direct: directUrl.toString(), relay: relayUrl })
+      start(relayUrl, undefined, 'relay')
+      return true
+    }
+
+    if (transport === 'direct') {
+      connectTimer = setTimeout(() => {
+        if (!opened) fallbackToRelay('connect_timeout')
+      }, DIRECT_FALLBACK_CONNECT_MS)
+    }
+
+    ws.on('open', () => {
+      opened = true
+      if (connectTimer) clearTimeout(connectTimer)
+      bridge.readyState = ws.readyState
+      ws.send(connectRequest)
+      if (onOpen) onOpen()
+      bridge.emit('open')
+    })
+    ws.on('message', (data) => {
+      receivedAnyMessage = true
+      bridge.emit('message', data)
+    })
+    ws.on('close', (code, reason) => {
+      if (connectTimer) clearTimeout(connectTimer)
+      bridge.readyState = ws.readyState
+      if (fallbackToRelay(opened ? 'closed_before_response' : 'closed_before_open')) return
+      bridge.emit('close', code, reason)
+    })
+    ws.on('error', (err) => {
+      if (connectTimer) clearTimeout(connectTimer)
+      if (fallbackToRelay(opened ? 'error_after_open' : 'error_before_open')) return
+      bridge.emit('error', err)
+    })
+  }
+
+  start(directUrl.toString(), directOptions, 'direct')
+  return bridge
 }
 
 const localProxyServer = http.createServer(async (req, res) => {

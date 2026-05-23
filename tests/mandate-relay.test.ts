@@ -3,9 +3,13 @@ import assert from 'node:assert/strict'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import {
   BYTE_TOKEN_GRANULARITY,
+  MANDATE_TTL_MS,
   advanceHashChain,
+  advanceRelayAnchoredChain,
   createByteToken,
   createCommitment,
+  createDirectHandshakeProof,
+  createRelayAnchor,
   createSessionNonce,
   createSessionSigningKey,
   createSignedMandate,
@@ -13,6 +17,7 @@ import {
   generateRelaySigningKeyPair,
   getReachedTokenIndexes,
   signReceiptWithSplitKey,
+  verifyDirectHandshakeProof,
   verifyCommitmentReveal,
   verifyReceiptSplitSignatures,
   verifySignedMandate,
@@ -43,6 +48,33 @@ test('signed mandate verifies and rejects policy tampering', () => {
   }
 
   assert.equal(verifySignedMandate(tampered, relayKeys.publicKeyPem, { rejectExpired: false }), false)
+  assert.ok(Number(mandate.expiresAt) - Number(mandate.issuedAt) >= MANDATE_TTL_MS)
+})
+
+test('direct handshake proof binds the requester to the signed mandate', () => {
+  const relayKeys = generateRelaySigningKeyPair()
+  const sessionSigningKey = createSessionSigningKey()
+  const mandate = createSignedMandate({
+    sessionId: 'direct-session-1',
+    requesterUserId: 'requester-1',
+    requesterDeviceId: 'requester-device-1',
+    providerUserId: 'provider-1',
+    providerDeviceId: 'provider-device-1',
+    sessionSigningKey,
+    sessionNonce: createSessionNonce(),
+    directChallenge: createSessionNonce(),
+    providerDirectEndpoint: 'ws://10.0.0.12:32100/tunnel',
+    relayFallback: 'wss://relay.peermesh.dev',
+    relayPublicKey: relayKeys.publicKeyPem,
+    transportTier: 2,
+    transportPreference: ['direct', 'relay'],
+  }, relayKeys)
+
+  const proof = createDirectHandshakeProof(mandate)
+
+  assert.equal(verifyDirectHandshakeProof(mandate, proof), true)
+  assert.equal(verifyDirectHandshakeProof({ ...mandate, providerDirectEndpoint: 'ws://10.0.0.99:32100/tunnel' }, proof), false)
+  assert.equal(verifyDirectHandshakeProof(mandate, proof, createSessionSigningKey()), false)
 })
 
 test('byte tokens are deterministic and only reached after 10MB boundaries', () => {
@@ -68,6 +100,17 @@ test('hash chain and commitment reveal agree only for the committed chain', () =
 
   assert.equal(verifyCommitmentReveal(commitment, second, periodNonce, key), true)
   assert.equal(verifyCommitmentReveal(commitment, first, periodNonce, key), false)
+})
+
+test('relay anchors make hash chain ticks unpredictable without relay secret', () => {
+  const key = createSessionSigningKey()
+  const anchor = createRelayAnchor('relay-secret', 'session-anchor', 123)
+  const nextAnchor = createRelayAnchor('relay-secret', 'session-anchor', 124)
+  const chain = advanceRelayAnchoredChain('chain-0', 2048, anchor, key)
+
+  assert.notEqual(anchor, nextAnchor)
+  assert.equal(chain, advanceRelayAnchoredChain('chain-0', 2048, anchor, key))
+  assert.notEqual(chain, advanceRelayAnchoredChain('chain-0', 2048, nextAnchor, key))
 })
 
 test('split receipt signatures require both device key and session key', () => {

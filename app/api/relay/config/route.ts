@@ -8,12 +8,11 @@ import { getRelayFallbackList, getRelayHealthList } from '@/lib/relay-endpoints'
 export const revalidate = 30
 
 export async function GET() {
-  const [relays, health] = await Promise.all([
-    getRelayFallbackList(),
-    getRelayHealthList(),
-  ])
+  const health = await getRelayHealthList()
+  const relays = health.map(relay => relay.url)
+  const fallbackRelays = relays.length > 0 ? relays : await getRelayFallbackList()
   return NextResponse.json(
-    { relays, health, updatedAt: Date.now() },
+    { relays: fallbackRelays, health, updatedAt: Date.now() },
     { headers: { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=60' } }
   )
 }
