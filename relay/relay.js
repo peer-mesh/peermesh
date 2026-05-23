@@ -23,6 +23,10 @@ const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET ?? RELAY_SECRET
 const SCHEDULER_TICK_INTERVAL_MS = Math.max(0, parseInt(process.env.SCHEDULER_TICK_INTERVAL_MS ?? '60000', 10) || 0)
 const SESSION_DB_TOUCH_MS = Math.max(30_000, parseInt(process.env.SESSION_DB_TOUCH_MS ?? '60000', 10) || 60_000)
 const DIRECT_TRANSPORT_ENABLED = process.env.RELAY_DIRECT_TRANSPORT !== '0'
+const DIRECT_ICE_SERVERS = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun1.l.google.com:19302',
+]
 
 const relaySigningMaterial = getRelaySigningMaterial(process.env)
 
@@ -209,8 +213,7 @@ function mandatePolicyForTrust(trustScore = 50) {
 function canUseDirectTransport(requester, provider) {
   return DIRECT_TRANSPORT_ENABLED &&
     requester?.supportsDirect === true &&
-    provider?.supportsDirect === true &&
-    !!provider?.directEndpoint
+    provider?.supportsDirect === true
 }
 
 function buildAuditState(sessionId, sessionNonce, sessionSigningKey) {
@@ -267,11 +270,13 @@ function recordAuditBytes(session, byteCount, direction = 'unknown') {
 }
 
 function buildMandatePayload(session, requester, provider) {
-  const transportTier = canUseDirectTransport(requester, provider) ? 2 : 0
+  const transportTier = canUseDirectTransport(requester, provider) ? 1 : 0
   const sessionSigningKey = createSessionSigningKey()
   const sessionNonce = createSessionNonce()
   const directChallenge = createSessionNonce()
-  const providerDirectEndpoint = transportTier > 0 ? provider.directEndpoint : null
+  const directTransport = transportTier > 0 ? (provider.directTransport ?? 'webrtc') : null
+  const iceEnabled = transportTier > 0 && directTransport === 'webrtc'
+  const providerDirectEndpoint = transportTier > 0 ? (provider.directEndpoint ?? null) : null
   const mandate = createSignedMandate({
     sessionId: session.sessionId,
     dbSessionId: session.dbSessionId ?? null,
@@ -285,6 +290,9 @@ function buildMandatePayload(session, requester, provider) {
     sessionNonce,
     directChallenge,
     hardExpiryOnSignalingLoss: 30,
+    directTransport,
+    iceEnabled,
+    iceServers: iceEnabled ? DIRECT_ICE_SERVERS : [],
     providerDirectEndpoint,
     relayFallback: session.relayEndpoint ?? requester.relayUrl ?? null,
     relayPublicKey: relaySigningMaterial.publicKeyPem,
@@ -300,6 +308,9 @@ function buildMandatePayload(session, requester, provider) {
     sessionSigningKey,
     sessionNonce,
     transportTier,
+    directTransport,
+    iceEnabled,
+    iceServers: iceEnabled ? DIRECT_ICE_SERVERS : [],
     providerDirectEndpoint,
     forcedRelay: transportTier === 0,
     directChallenge,
@@ -313,6 +324,10 @@ function mandateClientPayload(session) {
     sessionSigningKey: session.audit?.sessionSigningKey ?? null,
     sessionNonce: session.audit?.sessionNonce ?? null,
     transportTier: session.transportTier ?? 0,
+    directTransport: session.directTransport ?? session.mandate?.directTransport ?? null,
+    iceEnabled: session.iceEnabled === true || session.mandate?.iceEnabled === true,
+    iceServers: session.iceServers ?? session.mandate?.iceServers ?? [],
+    directState: session.directState ?? 'relay',
     providerDirectEndpoint: session.providerDirectEndpoint ?? null,
     relayFallback: session.relayEndpoint ?? null,
     transportPreference: session.mandate?.transportPreference ?? ['relay'],
@@ -565,6 +580,13 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     lastActivity: Date.now(),
     lastDbActivitySyncAt: 0,
     transportTier: 0,
+    directTransport: null,
+    iceEnabled: false,
+    iceServers: [],
+    directState: 'relay',
+    directOpenedAt: null,
+    directFailedAt: null,
+    directFailReason: null,
     providerDirectEndpoint: null,
     mandate: null,
     relayPublicKey: null,
@@ -574,6 +596,10 @@ function createSession(requesterWs, provider, country, dbSessionId, {
   const createdSession = sessions.get(sessionId)
   const mandatePayload = buildMandatePayload(createdSession, requesterWs, provider)
   createdSession.transportTier = mandatePayload.transportTier
+  createdSession.directTransport = mandatePayload.directTransport
+  createdSession.iceEnabled = mandatePayload.iceEnabled
+  createdSession.iceServers = mandatePayload.iceServers
+  createdSession.directState = mandatePayload.iceEnabled ? 'attempting_direct' : 'relay'
   createdSession.providerDirectEndpoint = mandatePayload.providerDirectEndpoint
   createdSession.mandate = mandatePayload.mandate
   createdSession.relayPublicKey = mandatePayload.relayPublicKey
@@ -1224,7 +1250,7 @@ wss.on('connection', (ws, req) => {
     trustScore: 50, sessionId: null, providerKind: 'unknown',
     deviceId: null, baseDeviceId: null,
     supportsHttp: true, supportsTunnel: false,
-    supportsDirect: false, directEndpoint: null,
+    supportsDirect: false, directEndpoint: null, directTransport: null, iceEnabled: false,
     privateOnly: false,
     bytesTransferred: 0, isAlive: true,
     relayUrl,
@@ -1302,8 +1328,11 @@ async function handleMessage(ws, msg) {
       ws.providerKind = msg.providerKind ?? 'unknown'
       ws.supportsHttp = msg.supportsHttp ?? true
       ws.supportsTunnel = msg.supportsTunnel ?? false
-      ws.supportsDirect = msg.supportsDirect === true && typeof msg.directEndpoint === 'string' && /^wss?:\/\//i.test(msg.directEndpoint)
-      ws.directEndpoint = ws.supportsDirect ? msg.directEndpoint : null
+      ws.iceEnabled = msg.iceEnabled === true || msg.directTransport === 'webrtc'
+      ws.directTransport = ws.iceEnabled ? 'webrtc' : null
+      ws.supportsDirect = msg.supportsDirect === true && (ws.iceEnabled || (typeof msg.directEndpoint === 'string' && /^wss?:\/\//i.test(msg.directEndpoint)))
+      ws.directEndpoint = ws.supportsDirect && typeof msg.directEndpoint === 'string' && /^wss?:\/\//i.test(msg.directEndpoint) ? msg.directEndpoint : null
+      if (ws.supportsDirect && !ws.directTransport) ws.directTransport = 'websocket'
       ws.privateOnly = false
       // Fetch private share status BEFORE adding to pool to avoid race window
       if (ws.userId && (ws.deviceId || ws.baseDeviceId) && API_BASE && RELAY_SECRET) {
@@ -1405,6 +1434,7 @@ async function handleMessage(ws, msg) {
 
       ws.role = 'requester'
       ws.userId = auth.userId
+      ws.iceEnabled = msg.iceEnabled !== false && msg.supportsDirect === true
       peers.set(ws.peerId, ws)
 
       createSession(ws, provider, resolvedCountry, msg.dbSessionId ?? null)
@@ -1448,6 +1478,44 @@ async function handleMessage(ws, msg) {
       agentSession.disconnectReason = null
       syncSessionMetadata(agentSession, 'provider_assign')
       sendSessionQuality(agentSession, 'provider_assign', true)
+      break
+    }
+
+    case 'ice_offer':
+      forwardSessionSignal(ws, msg, 'ice_offer', ['sdp', 'sdpType', 'candidates'])
+      break
+
+    case 'ice_answer':
+      forwardSessionSignal(ws, msg, 'ice_answer', ['sdp', 'sdpType', 'candidates'])
+      break
+
+    case 'ice_candidate':
+      forwardSessionSignal(ws, msg, 'ice_candidate', ['candidate'])
+      break
+
+    case 'direct_failed': {
+      const directSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!isSessionParticipant(directSession, ws)) break
+      directSession.directState = 'relay'
+      directSession.directFailedAt = Date.now()
+      directSession.directFailReason = String(msg.reason ?? 'ice_failed').slice(0, 120)
+      directSession.lastActivity = Date.now()
+      if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
+      forwardSessionSignal(ws, msg, 'direct_failed', ['reason'])
+      log('DIRECT', `FAILED session=${directSession.sessionId.slice(0,8)} reason=${directSession.directFailReason} fallback=relay`)
+      break
+    }
+
+    case 'direct_open': {
+      const directSession = sessions.get(msg.sessionId ?? ws.sessionId)
+      if (!isSessionParticipant(directSession, ws)) break
+      directSession.directState = 'direct'
+      directSession.directOpenedAt = Date.now()
+      directSession.directFailReason = null
+      directSession.lastActivity = Date.now()
+      if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
+      forwardSessionSignal(ws, msg, 'direct_open', [])
+      log('DIRECT', `OPEN session=${directSession.sessionId.slice(0,8)} transport=${directSession.directTransport ?? 'unknown'}`)
       break
     }
 
@@ -1733,6 +1801,41 @@ async function handleMessage(ws, msg) {
 
 function send(ws, data) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
+}
+
+function isSessionParticipant(session, ws) {
+  return !!session && !!ws && (session.requesterId === ws.peerId || session.providerId === ws.peerId)
+}
+
+function getOtherSessionSocket(session, ws) {
+  if (!isSessionParticipant(session, ws)) return null
+  const otherPeerId = session.requesterId === ws.peerId ? session.providerId : session.requesterId
+  const other = peers.get(otherPeerId)
+  return other?.readyState === WebSocket.OPEN ? other : null
+}
+
+function pickForwardFields(msg, keys) {
+  const payload = {}
+  for (const key of keys) {
+    if (msg[key] !== undefined) payload[key] = msg[key]
+  }
+  return payload
+}
+
+function forwardSessionSignal(ws, msg, type, keys = []) {
+  const session = sessions.get(msg.sessionId ?? ws.sessionId)
+  if (!isSessionParticipant(session, ws)) return false
+  const other = getOtherSessionSocket(session, ws)
+  if (!other) return false
+  if (session.audit) session.audit.lastRelaySignalAt = Date.now()
+  session.lastActivity = Date.now()
+  send(other, {
+    type,
+    sessionId: session.sessionId,
+    fromRole: ws.role ?? null,
+    ...pickForwardFields(msg, keys),
+  })
+  return true
 }
 
 function pickBestHost(targetHost, targetHosts) {

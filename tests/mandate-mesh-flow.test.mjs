@@ -178,7 +178,8 @@ test('mandated direct-first session stays alive and can relay-fallback a tunnel'
       supportsHttp: true,
       supportsTunnel: true,
       supportsDirect: true,
-      directEndpoint: 'ws://127.0.0.1:9/tunnel',
+      directTransport: 'webrtc',
+      iceEnabled: true,
       deviceId: 'provider-device-1',
       baseDeviceId: 'provider-device-1',
     })
@@ -195,20 +196,50 @@ test('mandated direct-first session stays alive and can relay-fallback a tunnel'
       dbSessionId: 'db-session-1',
       requireTunnel: true,
       supportsDirect: true,
+      iceEnabled: true,
       requesterDeviceId: 'requester-device-1',
     })
 
     const created = await requester.waitFor(msg => msg.type === 'session_created', 'session_created')
     const providerRequest = await provider.waitFor(msg => msg.type === 'session_request', 'session_request')
     assert.equal(created.sessionId, providerRequest.sessionId)
-    assert.equal(created.transportTier, 2)
-    assert.equal(created.providerDirectEndpoint, 'ws://127.0.0.1:9/tunnel')
+    assert.equal(created.transportTier, 1)
+    assert.equal(created.directTransport, 'webrtc')
+    assert.equal(created.iceEnabled, true)
+    assert.equal(created.providerDirectEndpoint, null)
     assert.deepEqual(created.transportPreference, ['direct', 'relay'])
     assert.equal(providerRequest.mandate.relayFallbackRequired, true)
+    assert.deepEqual(created.iceServers, ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'])
 
     provider.send({ type: 'agent_ready', sessionId: created.sessionId })
     const ready = await requester.waitFor(msg => msg.type === 'agent_session_ready', 'agent_session_ready')
     assert.equal(ready.sessionId, created.sessionId)
+    assert.equal(ready.iceEnabled, true)
+
+    requester.send({
+      type: 'ice_offer',
+      sessionId: created.sessionId,
+      sdp: 'offer-sdp',
+      sdpType: 'offer',
+      candidates: [{ candidate: 'candidate:requester', sdpMid: '0' }],
+    })
+    const offer = await provider.waitFor(msg => msg.type === 'ice_offer', 'ice_offer')
+    assert.equal(offer.sessionId, created.sessionId)
+    assert.equal(offer.sdp, 'offer-sdp')
+
+    provider.send({
+      type: 'ice_answer',
+      sessionId: created.sessionId,
+      sdp: 'answer-sdp',
+      sdpType: 'answer',
+      candidates: [{ candidate: 'candidate:provider', sdpMid: '0' }],
+    })
+    const answer = await requester.waitFor(msg => msg.type === 'ice_answer', 'ice_answer')
+    assert.equal(answer.sdp, 'answer-sdp')
+
+    provider.send({ type: 'direct_failed', sessionId: created.sessionId, reason: 'ice_failed' })
+    const directFailed = await requester.waitFor(msg => msg.type === 'direct_failed', 'direct_failed')
+    assert.equal(directFailed.reason, 'ice_failed')
 
     const noEarlyEnd = await requester
       .waitFor(msg => msg.type === 'session_ended', 'unexpected session end', 500)

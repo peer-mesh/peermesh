@@ -71,6 +71,8 @@ const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 4
 const DESKTOP_LAUNCH_WAIT_MS = 8000
 
 let relayWs = null
+let desktopSignalWs = null
+let desktopSignalSessionId = null
 let currentSession = null
 let agentSessionId = null
 let proxyFailClosed = false
@@ -1405,6 +1407,74 @@ async function connectToRelay(opts, attempt, retries) {
   }
 }
 
+function closeDesktopSignaling(reason = 'closed') {
+  if (!desktopSignalWs) return
+  const ws = desktopSignalWs
+  desktopSignalWs = null
+  desktopSignalSessionId = null
+  ws.onopen = null
+  ws.onmessage = null
+  ws.onerror = null
+  ws.onclose = null
+  try { ws.close(1000, reason) } catch {}
+}
+
+function connectDesktopSignaling(session) {
+  if (!session?.sessionId || session.iceEnabled !== true || session.directTransport !== 'webrtc') {
+    closeDesktopSignaling('ice_disabled')
+    return
+  }
+  if (desktopSignalWs && desktopSignalSessionId === session.sessionId && desktopSignalWs.readyState <= WebSocket.OPEN) return
+  closeDesktopSignaling('session_replaced')
+
+  const ws = new WebSocket(`ws://127.0.0.1:${CONTROL_PORT}/webrtc-signaling?session=${encodeURIComponent(session.sessionId)}`)
+  desktopSignalWs = ws
+  desktopSignalSessionId = session.sessionId
+  let openTimer = setTimeout(() => {
+    openTimer = null
+    if (ws.readyState === WebSocket.CONNECTING && relayWs?.readyState === WebSocket.OPEN) {
+      relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_timeout' }))
+      try { ws.close(1000, 'desktop_signaling_timeout') } catch {}
+    }
+  }, 1500)
+  ws.onopen = () => {
+    if (openTimer) clearTimeout(openTimer)
+    openTimer = null
+    log('info', `[DIRECT] desktop signaling open session=${session.sessionId.slice(0,8)}`)
+  }
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data)
+      if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+      relayWs.send(JSON.stringify({ ...msg, sessionId: session.sessionId }))
+    } catch (error) {
+      log('warn', `[DIRECT] desktop signaling parse failed: ${error.message}`)
+    }
+  }
+  ws.onerror = () => {
+    if (openTimer) clearTimeout(openTimer)
+    openTimer = null
+    if (relayWs?.readyState === WebSocket.OPEN) {
+      relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_error' }))
+    }
+  }
+  ws.onclose = () => {
+    if (openTimer) clearTimeout(openTimer)
+    openTimer = null
+    if (desktopSignalWs === ws) {
+      desktopSignalWs = null
+      desktopSignalSessionId = null
+    }
+  }
+}
+
+function forwardRelaySignalToDesktop(msg) {
+  if (!msg?.sessionId || msg.sessionId !== desktopSignalSessionId) return false
+  if (!desktopSignalWs || desktopSignalWs.readyState !== WebSocket.OPEN) return false
+  desktopSignalWs.send(JSON.stringify(msg))
+  return true
+}
+
 async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token, privateCode, connectionType }) {
   const requesterIdentity = await getExtensionIdentity().catch(() => ({ deviceId: null }))
   return new Promise((resolve, reject) => {
@@ -1434,6 +1504,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         privateBaseDeviceId: privateBaseDeviceId ?? null,
         requireTunnel: true,
         supportsDirect: true,
+        iceEnabled: true,
         requesterDeviceId: requesterIdentity.deviceId ?? null,
       }))
       keepaliveTimer = setInterval(() => {
@@ -1467,6 +1538,10 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           sessionSigningKey: msg.sessionSigningKey ?? null,
           sessionNonce: msg.sessionNonce ?? null,
           transportTier: msg.transportTier ?? 0,
+          directTransport: msg.directTransport ?? null,
+          iceEnabled: msg.iceEnabled === true,
+          iceServers: msg.iceServers ?? [],
+          directState: msg.directState ?? (msg.iceEnabled ? 'attempting_direct' : 'relay'),
           providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
           createdAt: Date.now(),
           reconnecting: false,
@@ -1496,6 +1571,9 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               sessionSigningKey: msg.sessionSigningKey ?? null,
               sessionNonce: msg.sessionNonce ?? null,
               transportTier: msg.transportTier ?? 0,
+              directTransport: msg.directTransport ?? null,
+              iceEnabled: msg.iceEnabled === true,
+              iceServers: msg.iceServers ?? [],
               providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
             }),
             signal: AbortSignal.timeout(4000),
@@ -1514,6 +1592,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           settle(reject, new Error('PeerMesh Desktop proxy is not ready. Open the desktop app and retry.'))
           return
         }
+        connectDesktopSignaling(currentSession)
         setProxyDesktop(agentSessionId, country)
         settle(resolve, undefined)
       }
@@ -1535,6 +1614,10 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
             sessionSigningKey: msg.sessionSigningKey ?? currentSession.sessionSigningKey ?? null,
             sessionNonce: msg.sessionNonce ?? currentSession.sessionNonce ?? null,
             transportTier: msg.transportTier ?? currentSession.transportTier ?? 0,
+            directTransport: msg.directTransport ?? currentSession.directTransport ?? null,
+            iceEnabled: msg.iceEnabled === true || currentSession.iceEnabled === true,
+            iceServers: msg.iceServers ?? currentSession.iceServers ?? [],
+            directState: msg.directState ?? (msg.iceEnabled ? 'attempting_direct' : currentSession.directState ?? 'relay'),
             providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession.providerDirectEndpoint ?? null,
             createdAt: Date.now(),
             reconnecting: false,
@@ -1557,11 +1640,15 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               sessionSigningKey: msg.sessionSigningKey ?? currentSession?.sessionSigningKey ?? null,
               sessionNonce: msg.sessionNonce ?? currentSession?.sessionNonce ?? null,
               transportTier: msg.transportTier ?? currentSession?.transportTier ?? 0,
+              directTransport: msg.directTransport ?? currentSession?.directTransport ?? null,
+              iceEnabled: msg.iceEnabled === true || currentSession?.iceEnabled === true,
+              iceServers: msg.iceServers ?? currentSession?.iceServers ?? [],
               providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession?.providerDirectEndpoint ?? null,
             }),
             signal: AbortSignal.timeout(4000),
           })
           if (!response.ok) throw new Error(`desktop proxy status=${response.status}`)
+          connectDesktopSignaling(currentSession)
           setProxyDesktop(msg.sessionId, msg.country || country)
         } catch (error) {
           const reason = `Desktop proxy unavailable after reconnect: ${error.message}`
@@ -1615,6 +1702,14 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         }).catch(() => {})
       }
 
+      if (msg.type === 'ice_answer' || msg.type === 'ice_candidate' || msg.type === 'direct_failed' || msg.type === 'direct_open') {
+        if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
+          if (msg.type === 'direct_open') currentSession = { ...currentSession, directState: 'direct' }
+          if (msg.type === 'direct_failed') currentSession = { ...currentSession, directState: 'relay' }
+        }
+        forwardRelaySignalToDesktop(msg)
+      }
+
       if (msg.type === 'proxy_response') {
         const requestId = msg.response?.requestId
         const pending = pendingRequests.get(requestId)
@@ -1639,6 +1734,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         currentSession = null
         relayWs = null
         agentSessionId = null
+        closeDesktopSignaling('session_ended')
         if (!_userInitiatedDisconnect && !_sessionRefreshing) {
           broadcastSessionEnded(reason).catch(() => {})
         }
@@ -1689,6 +1785,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         currentSession = null
         relayWs = null
         agentSessionId = null
+        closeDesktopSignaling('relay_closed')
         if (!_userInitiatedDisconnect && !_sessionRefreshing) {
           broadcastSessionEnded(reason).catch(() => {})
         }
@@ -1775,6 +1872,7 @@ async function refreshRequesterSession(reason = 'session refresh') {
     relayWs = null
     currentSession = null
     agentSessionId = null
+    closeDesktopSignaling('session_refresh')
     if (oldWs) {
       oldWs.onclose = null
       oldWs.onerror = null
@@ -1827,6 +1925,15 @@ async function syncDesktopProxySession(session, reason = 'desktop proxy sync') {
       sessionId: session.sessionId,
       relayEndpoint: session.relayEndpoint,
       country: session.country,
+      mandate: session.mandate ?? null,
+      relayPublicKey: session.relayPublicKey ?? null,
+      sessionSigningKey: session.sessionSigningKey ?? null,
+      sessionNonce: session.sessionNonce ?? null,
+      transportTier: session.transportTier ?? 0,
+      directTransport: session.directTransport ?? null,
+      iceEnabled: session.iceEnabled === true,
+      iceServers: session.iceServers ?? [],
+      providerDirectEndpoint: session.providerDirectEndpoint ?? null,
     }),
     signal: AbortSignal.timeout(4000),
   })
@@ -2076,6 +2183,7 @@ async function disconnect() {
   relayWs = null
   currentSession = null
   agentSessionId = null
+  closeDesktopSignaling('disconnect')
   clearProxy()
   fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, { method: 'DELETE' }).catch(() => {})
   _userInitiatedDisconnect = false

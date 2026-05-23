@@ -2503,7 +2503,7 @@ function connectSlot(slot) {
       slot.ws.close(1000)
       return
     }
-    const endpoint = await startDirectTunnelServer()
+    const rtc = getNodeDataChannel()
     const reg = {
       type: 'register_provider',
       userId: config.userId,
@@ -2514,8 +2514,9 @@ function connectSlot(slot) {
       providerKind: 'desktop',
       supportsHttp: true,
       supportsTunnel: true,
-      supportsDirect: !!endpoint,
-      directEndpoint: endpoint,
+      supportsDirect: !!rtc,
+      directTransport: 'webrtc',
+      iceEnabled: !!rtc,
       deviceId: slot.deviceId,
       baseDeviceId: config.baseDeviceId,
     }
@@ -2594,6 +2595,12 @@ function connectSlot(slot) {
       } else if (msg.type === 'session_request') {
         registerDirectSession(slot, msg)
         sendRelayMessage(slot, { type: 'agent_ready', sessionId: msg.sessionId })
+      } else if (msg.type === 'ice_offer') {
+        await handleProviderIceOffer(slot, msg)
+      } else if (msg.type === 'ice_candidate') {
+        handleProviderIceCandidate(msg)
+      } else if (msg.type === 'direct_failed') {
+        closeDirectWebRtcSession(msg.sessionId, msg.reason || 'remote_direct_failed')
       } else if (msg.type === 'proxy_request') {
         slot.requestsHandled++
         syncAggregateState()
@@ -2750,56 +2757,48 @@ function stopRelay() {
 let proxySession = null
 
 const directSessions = new Map()
-let directServer = null
-let directWss = null
-let directEndpoint = null
-let directServerStarting = null
-const DIRECT_FALLBACK_CONNECT_MS = 2500
+const requesterDirectSessions = new Map()
+const DIRECT_ICE_TIMEOUT_MS = 5000
 const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
-const DIRECT_HANDSHAKE_CONTEXT = 'peermesh/direct-handshake/v1'
+const DIRECT_ICE_SERVERS = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun1.l.google.com:19302',
+]
+let nodeDataChannel = undefined
 
-function encodeDirectMandate(mandate) {
-  if (!mandate) return ''
-  return Buffer.from(JSON.stringify(mandate)).toString('base64url')
+function getNodeDataChannel() {
+  if (nodeDataChannel !== undefined) return nodeDataChannel
+  try {
+    nodeDataChannel = require('node-datachannel')
+  } catch (err) {
+    nodeDataChannel = null
+    log.warn('DIRECT', 'node-datachannel unavailable; relay fallback stays active', { err: err.message })
+  }
+  return nodeDataChannel
 }
 
-function canonicalJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort()
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+function normalizeIceServers(iceServers) {
+  const source = Array.isArray(iceServers) && iceServers.length ? iceServers : DIRECT_ICE_SERVERS
+  return source.map((entry) => {
+    if (typeof entry === 'string') return entry
+    if (Array.isArray(entry?.urls)) return entry.urls[0]
+    return entry?.urls
+  }).filter(Boolean)
 }
 
-function mandateDigest(mandate) {
-  const unsignedMandate = { ...(mandate || {}) }
-  delete unsignedMandate.signature
-  return crypto.createHash('sha256').update(canonicalJson(unsignedMandate)).digest('hex')
+function sendDataChannelJson(dc, payload) {
+  const text = JSON.stringify(payload)
+  if (typeof dc?.sendMessage === 'function') dc.sendMessage(text)
+  else if (typeof dc?.send === 'function') dc.send(text)
 }
 
-function directHandshakePayload(mandate) {
-  return canonicalJson({
-    context: DIRECT_HANDSHAKE_CONTEXT,
-    sessionId: mandate?.sessionId ?? null,
-    directChallenge: mandate?.directChallenge ?? null,
-    requesterDeviceId: mandate?.requesterDeviceId ?? null,
-    providerDeviceId: mandate?.providerDeviceId ?? null,
-    providerDirectEndpoint: mandate?.providerDirectEndpoint ?? null,
-    relayFallback: mandate?.relayFallback ?? null,
-    mandateDigest: mandateDigest(mandate),
-  })
+function parseDataChannelJson(raw) {
+  const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString()
+  return JSON.parse(text)
 }
 
-function createDirectProof(mandate) {
-  if (!mandate?.sessionSigningKey) return ''
-  return crypto.createHmac('sha256', String(mandate.sessionSigningKey))
-    .update(directHandshakePayload(mandate))
-    .digest('base64url')
-}
-
-function safeEqualString(a, b) {
-  const left = Buffer.from(String(a))
-  const right = Buffer.from(String(b))
-  return left.length === right.length && crypto.timingSafeEqual(left, right)
+function closePeerConnection(pc) {
+  try { pc?.close?.() } catch {}
 }
 
 function relayProxyUrlForSession(session) {
@@ -2810,64 +2809,18 @@ function relayProxyUrlForSession(session) {
   return `${relayOrigin}/proxy?session=${encodeURIComponent(session.sessionId)}`
 }
 
-function getLanAddress() {
-  const nets = os.networkInterfaces()
-  for (const entries of Object.values(nets)) {
-    for (const entry of entries || []) {
-      if (entry.family === 'IPv4' && !entry.internal) return entry.address
-    }
-  }
-  return '127.0.0.1'
-}
-
-async function startDirectTunnelServer() {
-  if (directEndpoint) return directEndpoint
-  if (directServerStarting) return directServerStarting
-
-  directServerStarting = new Promise((resolve) => {
-    directServer = http.createServer()
-    directWss = new WebSocketServer({ noServer: true })
-
-    directServer.on('upgrade', (req, socket, head) => {
-      const url = new URL(req.url || '/', 'http://localhost')
-      if (url.pathname !== '/tunnel') {
-        socket.destroy()
-        return
-      }
-      directWss.handleUpgrade(req, socket, head, (ws) => directWss.emit('connection', ws, req))
-    })
-
-    directWss.on('connection', handleDirectTunnelConnection)
-    directServer.on('error', (err) => {
-      log.warn('DIRECT', 'direct tunnel server unavailable', { err: err.message })
-      directEndpoint = null
-      resolve(null)
-    })
-
-    directServer.listen(0, '0.0.0.0', () => {
-      const address = directServer.address()
-      const port = typeof address === 'object' && address ? address.port : null
-      directEndpoint = port ? `ws://${getLanAddress()}:${port}/tunnel` : null
-      log.info('DIRECT', 'direct tunnel server listening', { endpoint: directEndpoint })
-      resolve(directEndpoint)
-    })
-  }).finally(() => {
-    directServerStarting = null
-  })
-
-  return directServerStarting
-}
-
 function registerDirectSession(slot, msg) {
   if (!msg?.sessionId || !msg.mandate) return
   directSessions.set(msg.sessionId, {
     slot,
     sessionId: msg.sessionId,
     mandate: msg.mandate,
-    wireMandate: encodeDirectMandate(msg.mandate),
-    directProof: createDirectProof(msg.mandate),
     expiresAt: Number(msg.mandate?.expiresAt ?? 0),
-    connections: new Set(),
+    pc: null,
+    dataChannel: null,
+    providerTunnels: new Map(),
+    iceServers: msg.iceServers ?? msg.mandate?.iceServers ?? DIRECT_ICE_SERVERS,
+    directTransport: msg.directTransport ?? msg.mandate?.directTransport ?? 'webrtc',
     pendingDirectBytes: 0,
     byteReportTimer: null,
   })
@@ -2876,15 +2829,27 @@ function registerDirectSession(slot, msg) {
 function closeDirectSession(sessionId, reason = 'session_ended') {
   const entry = directSessions.get(sessionId)
   if (!entry) return
+  closeDirectWebRtcSession(sessionId, reason)
   flushDirectByteReport(entry)
   if (entry.byteReportTimer) {
     clearTimeout(entry.byteReportTimer)
     entry.byteReportTimer = null
   }
   directSessions.delete(sessionId)
-  for (const ws of entry.connections) {
-    try { ws.close(1000, reason) } catch {}
+}
+
+function closeDirectWebRtcSession(sessionId, reason = 'direct_closed') {
+  const entry = directSessions.get(sessionId)
+  if (!entry) return
+  for (const [, tunnel] of entry.providerTunnels ?? []) {
+    if (tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.destroy()
   }
+  entry.providerTunnels?.clear()
+  try { entry.dataChannel?.close?.() } catch {}
+  closePeerConnection(entry.pc)
+  entry.pc = null
+  entry.dataChannel = null
+  log.info('DIRECT', 'provider WebRTC session closed', { sessionId: sessionId?.slice(0, 8), reason })
 }
 
 function closeDirectSessionsForSlot(slot, reason = 'relay_signaling_lost') {
@@ -2915,89 +2880,314 @@ function queueDirectByteReport(entry, bytes) {
   entry.byteReportTimer = setTimeout(() => flushDirectByteReport(entry), DIRECT_BYTE_REPORT_INTERVAL_MS)
 }
 
-function handleDirectTunnelConnection(ws, req) {
-  const url = new URL(req.url || '/', 'http://localhost')
-  const sessionId = url.searchParams.get('session') || req.headers['x-session-id']
-  const mandateHeader = req.headers['x-mandate']
-  const directProofHeader = req.headers['x-direct-proof']
-  const entry = directSessions.get(sessionId)
-  const directProof = Array.isArray(directProofHeader) ? directProofHeader[0] : directProofHeader
-  if (
-    !entry ||
-    !mandateHeader ||
-    mandateHeader !== entry.wireMandate ||
-    !directProof ||
-    !safeEqualString(directProof, entry.directProof) ||
-    (entry.expiresAt && entry.expiresAt <= Date.now())
-  ) {
-    ws.close(1008, 'Invalid mandate')
+async function handleProviderIceOffer(slot, msg) {
+  const entry = directSessions.get(msg.sessionId)
+  if (!entry || !msg.sdp) return
+  const rtc = getNodeDataChannel()
+  if (!rtc?.PeerConnection) {
+    sendRelayMessage(slot, { type: 'direct_failed', sessionId: msg.sessionId, reason: 'node_datachannel_unavailable' })
     return
   }
 
-  entry.connections.add(ws)
-  let socket = null
-  let opened = false
-  let tunnelTarget = ''
+  closeDirectWebRtcSession(msg.sessionId, 'renegotiate')
+  const pc = new rtc.PeerConnection(`provider-${msg.sessionId}`, { iceServers: normalizeIceServers(msg.iceServers ?? entry.iceServers) })
+  entry.pc = pc
+  entry.providerTunnels = new Map()
 
-  ws.on('message', async (data) => {
-    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
-    if (!opened) {
-      const text = chunk.toString()
-      const match = text.match(/^CONNECT ([^\s]+) HTTP\//)
-      if (!match) {
-        ws.close(1008, 'CONNECT required')
-        return
-      }
-      const [hostname, portStr] = match[1].split(':')
-      const port = Number.parseInt(portStr, 10) || 443
-      tunnelTarget = `${hostname}:${port}`
-      if (!(await isAllowedResolved(hostname, port))) {
-        ws.send('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
-        ws.close(1008, 'Target not allowed')
-        return
-      }
-      sendRelayMessage(entry.slot, { type: 'direct_tunnel_open', sessionId, hostname, port })
-      opened = true
-      entry.slot.requestsHandled++
-      syncAggregateState()
-      socket = net.connect(port, hostname)
-      socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
-      socket.on('connect', () => {
-        socket.setTimeout(0)
-        if (ws.readyState === WebSocket.OPEN) ws.send('HTTP/1.1 200 Connection Established\r\n\r\n')
-      })
-      socket.on('data', (socketChunk) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(socketChunk)
-        addBytes(entry.slot, socketChunk.length)
-        queueDirectByteReport(entry, socketChunk.length)
-      })
-      socket.on('end', () => ws.close(1000))
-      socket.on('close', () => ws.close(1000))
-      socket.on('error', () => ws.close(1011, 'Target connection failed'))
+  pc.onLocalDescription((sdp, type) => {
+    sendRelayMessage(slot, { type: 'ice_answer', sessionId: msg.sessionId, sdp, sdpType: type, candidates: [] })
+  })
+  pc.onLocalCandidate((candidate, mid) => {
+    sendRelayMessage(slot, { type: 'ice_candidate', sessionId: msg.sessionId, candidate: { candidate, sdpMid: mid, mid } })
+  })
+  pc.onStateChange((state) => {
+    if (state === 'failed' || state === 'disconnected') {
+      sendRelayMessage(slot, { type: 'direct_failed', sessionId: msg.sessionId, reason: `ice_${state}` })
+      closeDirectWebRtcSession(msg.sessionId, `ice_${state}`)
+    }
+  })
+  pc.onDataChannel((dc) => bindProviderDataChannel(entry, dc))
+
+  pc.setRemoteDescription(msg.sdp, msg.sdpType || 'offer')
+  for (const candidate of msg.candidates ?? []) addRemoteIceCandidate(pc, candidate)
+}
+
+function handleProviderIceCandidate(msg) {
+  const entry = directSessions.get(msg.sessionId)
+  if (!entry?.pc) return
+  addRemoteIceCandidate(entry.pc, msg.candidate)
+}
+
+function addRemoteIceCandidate(pc, candidate) {
+  const value = typeof candidate === 'string' ? candidate : candidate?.candidate
+  if (!value) return
+  const mid = typeof candidate === 'object' ? (candidate.sdpMid ?? candidate.mid ?? '0') : '0'
+  try { pc.addRemoteCandidate(value, mid) } catch {}
+}
+
+function bindProviderDataChannel(entry, dc) {
+  entry.dataChannel = dc
+  dc.onOpen(() => {
+    sendRelayMessage(entry.slot, { type: 'direct_open', sessionId: entry.sessionId })
+    log.info('DIRECT', 'provider WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
+  })
+  dc.onMessage((raw) => {
+    void handleProviderDataChannelMessage(entry, raw).catch((err) => {
+      log.warn('DIRECT', 'provider data channel message failed', { err: err.message })
+    })
+  })
+  dc.onClosed?.(() => {
+    sendRelayMessage(entry.slot, { type: 'direct_failed', sessionId: entry.sessionId, reason: 'data_channel_closed' })
+  })
+}
+
+async function handleProviderDataChannelMessage(entry, raw) {
+  const msg = parseDataChannelJson(raw)
+  if (msg.type === 'open_tunnel') {
+    const tunnelId = msg.tunnelId || crypto.randomUUID()
+    const hostname = String(msg.hostname || '')
+    const port = Number.parseInt(msg.port || '443', 10) || 443
+    if (!(await isAllowedResolved(hostname, port))) {
+      sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId })
       return
     }
+    sendRelayMessage(entry.slot, { type: 'direct_tunnel_open', sessionId: entry.sessionId, hostname, port })
+    entry.slot.requestsHandled++
+    syncAggregateState()
+    const socket = net.connect(port, hostname)
+    socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
+    entry.providerTunnels.set(tunnelId, { socket, closed: false })
+    socket.on('connect', () => {
+      socket.setTimeout(0)
+      sendDataChannelJson(entry.dataChannel, { type: 'tunnel_ready', tunnelId })
+    })
+    socket.on('data', (chunk) => {
+      sendDataChannelJson(entry.dataChannel, { type: 'tunnel_data', tunnelId, data: chunk.toString('base64') })
+      addBytes(entry.slot, chunk.length)
+      queueDirectByteReport(entry, chunk.length)
+    })
+    socket.on('end', () => closeProviderDirectTunnel(entry, tunnelId, true))
+    socket.on('close', () => entry.providerTunnels.delete(tunnelId))
+    socket.on('error', () => closeProviderDirectTunnel(entry, tunnelId, true))
+    return
+  }
 
-    if (socket && !socket.destroyed) socket.write(chunk)
+  if (msg.type === 'tunnel_data') {
+    const tunnel = entry.providerTunnels.get(msg.tunnelId)
+    if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(Buffer.from(msg.data || '', 'base64'))
+    return
+  }
+
+  if (msg.type === 'tunnel_close') closeProviderDirectTunnel(entry, msg.tunnelId, false)
+}
+
+function closeProviderDirectTunnel(entry, tunnelId, notifyRequester = false) {
+  const tunnel = entry?.providerTunnels?.get(tunnelId)
+  if (!tunnel || tunnel.closed) return
+  tunnel.closed = true
+  entry.providerTunnels.delete(tunnelId)
+  if (notifyRequester && entry.dataChannel) sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId })
+  if (tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.destroy()
+}
+
+function closeRequesterDirectSession(sessionId, reason = 'requester_direct_closed') {
+  const entry = requesterDirectSessions.get(sessionId)
+  if (!entry) return
+  if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
+  for (const [, tunnel] of entry.tunnels) {
+    if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
+      startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
+    }
+  }
+  try { entry.dataChannel?.close?.() } catch {}
+  closePeerConnection(entry.pc)
+  requesterDirectSessions.delete(sessionId)
+  log.info('DIRECT', 'requester WebRTC session closed', { sessionId: sessionId?.slice(0, 8), reason })
+}
+
+async function startRequesterDirectSession(session, signalingWs) {
+  if (!session?.sessionId || session.iceEnabled !== true || session.directTransport !== 'webrtc') {
+    signalingWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session?.sessionId, reason: 'ice_not_enabled' }))
+    return
+  }
+  const rtc = getNodeDataChannel()
+  if (!rtc?.PeerConnection) {
+    signalingWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'node_datachannel_unavailable' }))
+    return
+  }
+
+  closeRequesterDirectSession(session.sessionId, 'restart')
+  const entry = {
+    sessionId: session.sessionId,
+    session,
+    signalingWs,
+    pc: null,
+    dataChannel: null,
+    mode: 'attempting_direct',
+    tunnels: new Map(),
+    fallbackTimer: null,
+  }
+  requesterDirectSessions.set(session.sessionId, entry)
+
+  const pc = new rtc.PeerConnection(`requester-${session.sessionId}`, { iceServers: normalizeIceServers(session.iceServers) })
+  entry.pc = pc
+  pc.onLocalDescription((sdp, type) => {
+    sendRequesterSignal(entry, { type: 'ice_offer', sessionId: entry.sessionId, sdp, sdpType: type, candidates: [] })
+  })
+  pc.onLocalCandidate((candidate, mid) => {
+    sendRequesterSignal(entry, { type: 'ice_candidate', sessionId: entry.sessionId, candidate: { candidate, sdpMid: mid, mid } })
+  })
+  pc.onStateChange((state) => {
+    if (state === 'failed' || state === 'disconnected') switchRequesterDirectToRelay(entry, `ice_${state}`)
   })
 
-  ws.on('close', () => {
-    entry.connections.delete(ws)
-    flushDirectByteReport(entry)
-    if (socket && !socket.destroyed) socket.destroy()
+  const dc = pc.createDataChannel('peermesh-control')
+  entry.dataChannel = dc
+  bindRequesterDataChannel(entry, dc)
+  entry.fallbackTimer = setTimeout(() => switchRequesterDirectToRelay(entry, 'ice_timeout'), DIRECT_ICE_TIMEOUT_MS)
+}
+
+function sendRequesterSignal(entry, payload) {
+  if (entry?.signalingWs?.readyState === WebSocket.OPEN) entry.signalingWs.send(JSON.stringify(payload))
+}
+
+function bindRequesterDataChannel(entry, dc) {
+  dc.onOpen(() => {
+    if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
+    entry.fallbackTimer = null
+    entry.mode = 'direct'
+    sendRequesterSignal(entry, { type: 'direct_open', sessionId: entry.sessionId })
+    log.info('DIRECT', 'requester WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
+    for (const tunnel of entry.tunnels.values()) {
+      if (!tunnel.openedDirect && !tunnel.bridge._relayStarted) openDirectTunnel(entry, tunnel)
+    }
   })
-  ws.on('error', (err) => {
-    log.warn('DIRECT', 'direct tunnel error', { target: tunnelTarget, err: err.message })
-    entry.connections.delete(ws)
-    flushDirectByteReport(entry)
-    if (socket && !socket.destroyed) socket.destroy()
+  dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
+  dc.onClosed?.(() => switchRequesterDirectToRelay(entry, 'data_channel_closed'))
+}
+
+function handleRequesterDataChannelMessage(entry, raw) {
+  const msg = parseDataChannelJson(raw)
+  const tunnel = entry.tunnels.get(msg.tunnelId)
+  if (!tunnel) return
+  if (msg.type === 'tunnel_ready') {
+    tunnel.ready = true
+    tunnel.bridge.readyState = WebSocket.OPEN
+    tunnel.bridge.emit('message', Buffer.from('HTTP/1.1 200 Connection Established\r\n\r\n'))
+    return
+  }
+  if (msg.type === 'tunnel_data') {
+    tunnel.bridge.emit('message', Buffer.from(msg.data || '', 'base64'))
+    return
+  }
+  if (msg.type === 'tunnel_close') {
+    tunnel.bridge.readyState = WebSocket.CLOSED
+    tunnel.bridge.emit('close', 1000, 'direct_tunnel_closed')
+    entry.tunnels.delete(msg.tunnelId)
+  }
+}
+
+function handleRequesterSignalMessage(sessionId, msg) {
+  const entry = requesterDirectSessions.get(sessionId)
+  if (!entry) return
+  if (msg.type === 'ice_answer' && msg.sdp) {
+    try { entry.pc?.setRemoteDescription(msg.sdp, msg.sdpType || 'answer') } catch {}
+    for (const candidate of msg.candidates ?? []) addRemoteIceCandidate(entry.pc, candidate)
+    return
+  }
+  if (msg.type === 'ice_candidate') {
+    addRemoteIceCandidate(entry.pc, msg.candidate)
+    return
+  }
+  if (msg.type === 'direct_failed') {
+    switchRequesterDirectToRelay(entry, msg.reason || 'remote_direct_failed')
+  }
+}
+
+function switchRequesterDirectToRelay(entry, reason) {
+  if (!entry || entry.mode === 'relay') return
+  entry.mode = 'relay'
+  if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
+  entry.fallbackTimer = null
+  sendRequesterSignal(entry, { type: 'direct_failed', sessionId: entry.sessionId, reason })
+  log.warn('DIRECT', 'WebRTC direct unavailable, falling back to relay', { sessionId: entry.sessionId?.slice(0, 8), reason })
+  for (const tunnel of entry.tunnels.values()) {
+    if (!tunnel.ready && !tunnel.bridge._relayStarted) {
+      startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
+    }
+  }
+}
+
+function createTunnelBridge() {
+  const bridge = new EventEmitter()
+  bridge.readyState = WebSocket.CONNECTING
+  bridge._closedByCaller = false
+  bridge._relayStarted = false
+  bridge._sendImpl = null
+  bridge.send = (data) => bridge._sendImpl?.(data)
+  bridge.close = (code, reason) => {
+    bridge._closedByCaller = true
+    bridge._closeImpl?.(code, reason)
+  }
+  bridge.terminate = () => {
+    bridge._closedByCaller = true
+    bridge._terminateImpl?.()
+  }
+  return bridge
+}
+
+function startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen) {
+  if (!relayUrl || bridge._closedByCaller || bridge._relayStarted) return
+  bridge._relayStarted = true
+  const ws = new WebSocket(relayUrl)
+  bridge._sendImpl = (data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data) }
+  bridge._closeImpl = (code, reason) => { if (ws.readyState < WebSocket.CLOSING) ws.close(code, reason) }
+  bridge._terminateImpl = () => ws.terminate?.()
+  ws.on('open', () => {
+    bridge.readyState = ws.readyState
+    ws.send(connectRequest)
+    if (onOpen) onOpen()
+    bridge.emit('open')
   })
+  ws.on('message', data => bridge.emit('message', data))
+  ws.on('close', (code, reason) => {
+    bridge.readyState = ws.readyState
+    bridge.emit('close', code, reason)
+  })
+  ws.on('error', err => bridge.emit('error', err))
+}
+
+function openDirectTunnel(entry, tunnel) {
+  if (!entry?.dataChannel || entry.mode !== 'direct') return false
+  tunnel.openedDirect = true
+  tunnel.bridge._sendImpl = (data) => {
+    sendDataChannelJson(entry.dataChannel, {
+      type: 'tunnel_data',
+      tunnelId: tunnel.tunnelId,
+      data: Buffer.from(data).toString('base64'),
+    })
+  }
+  tunnel.bridge._closeImpl = () => {
+    sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
+    entry.tunnels.delete(tunnel.tunnelId)
+  }
+  tunnel.bridge._terminateImpl = tunnel.bridge._closeImpl
+  sendDataChannelJson(entry.dataChannel, {
+    type: 'open_tunnel',
+    tunnelId: tunnel.tunnelId,
+    hostname: tunnel.hostname,
+    port: tunnel.port,
+  })
+  if (tunnel.onOpen) tunnel.onOpen()
+  tunnel.bridge.emit('open')
+  return true
 }
 
 function openTunnelWs(hostname, port, onOpen) {
   if (!proxySession?.sessionId) return null
-  const useDirect = Number(proxySession.transportTier ?? 0) > 0 &&
-    proxySession.providerDirectEndpoint &&
-    proxySession.mandate
+  const useDirect = proxySession.iceEnabled === true &&
+    proxySession.directTransport === 'webrtc' &&
+    requesterDirectSessions.has(proxySession.sessionId)
   const relayUrl = relayProxyUrlForSession(proxySession)
   const connectRequest = `CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`
 
@@ -3011,82 +3201,25 @@ function openTunnelWs(hostname, port, onOpen) {
     return tunnelWs
   }
 
-  const directUrl = new URL(proxySession.providerDirectEndpoint)
-  directUrl.searchParams.set('session', proxySession.sessionId)
-  const wireMandate = encodeDirectMandate(proxySession.mandate)
-  const directOptions = {
-    headers: {
-      'X-Session-Id': proxySession.sessionId,
-      'X-Mandate': wireMandate,
-      'X-Direct-Proof': createDirectProof(proxySession.mandate),
-    },
+  const directEntry = requesterDirectSessions.get(proxySession.sessionId)
+  const bridge = createTunnelBridge()
+  const tunnel = {
+    tunnelId: crypto.randomUUID(),
+    bridge,
+    hostname,
+    port,
+    relayUrl,
+    connectRequest,
+    onOpen,
+    ready: false,
+    openedDirect: false,
   }
-  const bridge = new EventEmitter()
-  bridge.readyState = WebSocket.CONNECTING
-  bridge._active = null
-  bridge._closedByCaller = false
-  bridge.send = (data) => {
-    if (bridge._active?.readyState === WebSocket.OPEN) bridge._active.send(data)
+  directEntry.tunnels.set(tunnel.tunnelId, tunnel)
+  if (directEntry.mode === 'direct') {
+    openDirectTunnel(directEntry, tunnel)
+  } else if (directEntry.mode === 'relay') {
+    startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen)
   }
-  bridge.close = (code, reason) => {
-    bridge._closedByCaller = true
-    if (bridge._active && bridge._active.readyState < WebSocket.CLOSING) bridge._active.close(code, reason)
-  }
-  bridge.terminate = () => {
-    bridge._closedByCaller = true
-    bridge._active?.terminate?.()
-  }
-
-  let fallbackStarted = false
-  const start = (url, options, transport) => {
-    let opened = false
-    let receivedAnyMessage = false
-    let connectTimer = null
-    const ws = new WebSocket(url, options)
-    bridge._active = ws
-    bridge.readyState = ws.readyState
-
-    const fallbackToRelay = (reason) => {
-      if (transport !== 'direct' || fallbackStarted || bridge._closedByCaller || receivedAnyMessage || !relayUrl) return false
-      fallbackStarted = true
-      try { ws.terminate?.() } catch {}
-      log.warn('DIRECT', 'direct tunnel unavailable, falling back to relay', { reason, direct: directUrl.toString(), relay: relayUrl })
-      start(relayUrl, undefined, 'relay')
-      return true
-    }
-
-    if (transport === 'direct') {
-      connectTimer = setTimeout(() => {
-        if (!opened) fallbackToRelay('connect_timeout')
-      }, DIRECT_FALLBACK_CONNECT_MS)
-    }
-
-    ws.on('open', () => {
-      opened = true
-      if (connectTimer) clearTimeout(connectTimer)
-      bridge.readyState = ws.readyState
-      ws.send(connectRequest)
-      if (onOpen) onOpen()
-      bridge.emit('open')
-    })
-    ws.on('message', (data) => {
-      receivedAnyMessage = true
-      bridge.emit('message', data)
-    })
-    ws.on('close', (code, reason) => {
-      if (connectTimer) clearTimeout(connectTimer)
-      bridge.readyState = ws.readyState
-      if (fallbackToRelay(opened ? 'closed_before_response' : 'closed_before_open')) return
-      bridge.emit('close', code, reason)
-    })
-    ws.on('error', (err) => {
-      if (connectTimer) clearTimeout(connectTimer)
-      if (fallbackToRelay(opened ? 'error_after_open' : 'error_before_open')) return
-      bridge.emit('error', err)
-    })
-  }
-
-  start(directUrl.toString(), directOptions, 'direct')
   return bridge
 }
 
@@ -3446,6 +3579,9 @@ const controlServer = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const data = JSON.parse(body)
+        if (proxySession?.sessionId && proxySession.sessionId !== data.sessionId) {
+          closeRequesterDirectSession(proxySession.sessionId, 'proxy_session_replaced')
+        }
         proxySession = data
         log.info('CONTROL', 'proxy-session SET', { sessionId: data.sessionId?.slice(0,8), relay: data.relayEndpoint })
         logState('proxy-session-set')
@@ -3456,12 +3592,44 @@ const controlServer = http.createServer((req, res) => {
   }
   if (req.method === 'DELETE' && url.pathname === '/proxy-session') {
     log.info('CONTROL', 'proxy-session CLEARED')
+    if (proxySession?.sessionId) closeRequesterDirectSession(proxySession.sessionId, 'proxy_session_cleared')
     proxySession = null
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }))
     return
   }
   log.warn('CONTROL', `404 ${req.method} ${url.pathname}`)
   res.writeHead(404); res.end()
+})
+
+const controlSignalingWss = new WebSocketServer({ noServer: true })
+controlSignalingWss.on('connection', (ws, req) => {
+  const url = new URL(req.url || '/', `http://127.0.0.1:${CONTROL_PORT}`)
+  const sessionId = url.searchParams.get('session')
+  if (!sessionId || !proxySession?.sessionId || sessionId !== proxySession.sessionId) {
+    ws.close(1008, 'Invalid session')
+    return
+  }
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString())
+      handleRequesterSignalMessage(sessionId, msg)
+    } catch {}
+  })
+  ws.on('close', () => closeRequesterDirectSession(sessionId, 'local_signaling_closed'))
+  startRequesterDirectSession(proxySession, ws).catch((err) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'direct_failed', sessionId, reason: err.message }))
+    }
+  })
+})
+
+controlServer.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url || '/', `http://127.0.0.1:${CONTROL_PORT}`)
+  if (url.pathname !== '/webrtc-signaling') {
+    socket.destroy()
+    return
+  }
+  controlSignalingWss.handleUpgrade(req, socket, head, (ws) => controlSignalingWss.emit('connection', ws, req))
 })
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Tray Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

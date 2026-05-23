@@ -59,22 +59,27 @@ test('mandate relay schema and relay assignment path are present', () => {
   assert.match(relay, /providerDirectEndpoint/)
 
   assert.match(serviceWorker, /supportsDirect: true/)
+  assert.match(serviceWorker, /iceEnabled: true/)
+  assert.match(serviceWorker, /connectDesktopSignaling/)
   assert.match(serviceWorker, /providerDirectEndpoint/)
   assert.match(serviceWorker, /sessionSigningKey/)
 })
 
-test('desktop and CLI expose mandated direct tunnel capability behind relay fallback', () => {
+test('desktop and CLI expose STUN direct data channel capability behind relay fallback', () => {
   const cli = readRepoFile('cli/index.js')
   const desktop = readRepoFile('desktop/main.js')
 
   for (const source of [cli, desktop]) {
-    assert.match(source, /new WebSocketServer\(\{ noServer: true \}\)/)
+    assert.match(source, /node-datachannel/)
+    assert.match(source, /DIRECT_ICE_SERVERS/)
     assert.match(source, /registerDirectSession/)
-    assert.match(source, /X-Mandate/)
-    assert.match(source, /X-Direct-Proof/)
-    assert.match(source, /supportsDirect: !!endpoint/)
+    assert.match(source, /handleProviderIceOffer/)
+    assert.match(source, /startRequesterDirectSession/)
+    assert.match(source, /webrtc-signaling/)
+    assert.match(source, /supportsDirect: !!rtc/)
+    assert.match(source, /iceEnabled: !!rtc/)
     assert.match(source, /closeDirectSessionsForSlot\(slot, 'relay_signaling_lost'\)/)
-    assert.match(source, /direct tunnel unavailable, falling back to relay/)
+    assert.match(source, /WebRTC direct unavailable, falling back to relay/)
     assert.match(source, /type: 'direct_bytes'/)
     assert.match(source, /type: 'direct_tunnel_open'/)
   }
@@ -85,7 +90,11 @@ test('relay assigns direct-first mandated sessions with relay fallback and direc
 
   assert.match(relay, /provider\?\.supportsDirect === true/)
   assert.doesNotMatch(relay, /samePublicNetwork/)
+  assert.match(relay, /DIRECT_ICE_SERVERS/)
+  assert.match(relay, /const transportTier = canUseDirectTransport\(requester, provider\) \? 1 : 0/)
   assert.match(relay, /transportPreference: transportTier > 0 \? \['direct', 'relay'\] : \['relay'\]/)
+  assert.match(relay, /case 'ice_offer'/)
+  assert.match(relay, /case 'direct_failed'/)
   assert.match(relay, /relayFallbackRequired: true/)
   assert.match(relay, /case 'direct_tunnel_open'/)
   assert.match(relay, /case 'direct_bytes'/)
