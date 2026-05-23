@@ -8,13 +8,15 @@
  *   node build-save-relays.mjs
  */
 
-import { readFileSync, writeFileSync } from 'fs'
+import { readFileSync, writeFileSync, copyFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { RELAY_ENDPOINTS, ENV } from './lib/env.mjs'
 
 const __dirname      = dirname(fileURLToPath(import.meta.url))
 const RELAY_LIB_PATH = join(__dirname, 'lib', 'relay-endpoints.ts')
+const RELAY_MANDATE_SRC  = join(__dirname, 'lib', 'mandate-relay.mjs')
+const RELAY_MANDATE_DEST = join(__dirname, 'relay', 'lib', 'mandate-relay.mjs')
 
 if (RELAY_ENDPOINTS.length === 0) {
   console.error(`\n  ERROR: No relay endpoints resolved for PEERMESH_ENV=${ENV}\n`)
@@ -105,6 +107,10 @@ console.log(`
 
   Next steps:
   1. Commit lib/relay-endpoints.ts
-  2. Update Vercel env var RELAY_ENDPOINTS=${relayEndpointsStr}
-  3. Deploy: npx vercel --prod
+  2. Update Render env var RELAY_ENDPOINTS=${relayEndpointsStr}
+  3. Deploy: git push origin main
 `)
+
+// Sync mandate-relay.mjs into relay/lib for Docker build
+copyFileSync(RELAY_MANDATE_SRC, RELAY_MANDATE_DEST)
+console.log('  ✓ Synced lib/mandate-relay.mjs → relay/lib/mandate-relay.mjs')
