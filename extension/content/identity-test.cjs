@@ -17,6 +17,7 @@ const { URL: NodeURL } = require('url')
 const PERSONA = process.argv[3] || 'mobile'
 const IS_MOB  = PERSONA === 'mobile'
 
+const STREAMING_TEST_URL = 'https://www.netflix.com/watch/123456'
 const FINGERPRINT_TEST_URL = 'https://abrahamjuliot.github.io/creepjs/tests/workers.html'
 
 const P = {
@@ -140,10 +141,10 @@ global.outerWidth = 1098; global.outerHeight = 618
 global.devicePixelRatio = 1.75
 global.visualViewport   = { width: 1098, height: 529.1428833007812, scale: 1, offsetTop: 0, offsetLeft: 0, pageTop: 0, pageLeft: 0 }
 global.location = {
-  href: FINGERPRINT_TEST_URL,
-  origin: 'https://abrahamjuliot.github.io',
-  hostname: 'abrahamjuliot.github.io',
-  pathname: '/creepjs/tests/workers.html',
+  href: STREAMING_TEST_URL,
+  origin: 'https://www.netflix.com',
+  hostname: 'www.netflix.com',
+  pathname: '/watch/123456',
 }
 global.locationbar  = { visible: false }; global.menubar     = { visible: false }
 global.personalbar  = { visible: false }; global.scrollbars  = { visible: false }
@@ -286,8 +287,8 @@ function g(obj, k) { try { return obj[k] } catch { return '<err>' } }
 
 // ── Run tests ─────────────────────────────────────────────────────────────────
 test('Load', 'identity.js loads without error', loadError === null, true)
-test('Safety', 'worker spoof host gate present', /function shouldPatchWorkers\b/.test(identitySource), true)
-test('Safety', 'worker spoof limited to test hosts', /WORKER_SPOOF_HOSTS/.test(identitySource) && /browserleaks\.com/.test(identitySource) && /abrahamjuliot\.github\.io/.test(identitySource), true)
+test('Safety', 'worker spoof enabled for active profile', /function shouldPatchWorkers\b/.test(identitySource) && /return !!profile/.test(identitySource), true)
+test('Safety', 'fingerprint service worker bypass remains host-gated', /function isFingerprintTestHost\b/.test(identitySource) && /WORKER_SPOOF_HOSTS/.test(identitySource) && /browserleaks\.com/.test(identitySource), true)
 test('Safety', 'service worker fallback patch present', /function patchServiceWorkerRegister\b/.test(identitySource), true)
 test('Safety', 'service worker fallback limited to creepjs scripts', /shouldBypassServiceWorker/.test(identitySource) && /creep\.js/.test(identitySource) && /worker_service\.js/.test(identitySource), true)
 test('Safety', 'no inline scrollbar style injector', !/appendChild\(style\)|style\.textContent/.test(identitySource), true)
@@ -414,8 +415,56 @@ const dedicatedWorkerSource = Array.isArray(dedicatedWorkerBlob?.parts)
 test('Workers', 'worker wrapping', dedicatedWorker.url.startsWith('blob:peermesh-'), true)
 test('Workers', 'bootstrap keeps original script url', /worker\.js/.test(dedicatedWorkerSource), true)
 test('Workers', 'bootstrap re-wraps nested workers', /bootWorker\.toString\(\)/.test(dedicatedWorkerSource), true)
+test('Workers', 'bootstrap spoofs geolocation', /patchGeolocation/.test(dedicatedWorkerSource) && /profile\.lat/.test(dedicatedWorkerSource), true)
+test('Workers', 'bootstrap spoofs geolocation permission', /descriptor\?\.name === 'geolocation'/.test(dedicatedWorkerSource), true)
 const sharedWorker = new SharedWorker('https://abrahamjuliot.github.io/creepjs/tests/worker_shared.js')
 test('Workers', 'shared worker wrapping', sharedWorker.url.startsWith('blob:peermesh-'), true)
+
+const workerRuntimeP = (async () => {
+  try {
+    if (typeof buildWorkerBootstrap !== 'function') {
+      test('Workers', 'bootstrap function available', false, true)
+      return
+    }
+
+    const workerContext = {
+      self: null,
+      navigator: {
+        geolocation: {
+          getCurrentPosition(cb) { cb({ coords: { latitude: 0, longitude: 0, accuracy: 10 } }) },
+          watchPosition(cb) { cb({ coords: { latitude: 0, longitude: 0, accuracy: 10 } }); return 1 },
+          clearWatch() {},
+        },
+        permissions: {
+          query: async () => ({ state: 'prompt' }),
+        },
+      },
+      location: {
+        href: 'https://www.netflix.com/worker.js',
+        origin: 'https://www.netflix.com',
+      },
+      URL: NodeURL,
+      setTimeout,
+      Blob: global.Blob,
+      importScripts() {},
+    }
+    workerContext.self = workerContext
+
+    const workerBootstrap = buildWorkerBootstrap(P, null, 'classic', `
+      self.navigator.geolocation.getCurrentPosition((position) => { self.__geoResult = position })
+      self.navigator.permissions.query({ name: 'geolocation' }).then((status) => { self.__geoPermissionState = status.state })
+    `)
+
+    vm.runInNewContext(workerBootstrap, workerContext, { filename: 'worker-bootstrap.js', timeout: 1000 })
+    await new Promise(resolve => setImmediate(resolve))
+
+    test('Workers', 'runtime geolocation latitude near profile.lat', Math.abs(workerContext.__geoResult?.coords?.latitude - P.lat) < 0.1, true)
+    test('Workers', 'runtime geolocation longitude near profile.lon', Math.abs(workerContext.__geoResult?.coords?.longitude - P.lon) < 0.1, true)
+    test('Workers', 'runtime geolocation permission granted', workerContext.__geoPermissionState, 'granted')
+  } catch (error) {
+    test('Workers', 'runtime bootstrap geolocation executes', error?.message || error, 'no error')
+  }
+})()
 
 // Orientation
 test('Orient', 'type matches persona', g(screen, 'orientation')?.type, IS_MOB ? 'portrait-primary' : 'landscape-primary')
@@ -466,6 +515,13 @@ const enumP = navigator.mediaDevices.enumerateDevices().then(devs => {
   test('Devices', 'audio outputs', devs.filter(d=>d.kind==='audiooutput').length, IS_MOB ? 1 : 2)
 }).catch(() => test('Devices', 'enumerateDevices resolves', false, true))
 
+Object.assign(global.location, {
+  href: FINGERPRINT_TEST_URL,
+  origin: 'https://abrahamjuliot.github.io',
+  hostname: 'abrahamjuliot.github.io',
+  pathname: '/creepjs/tests/workers.html',
+})
+
 const swP = navigator.serviceWorker.register('https://abrahamjuliot.github.io/creepjs/tests/worker_service.js')
   .then(() => {
     test('ServiceWorker', 'worker_service.js registration bypassed', false, true)
@@ -479,7 +535,7 @@ const swP = navigator.serviceWorker.register('https://abrahamjuliot.github.io/cr
   })
   .catch(() => test('ServiceWorker', 'register resolves', false, true))
 
-Promise.all([battP, enumP, swP]).then(render)
+Promise.all([battP, enumP, swP, workerRuntimeP]).then(render)
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function render() {

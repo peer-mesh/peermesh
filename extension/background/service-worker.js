@@ -66,6 +66,7 @@ async function getLiveRelays() {
 const NATIVE_HOST = 'com.peermesh.desktop'
 const CONTROL_PORT = 7654
 const REQUESTER_SESSION_REFRESH_MS = 45 * 60 * 1000
+const DESKTOP_PROXY_SYNC_MS = 60 * 1000
 const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 4
 const DESKTOP_LAUNCH_WAIT_MS = 8000
 
@@ -1459,6 +1460,8 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           privateCode: privateCode || null,
           connectionType: connectionType || (privateCode ? 'private' : 'public'),
           createdAt: Date.now(),
+          reconnecting: false,
+          lastDesktopSyncAt: 0,
         }
 
         const desktopStatus = await getDesktopHelperStatusHttp()
@@ -1502,7 +1505,17 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         // Use the relayEndpoint from the message if provided Ã¢â‚¬â€ it's the relay the
         // requester is already on, so the desktop proxy-session must point there.
         const reconnectRelay = msg.relayEndpoint || relayEndpoint
-        if (currentSession) currentSession = { ...currentSession, sessionId: msg.sessionId, relayEndpoint: reconnectRelay, createdAt: Date.now() }
+        if (currentSession) {
+          currentSession = {
+            ...currentSession,
+            sessionId: msg.sessionId,
+            country: msg.country || currentSession.country,
+            relayEndpoint: reconnectRelay,
+            createdAt: Date.now(),
+            reconnecting: false,
+            lastDesktopSyncAt: 0,
+          }
+        }
         log('info', `[CONNECT] session_reconnected attempt=${msg.attempt} newSession=${msg.sessionId?.slice(0,8)} relay=${reconnectRelay}`)
 
         // Update desktop local proxy with new sessionId and correct relayEndpoint
@@ -1527,6 +1540,19 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
         // Update proxy auth credentials with new sessionId
         chrome.storage.session.set({ proxySessionId: msg.sessionId })
+        chrome.storage.local.get(['session']).then(({ session }) => {
+          if (!session) return
+          chrome.storage.local.set({
+            session: {
+              ...session,
+              id: msg.sessionId,
+              sessionId: msg.sessionId,
+              country: msg.country || session.country || country,
+              relayEndpoint: reconnectRelay,
+              reconnectedAt: new Date().toISOString(),
+            },
+          })
+        }).catch(() => {})
 
         // Notify popup so it can show a brief "reconnected" indicator
         chrome.runtime.sendMessage({ type: 'SESSION_RECONNECTED', sessionId: msg.sessionId, attempt: msg.attempt }).catch(() => {})
@@ -1542,6 +1568,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         const attempt = Number(msg.attempt) || 1
         const maxAttempts = Number(msg.maxAttempts) || 0
         const reason = `Provider reconnecting${maxAttempts ? ` (${attempt}/${maxAttempts})` : ''}`
+        if (currentSession) currentSession = { ...currentSession, reconnecting: true }
         setProxyFailClosed(reason)
         chrome.runtime.sendMessage({ type: 'SESSION_RECONNECTING', reason, attempt, maxAttempts }).catch(() => {})
         broadcastBrowsingStatus({
@@ -1753,6 +1780,25 @@ async function refreshRequesterSession(reason = 'session refresh') {
   }
 }
 
+async function syncDesktopProxySession(session, reason = 'desktop proxy sync') {
+  if (!session?.sessionId || !session?.relayEndpoint) {
+    throw new Error('missing active session for desktop proxy sync')
+  }
+
+  const response = await fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: session.sessionId,
+      relayEndpoint: session.relayEndpoint,
+      country: session.country,
+    }),
+    signal: AbortSignal.timeout(4000),
+  })
+  if (!response.ok) throw new Error(`${reason}: desktop proxy status=${response.status}`)
+  setProxyDesktop(session.sessionId, session.country)
+}
+
 async function applyHeaderRules(session) {
   if (!chrome.declarativeNetRequest?.updateDynamicRules) return
   const profile = buildSpoofProfile(typeof session === 'string' ? { country: session } : session)
@@ -1866,6 +1912,9 @@ function restoreWebRTC() {
 
 function setProxyDesktop(sessionId, country) {
   proxyFailClosed = false
+  if (currentSession?.sessionId === sessionId) {
+    currentSession = { ...currentSession, lastDesktopSyncAt: Date.now(), reconnecting: false }
+  }
   chrome.proxy.settings.set(
     {
       value: {
@@ -2102,26 +2151,32 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       agentSessionId = null
       broadcastSessionEnded(reason).catch(() => {})
     } else if (relayWs && relayWs.readyState === WebSocket.OPEN) {
-      // Desktop proxy health check: relay WS alive but 127.0.0.1:7655 may be dead.
-      // Without this, a desktop crash mid-session shows broken pages with no ERR badge.
-      try {
-        await fetch(`http://127.0.0.1:${CONTROL_PORT}/health`, { signal: AbortSignal.timeout(1500) })
-      } catch {
-        const reason = 'Desktop proxy unreachable - reopen the desktop app'
-        log('warn', '[SESSION] desktop proxy health check failed mid-session')
-        setProxyFailClosed(reason)
-        broadcastBrowsingStatus({ state: 'blocked', title: 'PeerMesh desktop offline', message: reason }).catch(() => {})
-      }
-    } else if (Date.now() - (currentSession.createdAt || 0) > REQUESTER_SESSION_REFRESH_MS) {
-      try {
-        await refreshRequesterSession('scheduled pre-expiry refresh')
-      } catch (error) {
-        const reason = error.message || 'PeerMesh session refresh failed'
-        setProxyFailClosed(reason)
-        currentSession = null
-        relayWs = null
-        agentSessionId = null
-        broadcastSessionEnded(reason).catch(() => {})
+      if (!currentSession.reconnecting && Date.now() - (currentSession.createdAt || 0) > REQUESTER_SESSION_REFRESH_MS) {
+        try {
+          await refreshRequesterSession('scheduled pre-expiry refresh')
+        } catch (error) {
+          const reason = error.message || 'PeerMesh session refresh failed'
+          setProxyFailClosed(reason)
+          currentSession = null
+          relayWs = null
+          agentSessionId = null
+          broadcastSessionEnded(reason).catch(() => {})
+        }
+      } else if (!currentSession.reconnecting) {
+        // Desktop proxy health check: relay WS alive but 127.0.0.1:7655 may be dead.
+        // Re-assert the local proxy session periodically so a desktop restart does
+        // not leave Chrome pointing at a helper that forgot the active relay session.
+        try {
+          await fetch(`http://127.0.0.1:${CONTROL_PORT}/health`, { signal: AbortSignal.timeout(1500) })
+          if (proxyFailClosed || Date.now() - (currentSession.lastDesktopSyncAt || 0) > DESKTOP_PROXY_SYNC_MS) {
+            await syncDesktopProxySession(currentSession, proxyFailClosed ? 'desktop proxy recovery' : 'desktop proxy keepalive')
+          }
+        } catch {
+          const reason = 'Desktop proxy unreachable - reopen the desktop app'
+          log('warn', '[SESSION] desktop proxy health check failed mid-session')
+          setProxyFailClosed(reason)
+          broadcastBrowsingStatus({ state: 'blocked', title: 'PeerMesh desktop offline', message: reason }).catch(() => {})
+        }
       }
     }
   }

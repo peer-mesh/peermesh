@@ -12,7 +12,7 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
 
   const { data: session, error } = await adminClient
     .from('sessions')
-    .select('id, user_id, status, target_country, relay_endpoint, request_access_mode, request_auth_kind, api_key_id, provider_kind, provider_device_id, started_at, ended_at, bytes_used, disconnect_reason, provider_avg_mbps, provider_last_mbps, connection_quality, reconnect_attempts, reconnect_reason, last_reconnect_at, signed_receipt')
+    .select('id, user_id, status, target_country, relay_endpoint, request_access_mode, request_auth_kind, api_key_id, provider_kind, provider_device_id, started_at, ended_at, last_activity_at, bytes_used, disconnect_reason, provider_avg_mbps, provider_last_mbps, connection_quality, reconnect_attempts, reconnect_reason, last_reconnect_at, signed_receipt')
     .eq('id', sessionId)
     .maybeSingle()
 
@@ -34,6 +34,7 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
       providerDeviceId: session.provider_device_id,
       startedAt: session.started_at,
       endedAt: session.ended_at,
+      lastActivityAt: session.last_activity_at,
       bytesUsed: Number(session.bytes_used ?? 0),
       disconnectReason: session.disconnect_reason,
       providerAvgMbps: Number(session.provider_avg_mbps ?? 0),

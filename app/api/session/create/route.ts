@@ -410,6 +410,7 @@ export async function POST(req: Request) {
       target_country: country,
       relay_endpoint: relay,
       status: 'pending',
+      last_activity_at: new Date().toISOString(),
     })
     .select('id')
     .single()

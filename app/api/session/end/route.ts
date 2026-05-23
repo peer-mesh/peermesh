@@ -90,6 +90,7 @@ export async function PATCH(req: Request) {
     connectionQuality,
     reconnectAttempts,
     reconnectReason,
+    lastActivityAt,
   } = await req.json().catch(() => ({}))
 
   const resolvedId = dbSessionId ?? sessionId ?? null
@@ -101,6 +102,7 @@ export async function PATCH(req: Request) {
     || !!connectionQuality
     || typeof reconnectAttempts === 'number'
     || typeof reconnectReason === 'string'
+    || typeof lastActivityAt === 'string'
     || typeof status === 'string'
 
   if (!resolvedId || !hasPatchField) {
@@ -111,6 +113,7 @@ export async function PATCH(req: Request) {
   }
 
   const patch: Record<string, unknown> = {}
+  const parsedLastActivityAt = typeof lastActivityAt === 'string' ? new Date(lastActivityAt) : null
   if (providerUserId) patch.provider_id = providerUserId
   if (providerKind) patch.provider_kind = providerKind
   if (providerDeviceId) patch.provider_device_id = providerDeviceId
@@ -124,10 +127,17 @@ export async function PATCH(req: Request) {
   if (connectionQuality && typeof connectionQuality === 'object') patch.connection_quality = connectionQuality
   if (typeof reconnectAttempts === 'number') patch.reconnect_attempts = Math.max(0, reconnectAttempts)
   if (typeof reconnectReason === 'string') patch.reconnect_reason = reconnectReason
+  if (parsedLastActivityAt && !Number.isNaN(parsedLastActivityAt.getTime())) {
+    patch.last_activity_at = parsedLastActivityAt.toISOString()
+  }
   if (typeof reconnectAttempts === 'number' || typeof reconnectReason === 'string' || status === 'reconnecting') {
     patch.last_reconnect_at = new Date().toISOString()
   }
   if (typeof status === 'string') patch.status = status
+
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ error: 'No valid session fields to update' }, { status: 400 })
+  }
 
   const { error, count } = await adminClient
     .from('sessions')

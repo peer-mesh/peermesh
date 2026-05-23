@@ -242,19 +242,19 @@ function applyIdentity(profile) {
     })
   }
 
-  const fingerprintTestHost = shouldPatchWorkers()
+  const fingerprintTestHost = isFingerprintTestHost()
 
   patchTimezone(profile)
   patchIntl(profile)
   patchNavigator(profile, defineGetter, pluginData, userAgentData, connectionObject)
   patchScreen(profile, screenProfile, viewportProfile, defineGetter)
-  // Blob worker bootstraps break strict CSP and challenge pages, so worker spoofing
-  // is only enabled on known fingerprint test hosts. On those same hosts, short-circuit
-  // fingerprint-worker service worker registration so tests fall back to shared/dedicated workers.
-  if (fingerprintTestHost) {
+  // Keep dedicated/shared worker identity aligned with the main page whenever a
+  // PeerMesh session profile is active. Service worker registration bypasses
+  // remain host-gated because blocking production SWs would break normal sites.
+  if (shouldPatchWorkers(profile)) {
     patchWorkers(profile)
-    patchServiceWorkerRegister()
   }
+  patchServiceWorkerRegister()
   patchWebRTC()
   patchCanvas(seed, seededOffset, fingerprintTestHost)
   patchGeolocation(defineGetter, fakeGeolocationPosition)
@@ -433,13 +433,17 @@ function patchScreen(profile, screenProfile, viewportProfile, defineGetter) {
 
 
 
-function shouldPatchWorkers() {
+function isFingerprintTestHost() {
   const hostname = String(window.location?.hostname || '').toLowerCase()
   return WORKER_SPOOF_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))
 }
 
+function shouldPatchWorkers(profile) {
+  return !!profile
+}
+
 function shouldBypassServiceWorker(scriptURL) {
-  if (!shouldPatchWorkers()) return false
+  if (!isFingerprintTestHost()) return false
 
   try {
     const pathname = new URL(String(scriptURL), window.location.href).pathname.toLowerCase()
@@ -691,6 +695,57 @@ function buildWorkerBootstrap(profile, scriptURL, type, inlineScriptSource = nul
       defineGetter(workerNavigator, 'userAgentData', () => userAgentData)
       defineGetter(workerNavigator, 'connection', () => connectionObject)
     }
+    const makeGeolocationPosition = () => ({
+      coords: {
+        latitude: profile.lat + ((((seed * 7) % 100) - 50) / 10000),
+        longitude: profile.lon + ((((seed * 13) % 100) - 50) / 10000),
+        accuracy: 20 + (seed % 80),
+        altitude: null,
+        altitudeAccuracy: null,
+        heading: null,
+        speed: null,
+      },
+      timestamp: Date.now(),
+    })
+    const patchGeolocation = () => {
+      const workerNavigator = self.navigator
+      if (!workerNavigator?.geolocation) return
+
+      const geolocation = {
+        getCurrentPosition(success) {
+          if (typeof success === 'function') success(makeGeolocationPosition())
+        },
+        watchPosition(success) {
+          if (typeof success === 'function') success(makeGeolocationPosition())
+          return 0
+        },
+        clearWatch() {},
+      }
+
+      defineGetter(workerNavigator, 'geolocation', () => geolocation)
+    }
+    const patchPermissions = () => {
+      const permissions = self.navigator?.permissions
+      const nativeQuery = permissions?.query?.bind(permissions)
+      if (!nativeQuery) return
+
+      const permissionStatus = {
+        state: 'granted',
+        onchange: null,
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent() { return false },
+      }
+
+      try {
+        permissions.query = function query(descriptor) {
+          if (descriptor?.name === 'geolocation') {
+            return Promise.resolve(permissionStatus)
+          }
+          return nativeQuery(descriptor)
+        }
+      } catch {}
+    }
     const patchPerformance = () => {
       const nativeNow = globalThis.Performance?.prototype?.now
       if (!nativeNow) return
@@ -908,6 +963,8 @@ function buildWorkerBootstrap(profile, scriptURL, type, inlineScriptSource = nul
     patchTimezone()
     patchIntl()
     patchNavigator()
+    patchGeolocation()
+    patchPermissions()
     patchPerformance()
     patchCanvas()
     patchWebGL()

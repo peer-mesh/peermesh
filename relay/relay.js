@@ -9,6 +9,7 @@ const API_BASE    = process.env.API_BASE ?? ''
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET ?? RELAY_SECRET
 const SCHEDULER_TICK_INTERVAL_MS = Math.max(0, parseInt(process.env.SCHEDULER_TICK_INTERVAL_MS ?? '60000', 10) || 0)
+const SESSION_DB_TOUCH_MS = Math.max(30_000, parseInt(process.env.SESSION_DB_TOUCH_MS ?? '60000', 10) || 60_000)
 
 const peers = new Map()
 const sessions = new Map()
@@ -415,6 +416,7 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     byteBurstSamples: [],
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
+    lastDbActivitySyncAt: 0,
   })
 
   send(provider, { type: 'session_request', sessionId })
@@ -423,6 +425,7 @@ function createSession(requesterWs, provider, country, dbSessionId, {
   }
   log(requesterWs.peerId.slice(0,8), `SESSION_CREATED id=${sessionId.slice(0,8)} provider=${provider.peerId.slice(0,8)} country=${country}`)
   syncSessionMetadata(sessions.get(sessionId), 'relay_assign')
+  touchSessionActivity(sessions.get(sessionId), 'relay_assign', true)
 
   // If the provider doesn't respond with agent_ready within 10s, treat it as
   // unresponsive and attempt reconnect to a different provider.
@@ -468,6 +471,7 @@ function syncSessionMetadata(session, reason = 'update') {
     connectionQuality: session.connectionQuality ?? null,
     reconnectAttempts: session.reconnectAttempts ?? null,
     reconnectReason: session.reconnectReason ?? null,
+    lastActivityAt: new Date().toISOString(),
   }
 
   fetch(`${API_BASE}/api/session/end`, {
@@ -484,6 +488,29 @@ function syncSessionMetadata(session, reason = 'update') {
       log('RELAY', `SESSION_METADATA_${reason.toUpperCase()} dbSessionId=${session.dbSessionId?.slice(0,8)} provider=${session.providerUserId?.slice(0,8) ?? 'none'} host=${session.targetHost ?? 'none'}`)
     })
     .catch((err) => logErr('RELAY', `SESSION_METADATA_${reason.toUpperCase()} failed dbSessionId=${session.dbSessionId?.slice(0,8)}`, err))
+}
+
+function touchSessionActivity(session, reason = 'activity', force = false) {
+  if (!API_BASE || !RELAY_SECRET || !session?.dbSessionId) return
+  const now = Date.now()
+  if (!force && now - (session.lastDbActivitySyncAt || 0) < SESSION_DB_TOUCH_MS) return
+  session.lastDbActivitySyncAt = now
+
+  fetch(`${API_BASE}/api/session/end`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-relay-secret': RELAY_SECRET },
+    body: JSON.stringify({
+      dbSessionId: session.dbSessionId,
+      lastActivityAt: new Date(now).toISOString(),
+    }),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        log('RELAY', `SESSION_TOUCH_${reason.toUpperCase()} status=${res.status} dbSessionId=${session.dbSessionId?.slice(0,8)} body=${body.slice(0,120)}`)
+      }
+    })
+    .catch((err) => logErr('RELAY', `SESSION_TOUCH_${reason.toUpperCase()} failed dbSessionId=${session.dbSessionId?.slice(0,8)}`, err))
 }
 
 function recordSessionHost(session, hostname, reason = 'target_host') {
@@ -542,6 +569,7 @@ function sendSessionQuality(session, reason = 'traffic', force = false) {
   session.lastQualitySentAt = now
   session.lastQualityBytes = quality.transferredBytes
   session.lastQualityTime = now
+  touchSessionActivity(session, reason)
   const requester = peers.get(session.requesterId)
   if (!requester || requester.readyState !== WebSocket.OPEN) return
   send(requester, {
@@ -1509,6 +1537,7 @@ const SESSION_IDLE_MS = 90_000
 const sessionWatchdog = setInterval(() => {
   const now = Date.now()
   for (const [sessionId, session] of sessions) {
+    touchSessionActivity(session, 'watchdog')
     if (now - session.lastActivity < SESSION_IDLE_MS) continue
     const provider = peers.get(session.providerId)
     const requester = peers.get(session.requesterId)

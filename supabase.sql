@@ -133,12 +133,14 @@ create table sessions (
   signed_receipt text,                                                      -- HMAC accountability receipt
   disconnect_reason text,
   started_at     timestamptz default now(),
-  ended_at       timestamptz
+  ended_at       timestamptz,
+  last_activity_at timestamptz default now()
 );
 
 create index sessions_status_idx on sessions (status) where status = 'active';
 create index sessions_provider_status_idx on sessions (provider_id, status, started_at desc);
 create index sessions_provider_device_status_idx on sessions (provider_device_id, status) where status = 'active';
+create index sessions_status_activity_idx on sessions (status, last_activity_at);
 
 -- Abuse reports
 create table abuse_reports (
@@ -585,9 +587,22 @@ end;
 $$ language plpgsql security definer;
 
 create or replace function cleanup_stale_sessions() returns void as $$
-  update sessions set status = 'ended', ended_at = now()
-  where status in ('pending', 'active', 'reconnecting')
-    and started_at < now() - interval '30 minutes';
+  update sessions
+  set status = 'ended',
+      ended_at = coalesce(ended_at, now()),
+      disconnect_reason = coalesce(disconnect_reason, 'stale_session')
+  where (
+      status = 'pending'
+      and started_at < now() - interval '10 minutes'
+    )
+    or (
+      status = 'reconnecting'
+      and coalesce(last_activity_at, started_at) < now() - interval '10 minutes'
+    )
+    or (
+      status = 'active'
+      and coalesce(last_activity_at, started_at) < now() - interval '5 minutes'
+    );
 $$ language sql security definer;
 
 create or replace function reset_monthly_bandwidth() returns void as $$
@@ -771,6 +786,9 @@ alter table sessions add column if not exists requested_rpm integer;
 alter table sessions add column if not exists requested_period_hours integer;
 alter table sessions add column if not exists requested_session_mode text;
 alter table sessions add column if not exists estimated_cost_usd numeric(14,4) not null default 0;
+alter table sessions add column if not exists last_activity_at timestamptz default now();
+update sessions set last_activity_at = coalesce(last_activity_at, started_at, now()) where last_activity_at is null;
+create index if not exists sessions_status_activity_idx on sessions (status, last_activity_at);
 
 alter table abuse_reports add column if not exists reported_user_id uuid references profiles(id) on delete set null;
 alter table abuse_reports add column if not exists report_subject text not null default 'provider';
