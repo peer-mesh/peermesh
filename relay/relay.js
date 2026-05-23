@@ -14,7 +14,7 @@ import {
   getReachedTokenIndexes,
   getRelaySigningMaterial,
   verifyCommitmentReveal,
-} from '../lib/mandate-relay.mjs'
+} from './lib/mandate-relay.mjs'
 
 const PORT        = parseInt(process.env.PORT ?? '8080')
 const API_BASE    = process.env.API_BASE ?? ''
