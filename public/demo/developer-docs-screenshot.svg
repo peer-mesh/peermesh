@@ -11,7 +11,7 @@
   <text x="330" y="218" fill="#00ff88" font-family="Consolas,monospace" font-size="16">GET /api/version</text>
   <text x="330" y="254" fill="#666680" font-family="Arial,sans-serif" font-size="18">Current API, CLI, desktop, and extension versions. Public endpoint.</text>
   <rect x="300" y="324" width="820" height="236" rx="8" fill="#13131a" stroke="#1e1e2a"/>
-  <text x="330" y="366" fill="#00ff88" font-family="Consolas,monospace" font-size="16">curl --url https://peermesh-beta.vercel.app/api/version</text>
+  <text x="330" y="366" fill="#00ff88" font-family="Consolas,monospace" font-size="16">curl --url https://peermesh-0unl.onrender.com/api/version</text>
   <text x="330" y="416" fill="#e8e8f0" font-family="Consolas,monospace" font-size="16">{ "api": { "version": "v1" }, "desktop": "1.0.95" }</text>
   <rect x="300" y="596" width="190" height="42" rx="8" fill="#00ff88"/>
   <text x="350" y="623" fill="#000" font-family="Consolas,monospace" font-size="14" font-weight="700">TRY API</text>

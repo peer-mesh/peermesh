@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const cliPath = join(repoRoot, 'cli', 'index.js')
-const apiBase = 'https://peermesh-beta.vercel.app'
+const apiBase = 'https://peermesh-0unl.onrender.com'
 
 function makeHome(config = {}) {
   const home = mkdtempSync(join(tmpdir(), 'peermesh-cli-test-'))

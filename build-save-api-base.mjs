@@ -161,6 +161,22 @@ patch('app/developers/api-docs/page.tsx',
   currentBase,
   'const BASE')
 
+patch('app/api/extension-auth/route.ts',
+  currentBase,
+  'APP_URL fallback')
+
+patch('desktop/renderer/app.js',
+  currentBase,
+  'appBaseUrl fallback')
+
+patch('tests/cli-behavior.test.mjs',
+  currentBase,
+  'apiBase test constant')
+
+patch('public/demo/developer-docs-screenshot.svg',
+  currentBase,
+  'demo SVG curl example')
+
 // ── Fly.toml (relay env) ──────────────────────────────────────────────────────
 
 console.log()

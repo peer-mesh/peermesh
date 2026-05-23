@@ -1531,7 +1531,7 @@ document.getElementById('copy-private-share').addEventListener('click', async ()
 
 document.getElementById('copy-private-link').addEventListener('click', async () => {
   if (!privateShare?.code) return
-  const baseUrl = String(api.appBaseUrl || 'https://peermesh-beta.vercel.app').replace(/\/$/, '')
+  const baseUrl = String(api.appBaseUrl || 'https://peermesh-0unl.onrender.com').replace(/\/$/, '')
   const link = `${baseUrl}/dashboard?privateCode=${encodeURIComponent(privateShare.code)}`
   try {
     await navigator.clipboard.writeText(link)

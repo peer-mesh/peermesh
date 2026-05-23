@@ -9,7 +9,7 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 }
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-beta.vercel.app'
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'https://peermesh-0unl.onrender.com'
 const AUTH_HANDOFF_TTL_MS = 10 * 60 * 1000
 
 function generateDeviceCode(): string {
