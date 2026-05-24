@@ -11,6 +11,7 @@ type WalletSummary = {
     role: string
     contribution_credits_bytes: number
     wallet_balance_usd: number
+    outstanding_balance_usd: number | null
     wallet_pending_payout_usd: number
     payout_currency: string | null
   }
@@ -132,6 +133,9 @@ export default function BillingPageClient() {
   const [payoutAccountName, setPayoutAccountName] = useState('')
   const [payoutBeneficiaryName, setPayoutBeneficiaryName] = useState('')
   const [payoutBranchCode, setPayoutBranchCode] = useState('')
+  const walletBalanceUsd = Number(summary?.profile.wallet_balance_usd ?? 0)
+  const outstandingBalanceUsd = Number(summary?.profile.outstanding_balance_usd ?? 0)
+  const netWalletUsd = walletBalanceUsd - outstandingBalanceUsd
 
   const callbackStatus = searchParams.get('status')
   const callbackTransactionId = searchParams.get('transaction_id') ?? searchParams.get('transactionId')
@@ -473,9 +477,14 @@ export default function BillingPageClient() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
         <div style={sectionStyle}>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>USD WALLET</div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '28px', color: 'var(--accent)' }}>
-            {loading ? '...' : `$${Number(summary?.profile.wallet_balance_usd ?? 0).toFixed(2)}`}
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '28px', color: netWalletUsd < 0 ? '#ff8080' : 'var(--accent)' }}>
+            {loading ? '...' : `${netWalletUsd < 0 ? '-' : ''}$${Math.abs(netWalletUsd).toFixed(2)}`}
           </div>
+          {!loading && outstandingBalanceUsd > 0 ? (
+            <div style={{ fontSize: '12px', color: '#ffb0b0' }}>
+              Owed: ${outstandingBalanceUsd.toFixed(2)}. Add funds to clear the balance.
+            </div>
+          ) : null}
         </div>
         <div style={sectionStyle}>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>CONTRIBUTION CREDITS</div>

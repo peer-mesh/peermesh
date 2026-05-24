@@ -65,10 +65,10 @@ async function getLiveRelays() {
 }
 const NATIVE_HOST = 'com.peermesh.desktop'
 const CONTROL_PORT = 7654
-const REQUESTER_SESSION_REFRESH_MS = 45 * 60 * 1000
+const REQUESTER_SESSION_REFRESH_MS = 23 * 60 * 60 * 1000
 const DESKTOP_PROXY_SYNC_MS = 60 * 1000
-const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 4
-const DESKTOP_LAUNCH_WAIT_MS = 8000
+const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 12
+const DESKTOP_LAUNCH_WAIT_MS = 15000
 
 let relayWs = null
 let desktopSignalWs = null
@@ -318,6 +318,8 @@ function snapshotRequesterSession(session) {
     quality: session.quality || null,
     connectionType: session.connectionType || 'public',
     refreshedAt: session.refreshedAt || null,
+    startedAt: session.startedAt || session.createdAt || null,
+    createdAt: session.createdAt || session.startedAt || null,
   }
 }
 
@@ -1620,6 +1622,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           directState: msg.directState ?? (msg.iceEnabled ? 'attempting_direct' : 'relay'),
           providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
           createdAt: Date.now(),
+          startedAt: new Date().toISOString(),
           reconnecting: false,
           lastDesktopSyncAt: 0,
         }
@@ -1696,7 +1699,8 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
             iceServers: msg.iceServers ?? currentSession.iceServers ?? [],
             directState: msg.directState ?? (msg.iceEnabled ? 'attempting_direct' : currentSession.directState ?? 'relay'),
             providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession.providerDirectEndpoint ?? null,
-            createdAt: Date.now(),
+            createdAt: currentSession.createdAt || Date.now(),
+            startedAt: currentSession.startedAt || new Date().toISOString(),
             reconnecting: false,
             lastDesktopSyncAt: 0,
           }
@@ -1990,6 +1994,8 @@ async function refreshRequesterSession(reason = 'session refresh') {
       country: data.country || previous.country,
       relayEndpoint: data.relayEndpoint,
       connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public'),
+      startedAt: previous.startedAt || previous.createdAt || new Date().toISOString(),
+      createdAt: previous.createdAt || Date.now(),
       refreshedAt: new Date().toISOString(),
     }
     lastRequesterSession = session

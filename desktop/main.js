@@ -4409,7 +4409,6 @@ ipcMain.handle('accept-provider-terms', async (_, { checkOnly } = {}) => {
 async function bootstrapNativeHostMode() {
   await app.whenReady()
   log.info('PROCESS', '=== NATIVE HOST START ===', { argv: process.argv.slice(1).join(' ') })
-  await initializeDesktopRuntime('native_host')
   runNativeHostMode()
 }
 

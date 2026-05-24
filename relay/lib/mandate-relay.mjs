@@ -13,7 +13,7 @@ import {
 export const MANDATE_VERSION = 1
 export const BYTE_TOKEN_GRANULARITY = 10 * 1024 * 1024
 export const RECEIPT_PERIOD_MS = 10_000
-export const MANDATE_TTL_MS = 60 * 60_000
+export const MANDATE_TTL_MS = 24 * 60 * 60_000
 export const DIRECT_HANDSHAKE_CONTEXT = 'peermesh/direct-handshake/v1'
 export const RELAY_ANCHOR_CONTEXT = 'peermesh/relay-anchor/v1'
 export const RELAY_ANCHOR_INTERVAL_MS = 1_000

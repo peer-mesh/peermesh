@@ -136,7 +136,7 @@ export async function getWalletSummary(userId: string) {
   const [{ data: profile, error: profileError }, { data: ledger }, { data: payments }, { data: payouts }] = await Promise.all([
     adminClient
       .from('profiles')
-      .select('role, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd, payout_currency')
+      .select('role, contribution_credits_bytes, wallet_balance_usd, outstanding_balance_usd, wallet_pending_payout_usd, payout_currency')
       .eq('id', userId)
       .single(),
     adminClient

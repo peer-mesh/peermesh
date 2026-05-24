@@ -211,7 +211,7 @@ function parseSlashTrio(name, defaults) {
 const TUNNEL_WINDOW_MS     = getEnvInt('RELAY_TUNNEL_WINDOW_MS', 60_000)
 const BYTE_BURST_WINDOW_MS = getEnvInt('RELAY_BYTE_BURST_WINDOW_MS', 60_000)
 
-const [TUNNELS_HIGH, TUNNELS_MED, TUNNELS_LOW]   = parseSlashTrio('RELAY_TUNNELS_HIGH_MED_LOW', [300, 200, 50])
+const [TUNNELS_HIGH, TUNNELS_MED, TUNNELS_LOW]   = parseSlashTrio('RELAY_TUNNELS_HIGH_MED_LOW', [1200, 800, 300])
 const [BYTES_HIGH_MB, BYTES_MED_MB, BYTES_LOW_MB] = parseSlashTrio('RELAY_BYTES_HIGH_MED_LOW_MB', [750, 250, 60])
 const [SESSIONS_HIGH, SESSIONS_MED, SESSIONS_LOW] = parseSlashTrio('RELAY_SESSIONS_HIGH_MED_LOW', [8, 3, 1])
 
@@ -850,14 +850,12 @@ function canOpenTunnel(session) {
   }
   session.tunnelOpenCount = (session.tunnelOpenCount ?? 0) + 1
   if (session.tunnelOpenCount <= limits.maxTunnelsPerMinute) return true
-  session.disconnectReason = 'security_tunnel_rate_limit'
-  logSecurityEvent('session_security_ended', session, {
-    reason: session.disconnectReason,
+  logSecurityEvent('session_tunnel_rate_observed', session, {
+    reason: 'security_tunnel_rate_limit',
     tunnelOpenCount: session.tunnelOpenCount,
     maxTunnelsPerMinute: limits.maxTunnelsPerMinute,
   })
-  endRelaySession(session, session.sessionId ?? null, 'security_tunnel_rate_limit')
-  return false
+  return true
 }
 
 function recordSessionBytes(session, byteCount, direction = 'unknown') {

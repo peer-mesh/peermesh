@@ -45,6 +45,7 @@ function getHelperMismatchError(helper = state.helper) {
 }
 const FREE_TIER_MESSAGE = 'FREE LAYER - Enable sharing above to connect publicly, or fund your USD wallet to browse without sharing.'
 const DAILY_LIMIT_MIN_MB = 1024
+const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 12
 
 function withSharingHeaders(token, contentType = true) {
   const headers = {}
@@ -512,6 +513,7 @@ async function refreshRuntimeStatus() {
     const helper = ownedHelper(status.helper || null, state.user)
     state.isSharing = helperSharingActive(helper)
     state.sharePending = helperSharingPending(helper)
+    if (helper?.available && /desktop/i.test(state.error || '')) state.error = null
     if (state.isSharing) state.privateShareRestartRequired = false
     const baseDeviceId = ownedHelper(status.helper || null, state.user)?.baseDeviceId ?? null
     if (baseDeviceId) applyPrivateShareRows(state.privateShares, baseDeviceId, state.selectedPrivateSlot)
@@ -1287,8 +1289,11 @@ function renderDashboard(app) {
 
 async function requireDesktopForBrowsing() {
   const status = await chrome.runtime.sendMessage({ type: 'GET_DESKTOP_REQUIRED_STATUS' }).catch(() => null)
-  if (status?.available) return true
-  state.error = 'PeerMesh Desktop required. Open the desktop app, then retry. If it is not installed, download the latest desktop app.'
+  if (status?.available) {
+    if (/desktop/i.test(state.error || '')) state.error = null
+    return true
+  }
+  state.error = 'PeerMesh Desktop is starting or unavailable. Keep the desktop app installed and retry in a few seconds.'
   state.reconnectStatus = null
   render()
   return false
@@ -1296,7 +1301,7 @@ async function requireDesktopForBrowsing() {
 
 async function createSessionWithOnDemandRetry({ authToken, isPrivateConnect, privateCode }) {
   let lastQueuedMessage = null
-  const attempts = isPrivateConnect ? 4 : 1
+  const attempts = isPrivateConnect ? PRIVATE_ON_DEMAND_MAX_ATTEMPTS : 1
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const res = await fetch(`${API}/api/session/create`, {
       method: 'POST',
@@ -1320,7 +1325,7 @@ async function createSessionWithOnDemandRetry({ authToken, isPrivateConnect, pri
         lastQueuedMessage = data.error ?? 'Private provider is starting. Retrying...'
         state.reconnectStatus = data.providerReachable
           ? 'Private provider is reachable. Starting sharing and retrying...'
-          : 'Private provider is offline. On-demand start queued; waiting for it to come online...'
+          : 'Private on-demand start queued. Waiting for the provider to come online...'
         state.error = null
         render()
         const retryMs = Math.max(3000, Math.min(30000, Number(data.retryAfterSeconds ?? 5) * 1000))

@@ -434,6 +434,18 @@ function formatPanelMbps(value) {
   return `${speed >= 10 ? speed.toFixed(1) : speed.toFixed(2)} Mbps`
 }
 
+function formatPanelDuration(startedAt) {
+  const started = typeof startedAt === 'number' ? startedAt : new Date(startedAt || 0).getTime()
+  if (!Number.isFinite(started) || started <= 0) return '0m'
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - started) / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  return `${seconds}s`
+}
+
 function stopSessionPanelPolling() {
   if (!sessionPanelTimer) return
   clearInterval(sessionPanelTimer)
@@ -466,6 +478,7 @@ function renderSessionPanelStatus(status = {}) {
   const bytesUsed = quality?.transferredBytes != null ? formatPanelBytes(quality.transferredBytes) : '0B'
   const provider = quality?.providerKind || helper?.source || 'unknown'
   const sessionId = session?.sessionId || session?.id || ''
+  const runtime = session ? formatPanelDuration(session.startedAt || session.createdAt) : '0m'
   const failReason = status.failClosedReason || (status.failClosed ? 'Traffic is blocked to protect your real connection.' : '')
 
   panel.querySelector('[data-pm-status]').textContent = state.label
@@ -478,6 +491,7 @@ function renderSessionPanelStatus(status = {}) {
   panel.querySelector('[data-pm-bytes]').textContent = bytesUsed
   panel.querySelector('[data-pm-provider]').textContent = provider
   panel.querySelector('[data-pm-session]').textContent = sessionId ? sessionId.slice(0, 8) : 'none'
+  panel.querySelector('[data-pm-runtime]').textContent = runtime
   panel.querySelector('[data-pm-helper]').textContent = helper?.available
     ? `${helper.source || 'desktop'} ${helper.running ? 'sharing' : 'ready'}`
     : 'not available'
@@ -555,6 +569,7 @@ function showSessionPanel() {
       <div><div style="color:#777b8f;font-size:10px">BYTES USED</div><div data-pm-bytes style="margin-top:3px">0B</div></div>
       <div><div style="color:#777b8f;font-size:10px">PROVIDER</div><div data-pm-provider style="margin-top:3px">unknown</div></div>
       <div><div style="color:#777b8f;font-size:10px">SESSION</div><div data-pm-session style="margin-top:3px">none</div></div>
+      <div><div style="color:#777b8f;font-size:10px">ACTIVE TIME</div><div data-pm-runtime style="margin-top:3px;color:#00ff88">0m</div></div>
       <div><div style="color:#777b8f;font-size:10px">LOCAL HELPER</div><div data-pm-helper style="margin-top:3px">checking</div></div>
       <div style="grid-column:1 / -1;color:#ffaa00;font-size:11px;line-height:1.5;min-height:16px" data-pm-reason></div>
     </div>
@@ -562,12 +577,10 @@ function showSessionPanel() {
       <button id="peermesh-panel-disconnect" style="display:none;border:1px solid rgba(255,96,96,0.45);background:transparent;color:#ff6060;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:11px">DISCONNECT</button>
       <button id="peermesh-panel-unblock" style="display:none;border:1px solid rgba(255,170,0,0.4);background:transparent;color:#ffaa00;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:11px">UNBLOCK BROWSER</button>
       <span style="font-size:10px;color:#777b8f">Ctrl+Shift+P to toggle</span>
-      <button id="peermesh-session-panel-dismiss" style="border:none;background:transparent;color:#9090a8;cursor:pointer;font:inherit;font-size:10px;padding:0">DISMISS</button>
     </div>
   `
   body.appendChild(panel)
   document.getElementById('peermesh-session-panel-close')?.addEventListener('click', closeSessionPanel)
-  document.getElementById('peermesh-session-panel-dismiss')?.addEventListener('click', closeSessionPanel)
   document.getElementById('peermesh-panel-disconnect')?.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
     closeSessionPanel()
@@ -585,7 +598,7 @@ function showSessionPanel() {
     try {
       const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' })
       const json = JSON.stringify(status)
-      if (json === _lastStatusJson) return
+      if (json === _lastStatusJson && !status?.session) return
       _lastStatusJson = json
       renderSessionPanelStatus(status || {})
     } catch {
