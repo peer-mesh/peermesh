@@ -322,6 +322,7 @@ function createSlotState(index) {
     connectedAt: null,
     activeTunnels: new Map(),
     lastRelay: null,
+    relaySupportsBinaryTunnel: false,
   }
 }
 
@@ -684,6 +685,7 @@ function closeTunnel(slot, tunnelId, notifyRelay = false) {
   const tunnel = slot.activeTunnels.get(tunnelId)
   if (!tunnel || tunnel.closed) return
   tunnel.closed = true
+  clearRelayBackpressure(tunnel)
   slot.activeTunnels.delete(tunnelId)
   activeTunnels.delete(tunnelId)
   if (notifyRelay) sendRelayMessage(slot, { type: 'tunnel_close', tunnelId })
@@ -2341,12 +2343,91 @@ async function isAllowedResolved(hostname, port = 443) {
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Fetch handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
+const RELAY_BINARY_TUNNEL_DATA = 0x01
+const RELAY_WS_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
+const RELAY_WS_BUFFER_LOW_BYTES = 512 * 1024
+const RELAY_WS_BUFFER_CHECK_MS = 50
+const ADD_BYTES_SYNC_INTERVAL_MS = 2000
+let _lastAggregateSync = 0
+
+function getRelayTunnelIdBytes(tunnelId) {
+  return Buffer.from(String(tunnelId || '').replace(/-/g, '').padEnd(32, '0').slice(0, 32), 'ascii')
+}
+
+function encodeRelayTunnelDataBinary(tunnelId, chunk, idBytes = null) {
+  const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+  const tunnelIdBytes = idBytes || getRelayTunnelIdBytes(tunnelId)
+  const frame = Buffer.allocUnsafe(1 + 32 + payload.length)
+  frame[0] = RELAY_BINARY_TUNNEL_DATA
+  tunnelIdBytes.copy(frame, 1)
+  payload.copy(frame, 33)
+  return frame
+}
+
+function decodeRelayTunnelDataBinary(buf) {
+  const idHex = buf.slice(1, 33).toString('ascii')
+  return {
+    type: 'tunnel_data',
+    tunnelId: `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`,
+    data: buf.slice(33),
+    binary: true,
+  }
+}
+
+function getRelayBufferedAmount(ws) {
+  return Math.max(0, Number(ws?.bufferedAmount) || 0)
+}
+
+function clearRelayBackpressure(tunnel) {
+  if (tunnel?.relayBackpressureTimer) {
+    clearInterval(tunnel.relayBackpressureTimer)
+    tunnel.relayBackpressureTimer = null
+  }
+  if (tunnel) tunnel.pausedForRelay = false
+}
+
+function scheduleRelayBackpressureCheck(slot, tunnel) {
+  if (!slot?.ws || !tunnel || tunnel.closed || tunnel.relayBackpressureTimer) return
+  tunnel.pausedForRelay = true
+  if (tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.pause()
+  tunnel.relayBackpressureTimer = setInterval(() => {
+    const relayReady = slot.ws?.readyState === WebSocket.OPEN
+    if (!relayReady || tunnel.closed || getRelayBufferedAmount(slot.ws) <= RELAY_WS_BUFFER_LOW_BYTES) {
+      clearRelayBackpressure(tunnel)
+      if (relayReady && !tunnel.closed && !tunnel.pausedByRelay && tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.resume()
+    }
+  }, RELAY_WS_BUFFER_CHECK_MS)
+}
+
+function applyRelayBackpressure(slot, tunnel) {
+  if (!slot?.ws || !tunnel || tunnel.closed) return
+  if (getRelayBufferedAmount(slot.ws) > RELAY_WS_BUFFER_HIGH_BYTES) {
+    scheduleRelayBackpressureCheck(slot, tunnel)
+  }
+}
+
+function sendRelayTunnelData(slot, tunnel, tunnelId, chunk) {
+  if (slot.ws?.readyState !== WebSocket.OPEN) return false
+  if (slot.relaySupportsBinaryTunnel) {
+    if (!tunnel.relayTunnelIdBytes) tunnel.relayTunnelIdBytes = getRelayTunnelIdBytes(tunnelId)
+    slot.ws.send(encodeRelayTunnelDataBinary(tunnelId, chunk, tunnel.relayTunnelIdBytes), { binary: true })
+  } else {
+    slot.ws.send(JSON.stringify({ type: 'tunnel_data', tunnelId, data: chunk.toString('base64') }))
+  }
+  applyRelayBackpressure(slot, tunnel)
+  return true
+}
+
 function addBytes(slot, bytes) {
   slot.sessionBytes += bytes
   _pendingBytesByDevice.set(slot.deviceId, (_pendingBytesByDevice.get(slot.deviceId) ?? 0) + bytes)
   void flushPendingBytes()
-  syncAggregateState()
-  enforceLocalLimit()
+  const now = Date.now()
+  if (now - _lastAggregateSync >= ADD_BYTES_SYNC_INTERVAL_MS) {
+    _lastAggregateSync = now
+    syncAggregateState()
+    enforceLocalLimit()
+  }
 }
 
 async function handleFetch(slot, request) {
@@ -2517,6 +2598,7 @@ function connectSlot(slot) {
       providerKind: 'desktop',
       supportsHttp: true,
       supportsTunnel: true,
+      supportsBinaryTunnel: true,
       supportsDirect: !!rtc,
       directTransport: 'webrtc',
       iceEnabled: !!rtc,
@@ -2537,17 +2619,21 @@ function connectSlot(slot) {
 
     slot.ws.on('ping', () => { try { slot.ws.pong() } catch {} })
 
-    slot.ws.on('message', async (data) => {
+    slot.ws.on('message', async (data, isBinary) => {
     try {
-      const msg = JSON.parse(data.toString())
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      const msg = (isBinary || buf[0] === RELAY_BINARY_TUNNEL_DATA)
+        ? decodeRelayTunnelDataBinary(buf)
+        : JSON.parse(buf.toString())
       if (msg.type === 'tunnel_data' || msg.type === 'proxy_ws_data') {
-        log.debug('RELAY', `RECV ${msg.type}`, { slot: slot.index, tunnelId: msg.tunnelId?.slice(0,8), sessionId: msg.sessionId?.slice(0,8), bytes: msg.data?.length })
+        log.debug('RELAY', `RECV ${msg.type}`, { slot: slot.index, tunnelId: msg.tunnelId?.slice(0,8), sessionId: msg.sessionId?.slice(0,8), bytes: Buffer.isBuffer(msg.data) ? msg.data.length : msg.data?.length })
       } else {
         logRelay('RECV', msg.type, { slot: slot.index, sessionId: msg.sessionId?.slice(0,8), tunnelId: msg.tunnelId?.slice(0,8), message: msg.message, hostname: msg.hostname, port: msg.port })
       }
 
       if (msg.type === 'registered') {
         slot.running = true
+        slot.relaySupportsBinaryTunnel = msg.binaryTunnel === true
         slot.lastRelay = relay
         slot.connectedAt = new Date().toISOString()
         syncAggregateState()
@@ -2619,12 +2705,12 @@ function connectSlot(slot) {
         }
         const socket = net.connect(msg.port, msg.hostname)
         socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
-        const tunnel = { socket, closed: false, sessionId: msg.sessionId ?? null, slotIndex: slot.index }
+        const tunnel = { socket, closed: false, sessionId: msg.sessionId ?? null, slotIndex: slot.index, relayTunnelIdBytes: getRelayTunnelIdBytes(msg.tunnelId), relayBackpressureTimer: null, pausedForRelay: false }
         slot.activeTunnels.set(msg.tunnelId, tunnel)
         activeTunnels.set(msg.tunnelId, tunnel)
         socket.on('connect', () => { socket.setTimeout(0); sendRelayMessage(slot, { type: 'tunnel_ready', tunnelId: msg.tunnelId }) })
         socket.on('data', (chunk) => {
-          sendRelayMessage(slot, { type: 'tunnel_data', tunnelId: msg.tunnelId, data: chunk.toString('base64') })
+          sendRelayTunnelData(slot, tunnel, msg.tunnelId, chunk)
           addBytes(slot, chunk.length)
         })
         socket.on('end', () => closeTunnel(slot, msg.tunnelId, true))
@@ -2632,7 +2718,21 @@ function connectSlot(slot) {
         socket.on('error', () => closeTunnel(slot, msg.tunnelId, true))
       } else if (msg.type === 'tunnel_data') {
         const tunnel = slot.activeTunnels.get(msg.tunnelId)
-        if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(Buffer.from(msg.data, 'base64'))
+        if (tunnel?.socket && !tunnel.socket.destroyed) {
+          tunnel.socket.write(Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data || '', 'base64'))
+        }
+      } else if (msg.type === 'tunnel_pause') {
+        const tunnel = slot.activeTunnels.get(msg.tunnelId)
+        if (tunnel?.socket && !tunnel.socket.destroyed) {
+          tunnel.pausedByRelay = true
+          tunnel.socket.pause()
+        }
+      } else if (msg.type === 'tunnel_resume') {
+        const tunnel = slot.activeTunnels.get(msg.tunnelId)
+        if (tunnel?.socket && !tunnel.socket.destroyed) {
+          tunnel.pausedByRelay = false
+          if (!tunnel.pausedForRelay) tunnel.socket.resume()
+        }
       } else if (msg.type === 'tunnel_close') {
         closeTunnel(slot, msg.tunnelId, false)
       } else if (msg.type === 'session_ended') {

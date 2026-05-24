@@ -1357,12 +1357,22 @@ async function connectSession() {
   state.reconnectStatus = null
   render()
 
+  let preparedFailClosedReconnect = false
   try {
+    if (state.failClosed) {
+      const prepared = await chrome.runtime.sendMessage({ type: 'PREPARE_RECONNECT' }).catch(() => null)
+      preparedFailClosedReconnect = !!prepared?.cleared
+    }
     // Always prefer the long-lived desktop token for relay auth.
     // supabaseToken is a short-lived Supabase JWT (1h) that may be stale in storage.
     const authToken = state.user.token || state.supabaseToken
     const created = await createSessionWithOnDemandRetry({ authToken, isPrivateConnect, privateCode })
-    if (created?.aborted) return
+    if (created?.aborted) {
+      if (preparedFailClosedReconnect) {
+        await chrome.runtime.sendMessage({ type: 'RESTORE_FAIL_CLOSED', reason: 'PeerMesh reconnect was interrupted' }).catch(() => {})
+      }
+      return
+    }
     const data = created.data
 
     const response = await chrome.runtime.sendMessage({
@@ -1390,6 +1400,9 @@ async function connectSession() {
     await chrome.storage.local.set({ session: state.session, connectionType: state.connectionType })
   } catch (err) {
     state.error = err.message === 'Failed to fetch' ? 'Network error - could not reach server' : err.message
+    if (preparedFailClosedReconnect && !state.session) {
+      await chrome.runtime.sendMessage({ type: 'RESTORE_FAIL_CLOSED', reason: state.error }).catch(() => {})
+    }
   } finally {
     state.connecting = false
     render()

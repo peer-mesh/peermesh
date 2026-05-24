@@ -74,6 +74,7 @@ let relayWs = null
 let desktopSignalWs = null
 let desktopSignalSessionId = null
 let currentSession = null
+let lastRequesterSession = null
 let agentSessionId = null
 let proxyFailClosed = false
 let supabaseToken = null
@@ -307,17 +308,27 @@ function log(level, ...args) {
 
 function getLogs() { return [..._logs] }
 
-function getPublicRequesterSession() {
-  if (!currentSession) return null
+function snapshotRequesterSession(session) {
+  if (!session) return null
   return {
-    id: currentSession.sessionId,
-    sessionId: currentSession.sessionId,
-    country: currentSession.country,
-    relayEndpoint: currentSession.relayEndpoint,
-    quality: currentSession.quality || null,
-    connectionType: currentSession.connectionType || 'public',
-    refreshedAt: currentSession.refreshedAt || null,
+    id: session.sessionId || session.id || null,
+    sessionId: session.sessionId || session.id || null,
+    country: session.country || null,
+    relayEndpoint: session.relayEndpoint || null,
+    quality: session.quality || null,
+    connectionType: session.connectionType || 'public',
+    refreshedAt: session.refreshedAt || null,
   }
+}
+
+function rememberRequesterSession(session = currentSession) {
+  const snapshot = snapshotRequesterSession(session)
+  if (snapshot?.sessionId) lastRequesterSession = snapshot
+  return snapshot
+}
+
+function getPublicRequesterSession() {
+  return snapshotRequesterSession(currentSession) || (proxyFailClosed ? lastRequesterSession : null)
 }
 
 async function broadcastSessionEnded(reason = 'Peer connection dropped') {
@@ -343,6 +354,50 @@ async function broadcastBrowsingStatus(status) {
   } catch {}
 }
 
+function relayControlHost(endpoint) {
+  if (!endpoint) return null
+  try {
+    return new URL(String(endpoint).replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')).hostname
+  } catch {
+    return null
+  }
+}
+
+function setFailClosedControlPath(reason, relayEndpoints = []) {
+  return new Promise((resolve) => {
+    const hosts = Array.from(new Set([APP_HOST, ...relayEndpoints.map(relayControlHost)].filter(Boolean)))
+    const hostChecks = hosts.map(host => `host === ${JSON.stringify(host)}`).join(' || ') || 'false'
+    const pacScript = `
+      function FindProxyForURL(url, host) {
+        if (host === 'localhost' || host === '127.0.0.1' || isPlainHostName(host)) return 'DIRECT';
+        if (${hostChecks}) return 'DIRECT';
+        return 'PROXY 127.0.0.1:9';
+      }
+    `
+    chrome.proxy.settings.set(
+      { value: { mode: 'pac_script', pacScript: { data: pacScript } }, scope: 'regular' },
+      () => {
+        if (chrome.runtime.lastError) log('error', `[PROXY] reconnect control PAC error: ${chrome.runtime.lastError.message}`)
+        else log('warn', `[PROXY] fail-closed control path open for ${reason}: ${hosts.join(', ')}`)
+        resolve(!chrome.runtime.lastError)
+      },
+    )
+  })
+}
+
+async function clearProxyProtectionForReconnect(reason = 'reconnect', relayEndpoints = []) {
+  if (!proxyFailClosed) return false
+  const liveRelays = relayEndpoints.length ? [] : await getLiveRelays().catch(() => [])
+  await setFailClosedControlPath(reason, [...relayEndpoints, ...liveRelays])
+  await chrome.storage.session.remove(['proxySessionId', 'proxyHost', 'proxyPort']).catch(() => {})
+  broadcastBrowsingStatus({
+    state: 'reconnecting',
+    title: 'PeerMesh reconnecting',
+    message: 'PeerMesh is reconnecting through a control-only path. Browser traffic remains blocked until the session is ready.',
+  }).catch(() => {})
+  return true
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
     try {
@@ -352,7 +407,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break
         case 'CONNECT':
           log('info', 'CONNECT country=' + msg.country + ' userId=' + msg.userId?.slice(0,8))
-          await connectToRelay(msg)
+          {
+            const clearedFailClosed = await clearProxyProtectionForReconnect('connect', [msg.relayEndpoint, ...(msg.relayFallbackList || [])])
+            try {
+              await connectToRelay(msg)
+              sendResponse({ success: true })
+            } catch (error) {
+              if (clearedFailClosed && !currentSession) {
+                setProxyFailClosed(error.message || 'PeerMesh reconnect failed')
+              }
+              throw error
+            }
+          }
+          break
+        case 'PREPARE_RECONNECT': {
+          const cleared = await clearProxyProtectionForReconnect('manual reconnect')
+          sendResponse({ success: true, cleared })
+          break
+        }
+        case 'RESTORE_FAIL_CLOSED':
+          setProxyFailClosed(msg.reason || 'PeerMesh reconnect failed')
           sendResponse({ success: true })
           break
         case 'DISCONNECT':
@@ -391,10 +465,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const helper = await persistSharingState()
           const isSharing = helper.available && !helper.ownerMismatch && (helper.running || helper.shareEnabled)
           const failClosedState = await chrome.storage.session.get(['proxyFailClosedReason']).catch(() => ({}))
+          const session = getPublicRequesterSession()
           log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
           sendResponse({
             connected: !!currentSession,
-            session: getPublicRequesterSession(),
+            session,
+            connectionType: session?.connectionType || 'public',
             isSharing,
             helper,
             failClosed: proxyFailClosed,
@@ -1547,6 +1623,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           reconnecting: false,
           lastDesktopSyncAt: 0,
         }
+        rememberRequesterSession(currentSession)
 
         const desktopStatus = await getDesktopHelperStatusHttp()
         let desktopProxyReady = false
@@ -1623,6 +1700,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
             reconnecting: false,
             lastDesktopSyncAt: 0,
           }
+          rememberRequesterSession(currentSession)
         }
         log('info', `[CONNECT] session_reconnected attempt=${msg.attempt} newSession=${msg.sessionId?.slice(0,8)} relay=${reconnectRelay}`)
 
@@ -1706,6 +1784,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
           if (msg.type === 'direct_open') currentSession = { ...currentSession, directState: 'direct' }
           if (msg.type === 'direct_failed') currentSession = { ...currentSession, directState: 'relay' }
+          rememberRequesterSession(currentSession)
         }
         forwardRelaySignalToDesktop(msg)
       }
@@ -1729,6 +1808,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       if (msg.type === 'session_ended') {
         const reason = msg.reason || 'Peer connection dropped'
         log('info', `[CONNECT] session_ended reason=${reason}`)
+        rememberRequesterSession(currentSession)
         if (_userInitiatedDisconnect) clearProxy()
         else if (!_sessionRefreshing) setProxyFailClosed(reason)
         currentSession = null
@@ -1759,6 +1839,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         }
         if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
           currentSession.quality = quality
+          rememberRequesterSession(currentSession)
         }
         chrome.storage.local.get(['session']).then(({ session }) => {
           if (!session) return
@@ -1780,6 +1861,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       clearInterval(keepaliveTimer)
       if (currentSession) {
         const reason = e.reason || 'Peer connection dropped'
+        rememberRequesterSession(currentSession)
         if (_userInitiatedDisconnect) clearProxy()
         else if (!_sessionRefreshing) setProxyFailClosed(reason)
         currentSession = null
@@ -1864,9 +1946,11 @@ async function refreshRequesterSession(reason = 'session refresh') {
   if (!token) throw new Error('Cannot refresh PeerMesh session: missing auth token')
 
   _sessionRefreshing = true
-  // Clear proxy to DIRECT so the new relay WebSocket is not routed through
-  // the fail-closed proxy (127.0.0.1:9), which causes ERR_PROXY_CONNECTION_FAILED.
-  chrome.proxy.settings.clear({ scope: 'regular' })
+  // Keep browser traffic blocked during refresh while allowing PeerMesh API
+  // and relay control sockets to connect directly.
+  proxyFailClosed = true
+  await chrome.storage.session.set({ proxyFailClosed: true, proxyFailClosedReason: 'PeerMesh session is refreshing' }).catch(() => {})
+  await setFailClosedControlPath('session refresh', [previous.relayEndpoint, ...(await getLiveRelays().catch(() => []))])
   try {
     const oldWs = relayWs
     relayWs = null
@@ -1902,10 +1986,13 @@ async function refreshRequesterSession(reason = 'session refresh') {
 
     const session = {
       id: data.sessionId,
+      sessionId: data.sessionId,
       country: data.country || previous.country,
       relayEndpoint: data.relayEndpoint,
+      connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public'),
       refreshedAt: new Date().toISOString(),
     }
+    lastRequesterSession = session
     await chrome.storage.local.set({ session, connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public') })
     chrome.runtime.sendMessage({ type: 'SESSION_RECONNECTED', sessionId: data.sessionId, reason }).catch(() => {})
   } finally {
@@ -2182,6 +2269,7 @@ async function disconnect() {
   }
   relayWs = null
   currentSession = null
+  lastRequesterSession = null
   agentSessionId = null
   closeDesktopSignaling('disconnect')
   clearProxy()
@@ -2199,6 +2287,7 @@ async function manualUnblockBrowser() {
   }
   relayWs = null
   currentSession = null
+  lastRequesterSession = null
   agentSessionId = null
   clearProxy()
   await chrome.storage.local.set({ session: null, connectionType: 'public' })
@@ -2210,6 +2299,7 @@ async function manualUnblockBrowser() {
 async function restoreSharingRuntime() {
   const storedSession = await chrome.storage.local.get(['session'])
   if (storedSession.session) {
+    lastRequesterSession = snapshotRequesterSession(storedSession.session)
     setProxyFailClosed('PeerMesh background restarted. Reconnect before browsing.')
     await chrome.storage.local.set({ session: null })
     broadcastSessionEnded('PeerMesh background restarted. Reconnect before browsing.').catch(() => {})
@@ -2289,6 +2379,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (currentSession) {
     if (!relayWs || relayWs.readyState === WebSocket.CLOSED) {
       const reason = 'PeerMesh relay connection dropped'
+      rememberRequesterSession(currentSession)
       setProxyFailClosed(reason)
       currentSession = null
       agentSessionId = null
@@ -2299,6 +2390,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           await refreshRequesterSession('scheduled pre-expiry refresh')
         } catch (error) {
           const reason = error.message || 'PeerMesh session refresh failed'
+          rememberRequesterSession(currentSession)
           setProxyFailClosed(reason)
           currentSession = null
           relayWs = null

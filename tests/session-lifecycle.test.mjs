@@ -85,6 +85,53 @@ test('desktop and CLI expose STUN direct data channel capability behind relay fa
   }
 })
 
+test('relay tunnel path uses binary frames and backpressure on desktop and CLI providers', () => {
+  const relay = readRepoFile('relay/relay.js')
+  const desktop = readRepoFile('desktop/main.js')
+  const cli = readRepoFile('cli/index.js')
+
+  assert.match(relay, /RELAY_BINARY_TUNNEL_DATA/)
+  assert.match(relay, /sendTunnelDataToProvider/)
+  assert.match(relay, /tunnel_pause/)
+  assert.match(relay, /tunnel_resume/)
+  assert.match(relay, /applyProxyClientBackpressure/)
+
+  for (const source of [desktop, cli]) {
+    assert.match(source, /supportsBinaryTunnel: true/)
+    assert.match(source, /sendRelayTunnelData/)
+    assert.match(source, /RELAY_WS_BUFFER_HIGH_BYTES/)
+    assert.match(source, /scheduleRelayBackpressureCheck/)
+    assert.match(source, /tunnel_pause/)
+    assert.match(source, /tunnel_resume/)
+  }
+})
+
+test('provider byte accounting is throttled off hot tunnel chunks', () => {
+  const desktop = readRepoFile('desktop/main.js')
+  const cli = readRepoFile('cli/index.js')
+
+  for (const source of [desktop, cli]) {
+    assert.match(source, /ADD_BYTES_SYNC_INTERVAL_MS = 2000/)
+    assert.match(source, /_lastAggregateSync/)
+    assert.match(source, /now - _lastAggregateSync >= ADD_BYTES_SYNC_INTERVAL_MS/)
+  }
+})
+
+test('fail-closed reconnect clears only PeerMesh control path and status panel can disconnect', () => {
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+  const popup = readRepoFile('extension/popup/popup.js')
+  const injector = readRepoFile('extension/content/injector.js')
+
+  assert.match(serviceWorker, /clearProxyProtectionForReconnect/)
+  assert.match(serviceWorker, /case 'PREPARE_RECONNECT'/)
+  assert.match(serviceWorker, /case 'RESTORE_FAIL_CLOSED'/)
+  assert.match(serviceWorker, /lastRequesterSession/)
+  assert.match(popup, /PREPARE_RECONNECT/)
+  assert.match(popup, /RESTORE_FAIL_CLOSED/)
+  assert.match(injector, /peermesh-panel-disconnect/)
+  assert.match(injector, /type: 'DISCONNECT'/)
+})
+
 test('relay assigns direct-first mandated sessions with relay fallback and direct accounting', () => {
   const relay = readRepoFile('relay/relay.js')
 

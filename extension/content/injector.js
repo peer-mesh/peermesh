@@ -460,7 +460,7 @@ function renderSessionPanelStatus(status = {}) {
   const helper = status.helper || null
   const state = getSessionPanelStatusLabel(status)
   const country = session?.country || helper?.country || 'none'
-  const connectionType = session?.connectionType || 'none'
+  const connectionType = String(session?.connectionType || status.connectionType || 'public').toUpperCase()
   const currentSpeed = quality ? formatPanelMbps(quality.currentMbps) : '0.00 Mbps'
   const avgSpeed = quality ? formatPanelMbps(quality.avgMbps) : '0.00 Mbps'
   const bytesUsed = quality?.transferredBytes != null ? formatPanelBytes(quality.transferredBytes) : '0B'
@@ -472,7 +472,7 @@ function renderSessionPanelStatus(status = {}) {
   panel.querySelector('[data-pm-status]').style.color = state.color
   panel.querySelector('[data-pm-dot]').style.background = state.color
   panel.querySelector('[data-pm-country]').textContent = country
-  panel.querySelector('[data-pm-mode]').textContent = connectionType
+  panel.querySelector('[data-pm-mode]').textContent = session ? connectionType : 'NONE'
   panel.querySelector('[data-pm-current]').textContent = currentSpeed
   panel.querySelector('[data-pm-avg]').textContent = avgSpeed
   panel.querySelector('[data-pm-bytes]').textContent = bytesUsed
@@ -487,6 +487,10 @@ function renderSessionPanelStatus(status = {}) {
   const unblockBtn = panel.querySelector('#peermesh-panel-unblock')
   if (unblockBtn) {
     unblockBtn.style.display = status.failClosed && !status.connected ? 'inline-block' : 'none'
+  }
+  const disconnectBtn = panel.querySelector('#peermesh-panel-disconnect')
+  if (disconnectBtn) {
+    disconnectBtn.style.display = status.connected || status.failClosed ? 'inline-block' : 'none'
   }
 }
 
@@ -554,7 +558,8 @@ function showSessionPanel() {
       <div><div style="color:#777b8f;font-size:10px">LOCAL HELPER</div><div data-pm-helper style="margin-top:3px">checking</div></div>
       <div style="grid-column:1 / -1;color:#ffaa00;font-size:11px;line-height:1.5;min-height:16px" data-pm-reason></div>
     </div>
-    <div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;gap:10px">
+    <div style="padding:8px 14px;border-top:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+      <button id="peermesh-panel-disconnect" style="display:none;border:1px solid rgba(255,96,96,0.45);background:transparent;color:#ff6060;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:11px">DISCONNECT</button>
       <button id="peermesh-panel-unblock" style="display:none;border:1px solid rgba(255,170,0,0.4);background:transparent;color:#ffaa00;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:11px">UNBLOCK BROWSER</button>
       <span style="font-size:10px;color:#777b8f">Ctrl+Shift+P to toggle</span>
       <button id="peermesh-session-panel-dismiss" style="border:none;background:transparent;color:#9090a8;cursor:pointer;font:inherit;font-size:10px;padding:0">DISMISS</button>
@@ -563,6 +568,10 @@ function showSessionPanel() {
   body.appendChild(panel)
   document.getElementById('peermesh-session-panel-close')?.addEventListener('click', closeSessionPanel)
   document.getElementById('peermesh-session-panel-dismiss')?.addEventListener('click', closeSessionPanel)
+  document.getElementById('peermesh-panel-disconnect')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'DISCONNECT' }).catch(() => {})
+    closeSessionPanel()
+  })
   document.getElementById('peermesh-panel-unblock')?.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'UNBLOCK_BROWSER' }).catch(() => {})
     closeSessionPanel()

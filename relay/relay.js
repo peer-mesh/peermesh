@@ -61,6 +61,11 @@ const peers = new Map()
 const sessions = new Map()
 const proxyClients = new Map()
 
+const RELAY_BINARY_TUNNEL_DATA = 0x01
+const RELAY_PROXY_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
+const RELAY_PROXY_BUFFER_LOW_BYTES = 512 * 1024
+const RELAY_PROXY_BUFFER_CHECK_MS = 50
+
 const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
 const PRIVATE_HOSTS = [
@@ -1170,7 +1175,7 @@ server.on('connect', (req, clientSocket, head) => {
 
   // Open a tunnel via the provider
   const tunnelId = randomUUID()
-  proxyClients.set(tunnelId, { sessionId, socket: clientSocket, head, ready: false })
+  proxyClients.set(tunnelId, { sessionId, socket: clientSocket, head, ready: false, providerPaused: false, backpressureTimer: null })
 
   send(provider, { type: 'open_tunnel', tunnelId, sessionId, hostname, port })
   session.lastActivity = Date.now()
@@ -1179,6 +1184,8 @@ server.on('connect', (req, clientSocket, head) => {
   // clean up after 35s so proxyClients doesn't leak.
   const tunnelReadyTimer = setTimeout(() => {
     if (proxyClients.has(tunnelId)) {
+      const proxyClient = proxyClients.get(tunnelId)
+      clearProxyBackpressure(proxyClient)
       proxyClients.delete(tunnelId)
       send(provider, { type: 'tunnel_close', tunnelId })
       if (!clientSocket.destroyed) {
@@ -1192,11 +1199,15 @@ server.on('connect', (req, clientSocket, head) => {
   // Cleanup on client disconnect
   clientSocket.on('error', () => {
     clearTimeout(tunnelReadyTimer)
+    const proxyClient = proxyClients.get(tunnelId)
+    clearProxyBackpressure(proxyClient)
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
   })
   clientSocket.on('close', () => {
     clearTimeout(tunnelReadyTimer)
+    const proxyClient = proxyClients.get(tunnelId)
+    clearProxyBackpressure(proxyClient)
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
   })
@@ -1228,6 +1239,9 @@ proxyWss.on('connection', (ws, req) => {
   const tunnelId = randomUUID()
   log('PROXY', `WS_OPEN session=${sessionId.slice(0,8)} tunnelId=${tunnelId.slice(0,8)} from ${clientIp}`)
   ws.sessionId = sessionId
+  ws.tunnelId = tunnelId
+  ws.providerPaused = false
+  ws.backpressureTimer = null
   proxyClients.set(tunnelId, ws)
 
   let tunnelOpen = false
@@ -1257,6 +1271,8 @@ proxyWss.on('connection', (ws, req) => {
         // Clean up if tunnel_ready never arrives
         const wsReadyTimer = setTimeout(() => {
           if (proxyClients.has(tunnelId)) {
+            const proxyClient = proxyClients.get(tunnelId)
+            clearProxyBackpressure(proxyClient)
             proxyClients.delete(tunnelId)
             send(provider, { type: 'tunnel_close', tunnelId })
             if (ws.readyState === WebSocket.OPEN) ws.close(1011, 'Tunnel timeout')
@@ -1271,18 +1287,19 @@ proxyWss.on('connection', (ws, req) => {
       const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
       const currentSession = sessions.get(sessionId)
       if (!recordSessionBytes(currentSession, chunk.length, 'requester_to_provider')) return
-      const b64 = chunk.toString('base64')
-      send(provider, { type: 'tunnel_data', tunnelId, data: b64 })
+      sendTunnelDataToProvider(provider, tunnelId, chunk)
     }
   })
 
   ws.on('close', () => {
+    clearProxyBackpressure(ws)
     proxyClients.delete(tunnelId)
     send(provider, { type: 'tunnel_close', tunnelId })
   })
 
   ws.on('error', (err) => {
     logErr('PROXY', `tunnelId=${tunnelId.slice(0,8)}`, err)
+    clearProxyBackpressure(ws)
     proxyClients.delete(tunnelId)
   })
 })
@@ -1299,6 +1316,7 @@ wss.on('connection', (ws, req) => {
     trustScore: 50, sessionId: null, providerKind: 'unknown',
     deviceId: null, baseDeviceId: null,
     supportsHttp: true, supportsTunnel: false,
+    supportsBinaryTunnel: false,
     supportsDirect: false, directEndpoint: null, directTransport: null, iceEnabled: false,
     privateOnly: false,
     bytesTransferred: 0, isAlive: true,
@@ -1311,10 +1329,12 @@ wss.on('connection', (ws, req) => {
 
   ws.on('pong', () => { ws.isAlive = true })
 
-  ws.on('message', async (data) => {
+  ws.on('message', async (data, isBinary) => {
     try {
       ws.bytesTransferred += data.length
-      const msg = JSON.parse(data.toString())
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      const binaryMsg = (isBinary || buf[0] === RELAY_BINARY_TUNNEL_DATA) ? decodeBinaryTunnelData(buf) : null
+      const msg = binaryMsg ?? JSON.parse(buf.toString())
       if (msg.type !== 'ping') log(peerId.slice(0,8), `MSG_IN type=${msg.type}`, msg.userId ? `userId=${msg.userId.slice(0,8)}` : '')
       await handleMessage(ws, msg)
     } catch (e) {
@@ -1377,6 +1397,7 @@ async function handleMessage(ws, msg) {
       ws.providerKind = msg.providerKind ?? 'unknown'
       ws.supportsHttp = msg.supportsHttp ?? true
       ws.supportsTunnel = msg.supportsTunnel ?? false
+      ws.supportsBinaryTunnel = msg.supportsBinaryTunnel === true
       ws.iceEnabled = msg.iceEnabled === true || msg.directTransport === 'webrtc'
       ws.directTransport = ws.iceEnabled ? 'webrtc' : null
       ws.supportsDirect = msg.supportsDirect === true && (ws.iceEnabled || (typeof msg.directEndpoint === 'string' && /^wss?:\/\//i.test(msg.directEndpoint)))
@@ -1394,7 +1415,7 @@ async function handleMessage(ws, msg) {
         } catch {}
       }
       peers.set(ws.peerId, ws)
-      send(ws, { type: 'registered', peerId: ws.peerId })
+      send(ws, { type: 'registered', peerId: ws.peerId, binaryTunnel: true })
       log(ws.peerId.slice(0,8), `REGISTERED_PROVIDER country=${ws.country} userId=${ws.userId?.slice(0,8)}`)
       log(ws.peerId.slice(0,8), `PEERS AFTER REGISTER`, peersSnapshot())
       break
@@ -1665,7 +1686,7 @@ async function handleMessage(ws, msg) {
     case 'tunnel_data': {
       const proxyClient = proxyClients.get(msg.tunnelId)
       if (!proxyClient) return
-      const chunk = Buffer.from(msg.data, 'base64')
+      const chunk = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data || '', 'base64')
       const tunnelSession = ws.sessionId ? sessions.get(ws.sessionId) : null
       if (!recordSessionBytes(tunnelSession, chunk.length, 'provider_to_requester')) return
       if (tunnelSession) {
@@ -1681,10 +1702,19 @@ async function handleMessage(ws, msg) {
       }
       if (proxyClient.readyState !== undefined) {
         // WS-based client
-        if (proxyClient.readyState === WebSocket.OPEN) proxyClient.send(chunk)
+        if (proxyClient.readyState === WebSocket.OPEN) {
+          proxyClient.send(chunk)
+          applyProxyClientBackpressure(ws, msg.tunnelId, proxyClient)
+        }
       } else if (proxyClient.socket && !proxyClient.socket.destroyed && proxyClient.ready) {
         // Raw socket client
-        proxyClient.socket.write(chunk)
+        const flushed = proxyClient.socket.write(chunk)
+        if (!flushed) {
+          pauseProviderForProxyBackpressure(ws, msg.tunnelId, proxyClient, 'requester_socket_backpressure')
+          proxyClient.socket.once('drain', () => resumeProviderAfterProxyBackpressure(ws, msg.tunnelId, proxyClient))
+        } else {
+          applyProxyClientBackpressure(ws, msg.tunnelId, proxyClient)
+        }
       }
       break
     }
@@ -1854,6 +1884,85 @@ function send(ws, data) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
 }
 
+function getTunnelIdBytes(tunnelId) {
+  return Buffer.from(String(tunnelId || '').replace(/-/g, '').padEnd(32, '0').slice(0, 32), 'ascii')
+}
+
+function encodeBinaryTunnelData(tunnelId, chunk, idBytes = null) {
+  const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+  const tunnelIdBytes = idBytes || getTunnelIdBytes(tunnelId)
+  const frame = Buffer.allocUnsafe(1 + 32 + payload.length)
+  frame[0] = RELAY_BINARY_TUNNEL_DATA
+  tunnelIdBytes.copy(frame, 1)
+  payload.copy(frame, 33)
+  return frame
+}
+
+function decodeBinaryTunnelData(buf) {
+  if (!buf || buf.length <= 33 || buf[0] !== RELAY_BINARY_TUNNEL_DATA) return null
+  const idHex = buf.slice(1, 33).toString('ascii')
+  return {
+    type: 'tunnel_data',
+    tunnelId: `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`,
+    data: buf.slice(33),
+    binary: true,
+  }
+}
+
+function sendTunnelDataToProvider(provider, tunnelId, chunk) {
+  if (!provider || provider.readyState !== WebSocket.OPEN) return false
+  if (provider.supportsBinaryTunnel) {
+    provider.send(encodeBinaryTunnelData(tunnelId, chunk), { binary: true })
+  } else {
+    send(provider, { type: 'tunnel_data', tunnelId, data: chunk.toString('base64') })
+  }
+  return true
+}
+
+function clearProxyBackpressure(proxyClient) {
+  if (proxyClient?.backpressureTimer) {
+    clearInterval(proxyClient.backpressureTimer)
+    proxyClient.backpressureTimer = null
+  }
+  if (proxyClient) proxyClient.providerPaused = false
+}
+
+function pauseProviderForProxyBackpressure(provider, tunnelId, proxyClient, reason = 'proxy_backpressure') {
+  if (!provider || provider.readyState !== WebSocket.OPEN || !proxyClient || proxyClient.providerPaused) return
+  proxyClient.providerPaused = true
+  send(provider, { type: 'tunnel_pause', tunnelId, reason })
+}
+
+function resumeProviderAfterProxyBackpressure(provider, tunnelId, proxyClient) {
+  if (!proxyClient?.providerPaused) return
+  clearProxyBackpressure(proxyClient)
+  if (provider?.readyState === WebSocket.OPEN) send(provider, { type: 'tunnel_resume', tunnelId })
+}
+
+function applyProxyClientBackpressure(provider, tunnelId, proxyClient) {
+  if (!proxyClient || proxyClient.backpressureTimer) return
+
+  if (proxyClient.readyState !== undefined) {
+    if (proxyClient.bufferedAmount <= RELAY_PROXY_BUFFER_HIGH_BYTES) return
+    pauseProviderForProxyBackpressure(provider, tunnelId, proxyClient, 'requester_ws_backpressure')
+    proxyClient.backpressureTimer = setInterval(() => {
+      if (proxyClient.readyState !== WebSocket.OPEN || proxyClient.bufferedAmount <= RELAY_PROXY_BUFFER_LOW_BYTES) {
+        resumeProviderAfterProxyBackpressure(provider, tunnelId, proxyClient)
+      }
+    }, RELAY_PROXY_BUFFER_CHECK_MS)
+    return
+  }
+
+  if (proxyClient.socket && proxyClient.socket.writableLength > RELAY_PROXY_BUFFER_HIGH_BYTES) {
+    pauseProviderForProxyBackpressure(provider, tunnelId, proxyClient, 'requester_socket_backpressure')
+    proxyClient.backpressureTimer = setInterval(() => {
+      if (proxyClient.socket.destroyed || proxyClient.socket.writableLength <= RELAY_PROXY_BUFFER_LOW_BYTES) {
+        resumeProviderAfterProxyBackpressure(provider, tunnelId, proxyClient)
+      }
+    }, RELAY_PROXY_BUFFER_CHECK_MS)
+  }
+}
+
 function isSessionParticipant(session, ws) {
   return !!session && !!ws && (session.requesterId === ws.peerId || session.providerId === ws.peerId)
 }
@@ -1902,6 +2011,7 @@ function pickBestHost(targetHost, targetHosts) {
 
 function closeProxyClient(proxyClient) {
   if (!proxyClient) return
+  clearProxyBackpressure(proxyClient)
   if (typeof proxyClient.close === 'function') {
     proxyClient.close()
   } else if (proxyClient.socket && !proxyClient.socket.destroyed) {

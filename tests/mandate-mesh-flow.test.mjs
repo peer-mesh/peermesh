@@ -29,6 +29,33 @@ function writeJson(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
+const RELAY_BINARY_TUNNEL_DATA = 0x01
+
+function tunnelIdBytes(tunnelId) {
+  return Buffer.from(String(tunnelId || '').replace(/-/g, '').padEnd(32, '0').slice(0, 32), 'ascii')
+}
+
+function encodeBinaryTunnelData(tunnelId, chunk) {
+  const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+  const idBytes = tunnelIdBytes(tunnelId)
+  const frame = Buffer.allocUnsafe(1 + 32 + payload.length)
+  frame[0] = RELAY_BINARY_TUNNEL_DATA
+  idBytes.copy(frame, 1)
+  payload.copy(frame, 33)
+  return frame
+}
+
+function decodeBinaryTunnelData(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+  const idHex = buf.slice(1, 33).toString('ascii')
+  return {
+    type: 'tunnel_data',
+    tunnelId: `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`,
+    data: buf.slice(33),
+    binary: true,
+  }
+}
+
 function startFakeApi() {
   const requests = []
   const server = createServer(async (req, res) => {
@@ -105,8 +132,11 @@ function waitForRelay(child, port) {
 function wrapJsonSocket(ws) {
   const queue = []
   const waiters = []
-  ws.on('message', (data) => {
-    const msg = JSON.parse(data.toString())
+  ws.on('message', (data, isBinary) => {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    const msg = (isBinary || buf[0] === RELAY_BINARY_TUNNEL_DATA)
+      ? decodeBinaryTunnelData(buf)
+      : JSON.parse(buf.toString())
     const waiterIndex = waiters.findIndex(waiter => waiter.predicate(msg))
     if (waiterIndex >= 0) {
       const [waiter] = waiters.splice(waiterIndex, 1)
@@ -119,6 +149,7 @@ function wrapJsonSocket(ws) {
   return {
     ws,
     send: (msg) => ws.send(JSON.stringify(msg)),
+    sendBinaryTunnelData: (tunnelId, chunk) => ws.send(encodeBinaryTunnelData(tunnelId, chunk), { binary: true }),
     waitFor: (predicate, label, timeoutMs = 10_000) => {
       const queuedIndex = queue.findIndex(predicate)
       if (queuedIndex >= 0) {
@@ -177,13 +208,15 @@ test('mandated direct-first session stays alive and can relay-fallback a tunnel'
       providerKind: 'test',
       supportsHttp: true,
       supportsTunnel: true,
+      supportsBinaryTunnel: true,
       supportsDirect: true,
       directTransport: 'webrtc',
       iceEnabled: true,
       deviceId: 'provider-device-1',
       baseDeviceId: 'provider-device-1',
     })
-    await provider.waitFor(msg => msg.type === 'registered', 'provider registered')
+    const registered = await provider.waitFor(msg => msg.type === 'registered', 'provider registered')
+    assert.equal(registered.binaryTunnel, true)
 
     const requester = await connectJsonSocket(relayUrl)
     sockets.push(requester.ws)
@@ -262,8 +295,9 @@ test('mandated direct-first session stays alive and can relay-fallback a tunnel'
 
     proxy.send(Buffer.from('ping'))
     const tunnelData = await provider.waitFor(msg => msg.type === 'tunnel_data', 'relay fallback tunnel_data')
-    assert.equal(Buffer.from(tunnelData.data, 'base64').toString(), 'ping')
-    provider.send({ type: 'tunnel_data', tunnelId: openTunnel.tunnelId, data: Buffer.from('pong').toString('base64') })
+    assert.equal(tunnelData.binary, true)
+    assert.equal(Buffer.from(tunnelData.data).toString(), 'ping')
+    provider.sendBinaryTunnelData(openTunnel.tunnelId, Buffer.from('pong'))
 
     const pong = (await once(proxy, 'message'))[0]
     assert.equal(Buffer.from(pong).toString(), 'pong')
