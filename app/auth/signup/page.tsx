@@ -38,15 +38,17 @@ function SignupForm() {
 
   const extId = searchParams.get('ext_id')
   const activate = searchParams.get('activate') === '1' || searchParams.get('source') === 'activate'
+  const code = searchParams.get('code') ?? ''
 
   const buildConfirmEmailPath = useCallback((emailForPath?: string) => {
     const qs = new URLSearchParams()
     if (extId) qs.set('ext_id', extId)
     if (activate) qs.set('activate', '1')
+    if (code) qs.set('code', code)
     if (emailForPath) qs.set('email', emailForPath)
     qs.set('sent', '1')
     return `/auth/confirm-email?${qs.toString()}`
-  }, [activate, extId])
+  }, [activate, extId, code])
 
   const loadCountries = useCallback(async (page = 1, search = '') => {
     setCountryLoading(true)

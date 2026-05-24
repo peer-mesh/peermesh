@@ -20,6 +20,7 @@ function ConfirmEmailPageClient() {
 
   const extId = searchParams.get('ext_id')
   const activate = searchParams.get('activate') === '1'
+  const code = searchParams.get('code') ?? ''
   const email = searchParams.get('email') ?? ''
   const alreadySent = searchParams.get('sent') === '1'
 
@@ -75,7 +76,12 @@ function ConfirmEmailPageClient() {
       router.push(`/extension?ext_id=${extId}`)
       return
     }
-    if (activate) { router.push('/extension?activate=1'); return }
+    if (activate) {
+      const qs = new URLSearchParams({ activate: '1' })
+      if (code) qs.set('code', code)
+      router.push(`/extension?${qs.toString()}`)
+      return
+    }
     router.push('/dashboard')
   }
 

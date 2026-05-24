@@ -25,15 +25,17 @@ function LoginForm() {
 
   const extId = searchParams.get('ext_id')
   const activate = searchParams.get('activate') === '1' || searchParams.get('source') === 'activate'
+  const code = searchParams.get('code') ?? ''
 
   const buildConfirmEmailPath = useCallback((emailForPath?: string) => {
     const qs = new URLSearchParams()
     if (extId) qs.set('ext_id', extId)
     if (activate) qs.set('activate', '1')
+    if (code) qs.set('code', code)
     if (emailForPath) qs.set('email', emailForPath)
-    qs.set('sent', '1') // tells the confirm page not to auto-send another code
+    qs.set('sent', '1')
     return `/auth/confirm-email?${qs.toString()}`
-  }, [activate, extId])
+  }, [activate, extId, code])
 
   const finishSignedInRoute = useCallback(async () => {
     if (extId) {
@@ -45,11 +47,13 @@ function LoginForm() {
       return
     }
     if (activate) {
-      router.push('/extension?activate=1')
+      const qs = new URLSearchParams({ activate: '1' })
+      if (code) qs.set('code', code)
+      router.push(`/extension?${qs.toString()}`)
       return
     }
     router.push('/dashboard')
-  }, [activate, extId, router])
+  }, [activate, extId, code, router])
 
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {

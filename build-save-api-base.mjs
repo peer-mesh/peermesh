@@ -169,6 +169,10 @@ patch('desktop/renderer/app.js',
   currentBase,
   'appBaseUrl fallback')
 
+patch('extension/config.js',
+  currentBase,
+  'APP_URL generated config')
+
 patch('tests/cli-behavior.test.mjs',
   currentBase,
   'apiBase test constant')
@@ -176,6 +180,14 @@ patch('tests/cli-behavior.test.mjs',
 patch('public/demo/developer-docs-screenshot.svg',
   currentBase,
   'demo SVG curl example')
+
+// ── Root .env.local ──────────────────────────────────────────────────────────
+
+console.log()
+console.log(`${B}  .env.local (root)${R}`)
+patch('.env.local',
+  currentBase,
+  'API_BASE / API_BASE_DEV / NEXT_PUBLIC_APP_URL / NEXT_PUBLIC_SITE_URL')
 
 // ── relay/.env.local ──────────────────────────────────────────────────────────
 
@@ -206,6 +218,11 @@ console.log(`  ${D}│${R}  ${B}API_BASE${R}                 ${G}${base}${R}`)
 console.log(`  ${D}│${R}  ${B}NEXT_PUBLIC_APP_URL${R}      ${G}${base}${R}`)
 console.log(`  ${D}│${R}  ${B}NEXT_PUBLIC_SITE_URL${R}     ${G}${base}${R}`)
 console.log(`  ${D}└─────────────────────────────────────────────────────────────┘${R}`)
+console.log(`  ${Y}⚠  NEXT_PUBLIC_APP_URL controls the verification_uri returned by${R}`)
+console.log(`  ${Y}   /api/extension-auth (device code flow). If this env var is${R}`)
+console.log(`  ${Y}   stale in the Render dashboard the desktop auth will open the${R}`)
+console.log(`  ${Y}   old URL (e.g. peermesh-beta.vercel.app/extension?activate=1).${R}`)
+console.log(`  ${Y}   Update it in Render → Environment before redeploying.${R}`)
 console.log()
 
 // Fly.io (relay)

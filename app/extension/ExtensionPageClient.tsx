@@ -10,10 +10,10 @@ const mono = "'Courier New', monospace"
 // ── Device Activation Screen ──────────────────────────────────────────────────
 function ActivateScreen() {
   const searchParams = useSearchParams()
-  const [code, setCode] = useState(() => {
-    const raw = (searchParams.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
-    return raw.length >= 4 ? `${raw.slice(0, 4)}-${raw.slice(4, 8)}` : raw
-  })
+  const rawCode = (searchParams.get('code') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  const [code, setCode] = useState(() =>
+    rawCode.length >= 4 ? `${rawCode.slice(0, 4)}-${rawCode.slice(4, 8)}` : rawCode
+  )
   const [status, setStatus] = useState<'checking' | 'redirect' | 'idle' | 'loading' | 'approved' | 'denied' | 'error'>('checking')
   const [error, setError] = useState('')
 
@@ -26,9 +26,11 @@ function ActivateScreen() {
 
   useEffect(() => {
     if ((status as string) === 'redirect') {
-      window.location.href = `/auth?mode=login&source=activate&activate=1`
+      const qs = new URLSearchParams({ mode: 'login', source: 'activate', activate: '1' })
+      if (rawCode) qs.set('code', rawCode)
+      window.location.href = `/auth?${qs.toString()}`
     }
-  }, [status])
+  }, [status, rawCode])
 
   function handleCodeChange(val: string) {
     const clean = val.toUpperCase().replace(/[^A-Z0-9]/g, '')
@@ -48,7 +50,12 @@ function ActivateScreen() {
         body: JSON.stringify({ user_code: code.toUpperCase().trim(), action }),
       })
       const data = await res.json()
-      if (res.status === 401) { window.location.href = `/auth?mode=login&source=activate&activate=1`; return }
+      if (res.status === 401) {
+        const qs = new URLSearchParams({ mode: 'login', source: 'activate', activate: '1' })
+        if (rawCode) qs.set('code', rawCode)
+        window.location.href = `/auth?${qs.toString()}`
+        return
+      }
       if (!res.ok) { setError(data.error ?? 'Something went wrong'); setStatus('error'); return }
       setStatus(action === 'approve' ? 'approved' : 'denied')
     } catch {
