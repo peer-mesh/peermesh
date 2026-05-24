@@ -32,7 +32,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.73'
+const VERSION     = '1.0.74'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -1482,7 +1482,8 @@ let _proxySession = null
 
 const directSessions = new Map()
 const requesterDirectSessions = new Map()
-const DIRECT_ICE_TIMEOUT_MS = 5000
+const DIRECT_ICE_TIMEOUT_MS = 15000
+const DIRECT_RELAY_FALLBACK_GRACE_MS = 1500
 const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
 const DIRECT_ICE_SERVERS = [
   'stun:stun.l.google.com:19302',
@@ -1719,6 +1720,7 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   const entry = requesterDirectSessions.get(sessionId)
   if (!entry) return
   if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
+  if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
   for (const [, tunnel] of entry.tunnels) {
     if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
       startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
@@ -1751,6 +1753,7 @@ async function startRequesterDirectSession(session, signalingWs) {
     mode: 'attempting_direct',
     tunnels: new Map(),
     fallbackTimer: null,
+    fallbackGraceTimer: null,
   }
   requesterDirectSessions.set(session.sessionId, entry)
 
@@ -1763,7 +1766,8 @@ async function startRequesterDirectSession(session, signalingWs) {
     sendRequesterSignal(entry, { type: 'ice_candidate', sessionId: entry.sessionId, candidate: { candidate, sdpMid: mid, mid } })
   })
   pc.onStateChange((state) => {
-    if (state === 'failed' || state === 'disconnected') switchRequesterDirectToRelay(entry, `ice_${state}`)
+    clog.debug?.('DIRECT', 'requester ICE state changed', { sessionId: entry.sessionId?.slice(0, 8), state })
+    if (state === 'failed' || state === 'disconnected') scheduleRequesterRelayFallback(entry, `ice_${state}`)
   })
 
   const dc = pc.createDataChannel('peermesh-control')
@@ -1776,10 +1780,20 @@ function sendRequesterSignal(entry, payload) {
   if (entry?.signalingWs?.readyState === WebSocket.OPEN) entry.signalingWs.send(JSON.stringify(payload))
 }
 
+function scheduleRequesterRelayFallback(entry, reason) {
+  if (!entry || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
+  entry.fallbackGraceTimer = setTimeout(() => {
+    entry.fallbackGraceTimer = null
+    if (entry.mode === 'attempting_direct') switchRequesterDirectToRelay(entry, reason)
+  }, DIRECT_RELAY_FALLBACK_GRACE_MS)
+}
+
 function bindRequesterDataChannel(entry, dc) {
   dc.onOpen(() => {
     if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
     entry.fallbackTimer = null
+    if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
+    entry.fallbackGraceTimer = null
     entry.mode = 'direct'
     sendRequesterSignal(entry, { type: 'direct_open', sessionId: entry.sessionId })
     clog.info('DIRECT', 'requester WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
@@ -1788,7 +1802,7 @@ function bindRequesterDataChannel(entry, dc) {
     }
   })
   dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
-  dc.onClosed?.(() => switchRequesterDirectToRelay(entry, 'data_channel_closed'))
+  dc.onClosed?.(() => scheduleRequesterRelayFallback(entry, 'data_channel_closed'))
 }
 
 function handleRequesterDataChannelMessage(entry, raw) {
@@ -1834,6 +1848,8 @@ function switchRequesterDirectToRelay(entry, reason) {
   entry.mode = 'relay'
   if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
   entry.fallbackTimer = null
+  if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
+  entry.fallbackGraceTimer = null
   sendRequesterSignal(entry, { type: 'direct_failed', sessionId: entry.sessionId, reason })
   clog.warn('DIRECT', 'WebRTC direct unavailable, falling back to relay', { sessionId: entry.sessionId?.slice(0, 8), reason })
   for (const tunnel of entry.tunnels.values()) {

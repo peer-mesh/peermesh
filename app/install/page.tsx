@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import Image from 'next/image'
 import { AuthAwareLinks } from '../AuthAwareLinks'
+import { BackNav } from '../BackNav'
 
 const cliSteps = [
   ['Install Node.js 18+', 'Use the current LTS installer from nodejs.org, Homebrew, apt, or your platform package manager.'],
@@ -70,6 +71,7 @@ function MediaCard({ title, label, src, kind }: { title: string; label: string; 
 export default function InstallPage() {
   return (
     <main style={{ width: '100%', maxWidth: '1040px', margin: '0 auto', padding: '40px 20px 72px' }}>
+      <BackNav />
       <nav style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px', marginBottom: '44px' }}>
         <Link href="/" style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', textDecoration: 'none', fontSize: '13px', letterSpacing: '3px' }}>PEERMESH</Link>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>

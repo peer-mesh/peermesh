@@ -69,10 +69,12 @@ const REQUESTER_SESSION_REFRESH_MS = 23 * 60 * 60 * 1000
 const DESKTOP_PROXY_SYNC_MS = 60 * 1000
 const PRIVATE_ON_DEMAND_MAX_ATTEMPTS = 12
 const DESKTOP_LAUNCH_WAIT_MS = 15000
+const DESKTOP_SIGNAL_RETRY_MS = 5000
 
 let relayWs = null
 let desktopSignalWs = null
 let desktopSignalSessionId = null
+let desktopSignalRetryTimer = null
 let currentSession = null
 let lastRequesterSession = null
 let agentSessionId = null
@@ -1486,6 +1488,10 @@ async function connectToRelay(opts, attempt, retries) {
 }
 
 function closeDesktopSignaling(reason = 'closed') {
+  if (desktopSignalRetryTimer) {
+    clearTimeout(desktopSignalRetryTimer)
+    desktopSignalRetryTimer = null
+  }
   if (!desktopSignalWs) return
   const ws = desktopSignalWs
   desktopSignalWs = null
@@ -1495,6 +1501,19 @@ function closeDesktopSignaling(reason = 'closed') {
   ws.onerror = null
   ws.onclose = null
   try { ws.close(1000, reason) } catch {}
+}
+
+function scheduleDesktopSignalingRetry(session, reason = 'retry') {
+  if (!session?.sessionId || session.iceEnabled !== true || session.directTransport !== 'webrtc') return
+  if (!currentSession || currentSession.sessionId !== session.sessionId || currentSession.directState === 'direct') return
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN || desktopSignalRetryTimer) return
+  desktopSignalRetryTimer = setTimeout(() => {
+    desktopSignalRetryTimer = null
+    if (currentSession?.sessionId === session.sessionId && currentSession.directState !== 'direct') {
+      log('info', `[DIRECT] retrying desktop signaling session=${session.sessionId.slice(0,8)} reason=${reason}`)
+      connectDesktopSignaling(currentSession)
+    }
+  }, DESKTOP_SIGNAL_RETRY_MS)
 }
 
 function connectDesktopSignaling(session) {
@@ -1512,12 +1531,17 @@ function connectDesktopSignaling(session) {
     openTimer = null
     if (ws.readyState === WebSocket.CONNECTING && relayWs?.readyState === WebSocket.OPEN) {
       relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_timeout' }))
+      scheduleDesktopSignalingRetry(session, 'desktop_signaling_timeout')
       try { ws.close(1000, 'desktop_signaling_timeout') } catch {}
     }
-  }, 1500)
+  }, 5000)
   ws.onopen = () => {
     if (openTimer) clearTimeout(openTimer)
     openTimer = null
+    if (desktopSignalRetryTimer) {
+      clearTimeout(desktopSignalRetryTimer)
+      desktopSignalRetryTimer = null
+    }
     log('info', `[DIRECT] desktop signaling open session=${session.sessionId.slice(0,8)}`)
   }
   ws.onmessage = (event) => {
@@ -1535,6 +1559,7 @@ function connectDesktopSignaling(session) {
     if (relayWs?.readyState === WebSocket.OPEN) {
       relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_error' }))
     }
+    scheduleDesktopSignalingRetry(session, 'desktop_signaling_error')
   }
   ws.onclose = () => {
     if (openTimer) clearTimeout(openTimer)

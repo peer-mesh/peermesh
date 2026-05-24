@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client'
 import { checkDesktop, syncDesktopAuth, startDesktopSharing, stopDesktopSharing, setDesktopConnectionSlots } from '@/lib/agent-client'
 import { hasPaidAccess as profileHasPaidAccess } from '@/lib/account-access'
 import { formatBytes } from '@/lib/utils'
+import { BackNav } from '../BackNav'
 import type { Profile, PeerAvailability, PrivateShare, SyncState } from '@/lib/types'
 import type { DesktopState } from '@/lib/agent-client'
 
@@ -1304,6 +1305,7 @@ export default function Dashboard() {
 
   return (
     <main style={{ maxWidth: '680px', margin: '0 auto', width: '100%', padding: '24px 20px' }}>
+      <BackNav />
 
       {/* Offline banner */}
       {!isOnline && (

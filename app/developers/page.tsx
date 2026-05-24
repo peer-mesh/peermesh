@@ -20,7 +20,7 @@ const cards = [
 
 export default function DevelopersOverviewPage() {
   return (
-    <div style={{ flex: 1, overflowY: 'auto', padding: '40px 48px', maxWidth: '860px' }}>
+    <div style={{ flex: 1, overflowY: 'auto', padding: '12px 48px 40px', maxWidth: '860px' }}>
       <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', letterSpacing: '3px', marginBottom: '12px' }}>
         PEERMESH DEVELOPERS
       </div>

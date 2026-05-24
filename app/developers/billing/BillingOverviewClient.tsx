@@ -13,6 +13,15 @@ type Profile = {
   role: string
 }
 
+type BillingStat = {
+  label: string
+  value: string
+  sub: string
+  subColor?: string
+  href: string | null
+  action: string | null
+}
+
 export default function BillingOverviewClient() {
   const supabase = createClient()
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -35,7 +44,7 @@ export default function BillingOverviewClient() {
 
   const outstandingBalanceUsd = Number(profile?.outstanding_balance_usd ?? 0)
 
-  const stats = [
+  const stats: BillingStat[] = [
     {
       label: 'USD Wallet',
       value: loading ? '...' : `$${Number(profile?.wallet_balance_usd ?? 0).toFixed(2)}`,
@@ -67,7 +76,7 @@ export default function BillingOverviewClient() {
   ]
 
   return (
-    <div style={{ padding: '36px 48px', maxWidth: '900px' }}>
+    <div style={{ padding: '12px 48px 36px', maxWidth: '900px' }}>
       <h1 style={{ margin: '0 0 6px', fontSize: '26px', fontWeight: 700 }}>Billing</h1>
       <p style={{ margin: '0 0 32px', fontSize: '14px', color: 'var(--muted)' }}>
         Wallet balance, contribution credits, and provider payout status.
@@ -83,7 +92,7 @@ export default function BillingOverviewClient() {
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '26px', color: 'var(--accent)', marginBottom: '6px', textAlign: 'left', margin: 0 }}>
               {s.value}
             </div>
-            <div style={{ fontSize: '12px', color: (s as any).subColor || 'var(--muted)', marginBottom: s.href ? '12px' : '0' }}>{s.sub}</div>
+            <div style={{ fontSize: '12px', color: s.subColor || 'var(--muted)', marginBottom: s.href ? '12px' : '0' }}>{s.sub}</div>
             {s.href && (
               <Link href={s.href} style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', textDecoration: 'none' }}>
                 {s.action}
