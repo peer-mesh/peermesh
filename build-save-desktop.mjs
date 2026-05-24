@@ -61,6 +61,8 @@ for (const platform of platforms) {
   const { script, find, dest } = PLATFORM_CONFIG[platform]
   console.log(`\n  Building ${platform} (v${newVersion})...`)
   try {
+    console.log('  Installing desktop dependencies...')
+    execSync('npm install', { cwd: DESKTOP_DIR, stdio: 'inherit' })
     execSync(`npm run ${script}`, { cwd: DESKTOP_DIR, stdio: 'inherit' })
   } catch {
     console.error(`\n  Build failed for ${platform}!`)

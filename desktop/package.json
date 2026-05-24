@@ -1,11 +1,12 @@
 {
   "name": "peermesh-desktop",
-  "version": "1.0.104",
+  "version": "1.0.105",
   "description": "PeerMesh Desktop — Share your connection from the system tray",
   "author": "PeerMesh",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "postinstall": "electron-rebuild -f -w node-datachannel",
     "prebuild-win": "node ../scripts/generate-desktop-assets.mjs",
     "prebuild-mac": "node ../scripts/generate-desktop-assets.mjs",
     "prebuild-linux": "node ../scripts/generate-desktop-assets.mjs",
@@ -60,6 +61,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.0.0",
     "electron": "^33.0.0",
     "electron-builder": "^24.0.0"
   }

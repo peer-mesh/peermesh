@@ -1841,6 +1841,9 @@ async function confirmDesktopAuthStillValid(context, status) {
 
 async function initializeDesktopRuntime(reason) {
   loadConfig()
+  // Preload node-datachannel immediately so it is ready before the first
+  // register_provider — avoids supportsDirect=false on first connect.
+  void preloadNodeDataChannel()
   if (previousLaunchExtId && previousLaunchExtId !== config.extId) {
     revokeExtensionAuthToken(previousLaunchExtId).catch(() => {})
   }
@@ -2503,7 +2506,7 @@ function connectSlot(slot) {
       slot.ws.close(1000)
       return
     }
-    const rtc = getNodeDataChannel()
+    const rtc = await preloadNodeDataChannel()
     const reg = {
       type: 'register_provider',
       userId: config.userId,
@@ -2765,6 +2768,7 @@ const DIRECT_ICE_SERVERS = [
   'stun:stun1.l.google.com:19302',
 ]
 let nodeDataChannel = undefined
+let _nodeDataChannelPromise = null
 
 function getNodeDataChannel() {
   if (nodeDataChannel !== undefined) return nodeDataChannel
@@ -2775,6 +2779,25 @@ function getNodeDataChannel() {
     log.warn('DIRECT', 'node-datachannel unavailable; relay fallback stays active', { err: err.message })
   }
   return nodeDataChannel
+}
+
+// Eagerly load node-datachannel at startup so it is ready before the first
+// register_provider message. Without this, getNodeDataChannel() returns null
+// on the first connectSlot call and the provider registers with
+// supportsDirect=false, forcing relay-only for the entire session.
+function preloadNodeDataChannel() {
+  if (_nodeDataChannelPromise) return _nodeDataChannelPromise
+  _nodeDataChannelPromise = new Promise((resolve) => {
+    try {
+      nodeDataChannel = require('node-datachannel')
+      log.info('DIRECT', 'node-datachannel preloaded')
+    } catch (err) {
+      nodeDataChannel = null
+      log.warn('DIRECT', 'node-datachannel unavailable; relay fallback stays active', { err: err.message })
+    }
+    resolve(nodeDataChannel)
+  })
+  return _nodeDataChannelPromise
 }
 
 function normalizeIceServers(iceServers) {
@@ -2792,9 +2815,37 @@ function sendDataChannelJson(dc, payload) {
   else if (typeof dc?.send === 'function') dc.send(text)
 }
 
+// Send raw binary over the data channel — avoids base64 encoding overhead for tunnel_data.
+// node-datachannel supports sendMessageBinary for Buffer/Uint8Array.
+function sendDataChannelBinary(dc, buf) {
+  if (typeof dc?.sendMessageBinary === 'function') dc.sendMessageBinary(buf)
+  else if (typeof dc?.send === 'function') dc.send(buf)
+}
+
 function parseDataChannelJson(raw) {
   const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString()
   return JSON.parse(text)
+}
+
+// Binary framing: 0x01 prefix = raw tunnel data, preceded by 16-byte tunnelId (ASCII hex, no dashes).
+// All other messages remain JSON strings.
+const DC_BINARY_TUNNEL_DATA = 0x01
+
+function encodeTunnelDataBinary(tunnelId, chunk) {
+  // tunnelId is a UUID string like 'xxxxxxxx-xxxx-...' — strip dashes, encode as 32 ASCII bytes
+  const idBytes = Buffer.from(tunnelId.replace(/-/g, ''), 'ascii') // 32 bytes
+  const frame = Buffer.allocUnsafe(1 + 32 + chunk.length)
+  frame[0] = DC_BINARY_TUNNEL_DATA
+  idBytes.copy(frame, 1)
+  chunk.copy(frame, 33)
+  return frame
+}
+
+function decodeTunnelDataBinary(buf) {
+  // buf[0] === DC_BINARY_TUNNEL_DATA, buf[1..32] = tunnelId hex, buf[33..] = data
+  const idHex = buf.slice(1, 33).toString('ascii')
+  const tunnelId = `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`
+  return { tunnelId, data: buf.slice(33) }
 }
 
 function closePeerConnection(pc) {
@@ -2942,6 +2993,14 @@ function bindProviderDataChannel(entry, dc) {
 }
 
 async function handleProviderDataChannelMessage(entry, raw) {
+  // Fast path: binary tunnel data frame (0x01 prefix) — no JSON parse needed
+  const buf = Buffer.isBuffer(raw) ? raw : (raw instanceof Uint8Array ? Buffer.from(raw) : null)
+  if (buf && buf.length > 33 && buf[0] === DC_BINARY_TUNNEL_DATA) {
+    const { tunnelId, data } = decodeTunnelDataBinary(buf)
+    const tunnel = entry.providerTunnels.get(tunnelId)
+    if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(data)
+    return
+  }
   const msg = parseDataChannelJson(raw)
   if (msg.type === 'open_tunnel') {
     const tunnelId = msg.tunnelId || crypto.randomUUID()
@@ -2962,7 +3021,7 @@ async function handleProviderDataChannelMessage(entry, raw) {
       sendDataChannelJson(entry.dataChannel, { type: 'tunnel_ready', tunnelId })
     })
     socket.on('data', (chunk) => {
-      sendDataChannelJson(entry.dataChannel, { type: 'tunnel_data', tunnelId, data: chunk.toString('base64') })
+      sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnelId, chunk))
       addBytes(entry.slot, chunk.length)
       queueDirectByteReport(entry, chunk.length)
     })
@@ -2974,7 +3033,7 @@ async function handleProviderDataChannelMessage(entry, raw) {
 
   if (msg.type === 'tunnel_data') {
     const tunnel = entry.providerTunnels.get(msg.tunnelId)
-    if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(Buffer.from(msg.data || '', 'base64'))
+    if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data || '', 'base64'))
     return
   }
 
@@ -3067,6 +3126,14 @@ function bindRequesterDataChannel(entry, dc) {
 }
 
 function handleRequesterDataChannelMessage(entry, raw) {
+  // Fast path: binary tunnel data frame
+  const buf = Buffer.isBuffer(raw) ? raw : (raw instanceof Uint8Array ? Buffer.from(raw) : null)
+  if (buf && buf.length > 33 && buf[0] === DC_BINARY_TUNNEL_DATA) {
+    const { tunnelId, data } = decodeTunnelDataBinary(buf)
+    const tunnel = entry.tunnels.get(tunnelId)
+    if (tunnel) tunnel.bridge.emit('message', data)
+    return
+  }
   const msg = parseDataChannelJson(raw)
   const tunnel = entry.tunnels.get(msg.tunnelId)
   if (!tunnel) return
@@ -3161,11 +3228,8 @@ function openDirectTunnel(entry, tunnel) {
   if (!entry?.dataChannel || entry.mode !== 'direct') return false
   tunnel.openedDirect = true
   tunnel.bridge._sendImpl = (data) => {
-    sendDataChannelJson(entry.dataChannel, {
-      type: 'tunnel_data',
-      tunnelId: tunnel.tunnelId,
-      data: Buffer.from(data).toString('base64'),
-    })
+    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnel.tunnelId, chunk))
   }
   tunnel.bridge._closeImpl = () => {
     sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
@@ -3348,8 +3412,9 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
   log.debug('LOCAL-PROXY', 'opening tunnel WS', { target: `${hostname}:${port}` })
 
   tunnelWs.on('message', (data) => {
-    const text = Buffer.isBuffer(data) ? data.toString() : data
-    if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {
+    if (!clientSocket._connectSent) {
+      const text = Buffer.isBuffer(data) ? data.toString() : data
+      if (!text.startsWith('HTTP/1.1 200')) return
       clientSocket._connectSent = true
       log.info('LOCAL-PROXY', 'tunnel ready Ã¢â‚¬â€ 200 sent to Chrome', { target: `${hostname}:${port}` })
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')

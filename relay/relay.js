@@ -23,7 +23,34 @@ const SCHEDULER_SECRET = process.env.SCHEDULER_SECRET ?? RELAY_SECRET
 const SCHEDULER_TICK_INTERVAL_MS = Math.max(0, parseInt(process.env.SCHEDULER_TICK_INTERVAL_MS ?? '60000', 10) || 0)
 const SESSION_DB_TOUCH_MS = Math.max(30_000, parseInt(process.env.SESSION_DB_TOUCH_MS ?? '60000', 10) || 60_000)
 const DIRECT_TRANSPORT_ENABLED = process.env.RELAY_DIRECT_TRANSPORT !== '0'
-const DIRECT_ICE_SERVERS = [
+
+// ICE servers — env-configurable so TURN can be added without code changes.
+// RELAY_ICE_SERVERS: comma-separated list of URIs, optionally with credentials
+// using the format: turn:host:port?user=U&pass=P
+// Example: stun:stun.l.google.com:19302,turn:turn.example.com:3478?user=foo&pass=bar
+function parseIceServers(raw) {
+  if (!raw) return null
+  const servers = []
+  for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+    try {
+      const url = new URL(entry)
+      const user = url.searchParams.get('user')
+      const pass = url.searchParams.get('pass')
+      // Strip query params from the URI itself
+      const uri = `${url.protocol}//${url.host}${url.pathname}`.replace(/\/$/, '')
+      if (user && pass) {
+        servers.push({ urls: uri, username: user, credential: pass })
+      } else {
+        servers.push(uri)
+      }
+    } catch {
+      servers.push(entry)
+    }
+  }
+  return servers.length > 0 ? servers : null
+}
+
+const DIRECT_ICE_SERVERS = parseIceServers(process.env.RELAY_ICE_SERVERS) ?? [
   'stun:stun.l.google.com:19302',
   'stun:stun1.l.google.com:19302',
 ]
@@ -676,6 +703,9 @@ function syncSessionMetadata(session, reason = 'update') {
     connectionQuality: session.connectionQuality ?? null,
     reconnectAttempts: session.reconnectAttempts ?? null,
     reconnectReason: session.reconnectReason ?? null,
+    directState: session.directState ?? null,
+    directOpenedAt: session.directOpenedAt ? new Date(session.directOpenedAt).toISOString() : null,
+    directFailReason: session.directFailReason ?? null,
     lastActivityAt: new Date().toISOString(),
   }
 
@@ -760,6 +790,8 @@ function buildSessionQuality(session, now = Date.now()) {
     providerKind: session.providerKind ?? null,
     providerDeviceId: session.providerDeviceId ?? null,
     country: session.country ?? null,
+    directState: session.directState ?? 'relay',
+    transportTier: session.transportTier ?? 0,
   }
 }
 
@@ -1502,6 +1534,7 @@ async function handleMessage(ws, msg) {
       directSession.lastActivity = Date.now()
       if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
       forwardSessionSignal(ws, msg, 'direct_failed', ['reason'])
+      syncSessionMetadata(directSession, 'direct_failed')
       log('DIRECT', `FAILED session=${directSession.sessionId.slice(0,8)} reason=${directSession.directFailReason} fallback=relay`)
       break
     }
@@ -1515,6 +1548,7 @@ async function handleMessage(ws, msg) {
       directSession.lastActivity = Date.now()
       if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
       forwardSessionSignal(ws, msg, 'direct_open', [])
+      syncSessionMetadata(directSession, 'direct_open')
       log('DIRECT', `OPEN session=${directSession.sessionId.slice(0,8)} transport=${directSession.directTransport ?? 'unknown'}`)
       break
     }
