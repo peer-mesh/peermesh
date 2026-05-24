@@ -68,7 +68,9 @@ export function DevSidebar() {
 
       <div style={{ padding: '14px 20px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--muted)', lineHeight: 1.6 }}>
         <div style={{ fontFamily: 'var(--font-geist-mono)', marginBottom: '4px' }}>v1 API</div>
-        <div>Sign in only for keys, wallet, and payouts.</div>
+        {!signedIn && (
+          <div>Sign in only for keys, wallet, and payouts.</div>
+        )}
       </div>
     </aside>
   )

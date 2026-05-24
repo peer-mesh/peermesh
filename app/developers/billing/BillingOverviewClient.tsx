@@ -7,6 +7,7 @@ import { formatBytes } from '@/lib/utils'
 
 type Profile = {
   wallet_balance_usd: number
+  outstanding_balance_usd: number | null
   contribution_credits_bytes: number
   wallet_pending_payout_usd: number
   role: string
@@ -32,11 +33,14 @@ export default function BillingOverviewClient() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load() }, [load])
 
+  const outstandingBalanceUsd = Number(profile?.outstanding_balance_usd ?? 0)
+
   const stats = [
     {
       label: 'USD Wallet',
       value: loading ? '...' : `$${Number(profile?.wallet_balance_usd ?? 0).toFixed(2)}`,
-      sub: 'Available for API sessions',
+      sub: outstandingBalanceUsd > 0 ? `Owed: $${outstandingBalanceUsd.toFixed(2)}` : 'Available for API sessions',
+      subColor: outstandingBalanceUsd > 0 ? '#ffb0b0' : 'var(--muted)',
       href: '/developers/billing/fund',
       action: 'Fund wallet →',
     },
@@ -76,10 +80,10 @@ export default function BillingOverviewClient() {
             <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '2px', marginBottom: '10px' }}>
               {s.label.toUpperCase()}
             </div>
-            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '26px', color: 'var(--accent)', marginBottom: '6px' }}>
+            <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '26px', color: 'var(--accent)', marginBottom: '6px', textAlign: 'left', margin: 0 }}>
               {s.value}
             </div>
-            <div style={{ fontSize: '12px', color: 'var(--muted)', marginBottom: s.href ? '12px' : '0' }}>{s.sub}</div>
+            <div style={{ fontSize: '12px', color: (s as any).subColor || 'var(--muted)', marginBottom: s.href ? '12px' : '0' }}>{s.sub}</div>
             {s.href && (
               <Link href={s.href} style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--accent)', textDecoration: 'none' }}>
                 {s.action}

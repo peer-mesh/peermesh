@@ -15,8 +15,10 @@ function AuthTabs() {
 
   const isSignup = pathname === '/auth/signup'
   const isConfirm = pathname.startsWith('/auth/confirm')
+  const isForgot = pathname.startsWith('/auth/forgot-password')
+  const isReset = pathname.startsWith('/auth/reset-password')
 
-  if (isConfirm) return null
+  if (isConfirm || isForgot || isReset) return null
 
   return (
     <div style={{ display: 'flex', background: 'var(--surface)', borderRadius: '10px', padding: '4px', marginBottom: '28px', border: '1px solid var(--border)' }}>
@@ -42,20 +44,34 @@ function AuthTabs() {
   )
 }
 
+function AuthLayoutContent() {
+  const pathname = usePathname()
+  const isForgot = pathname.startsWith('/auth/forgot-password')
+  const isReset = pathname.startsWith('/auth/reset-password')
+  const hideHeader = isForgot || isReset
+
+  return (
+    <>
+      {!hideHeader && (
+        <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', fontSize: '13px', letterSpacing: '4px', marginBottom: '32px', textAlign: 'center' }}>
+          PEERMESH
+        </div>
+      )}
+
+      <Suspense fallback={
+        <div style={{ display: 'flex', background: 'var(--surface)', borderRadius: '10px', padding: '4px', marginBottom: '28px', border: '1px solid var(--border)', height: '44px' }} />
+      }>
+        <AuthTabs />
+      </Suspense>
+    </>
+  )
+}
+
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
     <main className="flex flex-1 items-center justify-center px-6 py-20">
       <div style={{ width: '100%', maxWidth: '400px' }}>
-        <div style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', fontSize: '13px', letterSpacing: '4px', marginBottom: '32px', textAlign: 'center' }}>
-          PEERMESH
-        </div>
-
-        <Suspense fallback={
-          <div style={{ display: 'flex', background: 'var(--surface)', borderRadius: '10px', padding: '4px', marginBottom: '28px', border: '1px solid var(--border)', height: '44px' }} />
-        }>
-          <AuthTabs />
-        </Suspense>
-
+        <AuthLayoutContent />
         {children}
       </div>
     </main>

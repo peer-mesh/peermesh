@@ -11,7 +11,7 @@ import type { DesktopState } from '@/lib/agent-client'
 
 type Country = { code: string; name: string; flag: string }
 const COUNTRIES_PAGE_SIZE = 20
-const PROFILE_SELECT_FIELDS = 'id, username, role, country_code, trust_score, is_verified, verified_at, phone_number, gov_id_verified, is_premium, subscription_status, stripe_customer_id, is_sharing, total_bytes_shared, share_bytes_today, share_bytes_today_date, total_bytes_used, bandwidth_used_month, bandwidth_limit, preferred_providers, has_accepted_provider_terms, daily_share_limit_mb, contribution_credits_bytes, wallet_balance_usd, wallet_pending_payout_usd, payout_currency, created_at, updated_at, state_actor, state_changed_at'
+const PROFILE_SELECT_FIELDS = 'id, username, role, country_code, trust_score, is_verified, verified_at, phone_number, gov_id_verified, is_premium, subscription_status, stripe_customer_id, is_sharing, total_bytes_shared, share_bytes_today, share_bytes_today_date, total_bytes_used, bandwidth_used_month, bandwidth_limit, preferred_providers, has_accepted_provider_terms, daily_share_limit_mb, contribution_credits_bytes, wallet_balance_usd, outstanding_balance_usd, wallet_pending_payout_usd, payout_currency, created_at, updated_at, state_actor, state_changed_at'
 
 // ── Debug logger — all strings, no objects, easy to copy from console ──────────
 function log(tag: string, ...parts: (string | number | boolean | null | undefined)[]) {
@@ -1291,6 +1291,7 @@ export default function Dashboard() {
   const helperStarting = isDesktopSharePending(desktop)
   const privateConnectReady = !selectedCountry && !!privateCodeInput.trim()
   const walletBalanceLabel = `$${Number(profile.wallet_balance_usd ?? 0).toFixed(2)}`
+  const outstandingBalanceUsd = Number(profile.outstanding_balance_usd ?? 0)
   const payoutBalanceLabel = `$${Number(profile.wallet_pending_payout_usd ?? 0).toFixed(2)}`
   const contributionCreditsLabel = formatBytes(Number(profile.contribution_credits_bytes ?? 0))
   const hasPaidAccess = profileHasPaidAccess(profile)
@@ -1473,6 +1474,11 @@ export default function Dashboard() {
             <div key={label} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '10px', padding: '14px' }}>
               <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '16px', color: 'var(--accent)', marginBottom: '4px' }}>{value}</div>
               <div style={{ fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>{label}</div>
+              {label === 'USD WALLET' && outstandingBalanceUsd > 0 ? (
+                <div style={{ fontSize: '12px', color: '#ffb0b0', marginTop: '8px' }}>
+                  Owed: ${outstandingBalanceUsd.toFixed(2)}. Add funds to clear.
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

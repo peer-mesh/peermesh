@@ -477,7 +477,7 @@ export default function BillingPageClient() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
         <div style={sectionStyle}>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>USD WALLET</div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '28px', color: netWalletUsd < 0 ? '#ff8080' : 'var(--accent)' }}>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '28px', color: netWalletUsd < 0 ? '#ff8080' : 'var(--accent)', textAlign: 'left', margin: 0 }}>
             {loading ? '...' : `${netWalletUsd < 0 ? '-' : ''}$${Math.abs(netWalletUsd).toFixed(2)}`}
           </div>
           {!loading && outstandingBalanceUsd > 0 ? (
@@ -488,13 +488,13 @@ export default function BillingPageClient() {
         </div>
         <div style={sectionStyle}>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>CONTRIBUTION CREDITS</div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '20px', color: 'var(--accent)' }}>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '20px', color: 'var(--accent)', textAlign: 'left', margin: 0 }}>
             {loading ? '...' : contributionLabel}
           </div>
         </div>
         <div style={sectionStyle}>
           <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '10px', color: 'var(--muted)', letterSpacing: '1px' }}>PENDING PAYOUT</div>
-          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '20px', color: 'var(--accent)' }}>
+          <div style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '20px', color: 'var(--accent)', textAlign: 'left', margin: 0 }}>
             {loading ? '...' : `$${Number(summary?.profile.wallet_pending_payout_usd ?? 0).toFixed(2)}`}
           </div>
           {summary?.payoutPreview?.destination_amount != null ? (

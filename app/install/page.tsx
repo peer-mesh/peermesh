@@ -72,11 +72,14 @@ export default function InstallPage() {
     <main style={{ width: '100%', maxWidth: '1040px', margin: '0 auto', padding: '40px 20px 72px' }}>
       <nav style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px', marginBottom: '44px' }}>
         <Link href="/" style={{ fontFamily: 'var(--font-geist-mono)', color: 'var(--accent)', textDecoration: 'none', fontSize: '13px', letterSpacing: '3px' }}>PEERMESH</Link>
-        <AuthAwareLinks
-          includeTraffic={false}
-          style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}
-          linkStyle={{ color: 'var(--muted)', textDecoration: 'none' }}
-        />
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+          <AuthAwareLinks
+            includeTraffic={false}
+            style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}
+            linkStyle={{ color: 'var(--muted)', textDecoration: 'none' }}
+          />
+          <a href="/developers/api-docs" style={{ fontFamily: 'var(--font-geist-mono)', fontSize: '11px', color: 'var(--muted)', textDecoration: 'none' }}>API DOCS</a>
+        </div>
       </nav>
 
       <section style={{ marginBottom: '36px' }}>

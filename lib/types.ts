@@ -28,6 +28,7 @@ export type Profile = {
   daily_share_limit_mb: number | null
   contribution_credits_bytes: number
   wallet_balance_usd: number
+  outstanding_balance_usd: number | null
   wallet_pending_payout_usd: number
   payout_currency: string | null
   created_at: string
