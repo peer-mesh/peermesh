@@ -603,6 +603,8 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     tunnelWindowStart: Date.now(),
     tunnelOpenCount: 0,
     byteBurstSamples: [],
+    byteBurstSampleStart: 0,
+    byteBurstWindowBytes: 0,
     privateBaseDeviceId: requesterWs.privateBaseDeviceId ?? null,
     lastActivity: Date.now(),
     lastDbActivitySyncAt: 0,
@@ -863,17 +865,32 @@ function recordSessionBytes(session, byteCount, direction = 'unknown') {
   // This prevents a tumbling-window reset from allowing a full-quota burst
   // immediately after a reset, which would kill legitimate streaming sessions.
   if (!session.byteBurstSamples) session.byteBurstSamples = []
+  if (!Number.isInteger(session.byteBurstSampleStart)) session.byteBurstSampleStart = 0
+  if (!Number.isFinite(session.byteBurstWindowBytes)) {
+    session.byteBurstWindowBytes = 0
+    for (let i = session.byteBurstSampleStart; i < session.byteBurstSamples.length; i++) {
+      session.byteBurstWindowBytes += session.byteBurstSamples[i].b
+    }
+  }
   session.byteBurstSamples.push({ t: now, b: byteCount })
+  session.byteBurstWindowBytes += byteCount
 
   // Evict samples older than the window
   const cutoff = now - BYTE_BURST_WINDOW_MS
-  let lo = 0
-  while (lo < session.byteBurstSamples.length && session.byteBurstSamples[lo].t < cutoff) lo++
-  if (lo > 0) session.byteBurstSamples = session.byteBurstSamples.slice(lo)
+  while (
+    session.byteBurstSampleStart < session.byteBurstSamples.length &&
+    session.byteBurstSamples[session.byteBurstSampleStart].t < cutoff
+  ) {
+    session.byteBurstWindowBytes -= session.byteBurstSamples[session.byteBurstSampleStart].b
+    session.byteBurstSampleStart++
+  }
+  if (session.byteBurstSampleStart > 1024 && session.byteBurstSampleStart * 2 > session.byteBurstSamples.length) {
+    session.byteBurstSamples = session.byteBurstSamples.slice(session.byteBurstSampleStart)
+    session.byteBurstSampleStart = 0
+  }
+  session.byteBurstWindowBytes = Math.max(0, session.byteBurstWindowBytes)
 
-  // Sum bytes in the current window
-  let windowBytes = 0
-  for (let i = 0; i < session.byteBurstSamples.length; i++) windowBytes += session.byteBurstSamples[i].b
+  const windowBytes = session.byteBurstWindowBytes
 
   if (windowBytes <= limits.maxBytesPerMinute) {
     recordAuditBytes(session, byteCount, direction)

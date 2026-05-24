@@ -2763,6 +2763,10 @@ const directSessions = new Map()
 const requesterDirectSessions = new Map()
 const DIRECT_ICE_TIMEOUT_MS = 5000
 const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
+const DIRECT_DC_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
+const DIRECT_DC_BUFFER_LOW_BYTES = 1 * 1024 * 1024
+const DIRECT_DC_BUFFER_CHECK_MS = 50
+const DIRECT_TUNNEL_PENDING_MAX_BYTES = 8 * 1024 * 1024
 const DIRECT_ICE_SERVERS = [
   'stun:stun.l.google.com:19302',
   'stun:stun1.l.google.com:19302',
@@ -2818,8 +2822,19 @@ function sendDataChannelJson(dc, payload) {
 // Send raw binary over the data channel — avoids base64 encoding overhead for tunnel_data.
 // node-datachannel supports sendMessageBinary for Buffer/Uint8Array.
 function sendDataChannelBinary(dc, buf) {
-  if (typeof dc?.sendMessageBinary === 'function') dc.sendMessageBinary(buf)
-  else if (typeof dc?.send === 'function') dc.send(buf)
+  if (typeof dc?.sendMessageBinary === 'function') return dc.sendMessageBinary(buf)
+  if (typeof dc?.send === 'function') return dc.send(buf)
+  return false
+}
+
+function getDataChannelBufferedAmount(dc) {
+  try {
+    if (typeof dc?.bufferedAmount === 'function') return Number(dc.bufferedAmount()) || 0
+    if (typeof dc?.bufferedAmount === 'number') return dc.bufferedAmount
+    if (typeof dc?.amountBuffered === 'function') return Number(dc.amountBuffered()) || 0
+    if (typeof dc?.amountBuffered === 'number') return dc.amountBuffered
+  } catch {}
+  return 0
 }
 
 function parseDataChannelJson(raw) {
@@ -2831,9 +2846,13 @@ function parseDataChannelJson(raw) {
 // All other messages remain JSON strings.
 const DC_BINARY_TUNNEL_DATA = 0x01
 
-function encodeTunnelDataBinary(tunnelId, chunk) {
+function getTunnelIdBytes(tunnelId) {
+  return Buffer.from(tunnelId.replace(/-/g, ''), 'ascii')
+}
+
+function encodeTunnelDataBinary(tunnelId, chunk, idBytes = null) {
   // tunnelId is a UUID string like 'xxxxxxxx-xxxx-...' — strip dashes, encode as 32 ASCII bytes
-  const idBytes = Buffer.from(tunnelId.replace(/-/g, ''), 'ascii') // 32 bytes
+  idBytes = idBytes || getTunnelIdBytes(tunnelId)
   const frame = Buffer.allocUnsafe(1 + 32 + chunk.length)
   frame[0] = DC_BINARY_TUNNEL_DATA
   idBytes.copy(frame, 1)
@@ -2846,6 +2865,73 @@ function decodeTunnelDataBinary(buf) {
   const idHex = buf.slice(1, 33).toString('ascii')
   const tunnelId = `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`
   return { tunnelId, data: buf.slice(33) }
+}
+
+function clearTunnelBackpressure(tunnel) {
+  if (tunnel?.backpressureTimer) {
+    clearInterval(tunnel.backpressureTimer)
+    tunnel.backpressureTimer = null
+  }
+  if (tunnel) tunnel.pausedForDataChannel = false
+}
+
+function scheduleTunnelDataChannelPump(entry, tunnel) {
+  if (!tunnel || tunnel.closed || tunnel.backpressureTimer) return
+  tunnel.backpressureTimer = setInterval(() => pumpTunnelDataChannel(entry, tunnel), DIRECT_DC_BUFFER_CHECK_MS)
+}
+
+function queueTunnelDataChannelFrame(entry, tunnel, chunk, onSent) {
+  if (!entry?.dataChannel || !tunnel || tunnel.closed) return false
+  if (!tunnel.pendingDcFrames) tunnel.pendingDcFrames = []
+  tunnel.pendingDcBytes = (tunnel.pendingDcBytes || 0) + chunk.length
+  if (tunnel.pendingDcBytes > DIRECT_TUNNEL_PENDING_MAX_BYTES) {
+    closeProviderDirectTunnel(entry, tunnel.tunnelId, true)
+    return false
+  }
+  tunnel.pendingDcFrames.push({ chunk, onSent })
+  pumpTunnelDataChannel(entry, tunnel)
+  return true
+}
+
+function pumpTunnelDataChannel(entry, tunnel) {
+  if (!entry?.dataChannel || !tunnel || tunnel.closed || tunnel.pumpingDataChannel) return
+  tunnel.pumpingDataChannel = true
+  try {
+    while (tunnel.pendingDcFrames?.length) {
+      if (getDataChannelBufferedAmount(entry.dataChannel) >= DIRECT_DC_BUFFER_HIGH_BYTES) break
+      const item = tunnel.pendingDcFrames.shift()
+      tunnel.pendingDcBytes = Math.max(0, (tunnel.pendingDcBytes || 0) - item.chunk.length)
+      const ok = sendDataChannelBinary(
+        entry.dataChannel,
+        encodeTunnelDataBinary(tunnel.tunnelId, item.chunk, tunnel.tunnelIdBytes)
+      )
+      if (ok === false) {
+        tunnel.pendingDcFrames.unshift(item)
+        tunnel.pendingDcBytes = (tunnel.pendingDcBytes || 0) + item.chunk.length
+        break
+      }
+      item.onSent?.()
+    }
+  } finally {
+    tunnel.pumpingDataChannel = false
+  }
+
+  const buffered = getDataChannelBufferedAmount(entry.dataChannel)
+  const shouldPause = Boolean(tunnel.pendingDcFrames?.length) || buffered >= DIRECT_DC_BUFFER_HIGH_BYTES
+  if (shouldPause) {
+    if (tunnel.socket && !tunnel.socket.destroyed && !tunnel.pausedForDataChannel) {
+      tunnel.pausedForDataChannel = true
+      tunnel.socket.pause()
+    }
+    scheduleTunnelDataChannelPump(entry, tunnel)
+    return
+  }
+
+  if (buffered <= DIRECT_DC_BUFFER_LOW_BYTES) {
+    const wasPaused = tunnel.pausedForDataChannel
+    clearTunnelBackpressure(tunnel)
+    if (wasPaused && tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.resume()
+  }
 }
 
 function closePeerConnection(pc) {
@@ -2893,6 +2979,7 @@ function closeDirectWebRtcSession(sessionId, reason = 'direct_closed') {
   const entry = directSessions.get(sessionId)
   if (!entry) return
   for (const [, tunnel] of entry.providerTunnels ?? []) {
+    clearTunnelBackpressure(tunnel)
     if (tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.destroy()
   }
   entry.providerTunnels?.clear()
@@ -3015,18 +3102,33 @@ async function handleProviderDataChannelMessage(entry, raw) {
     syncAggregateState()
     const socket = net.connect(port, hostname)
     socket.setTimeout(20000, () => { socket.destroy(new Error('connect timeout')) })
-    entry.providerTunnels.set(tunnelId, { socket, closed: false })
+    const tunnel = {
+      socket,
+      closed: false,
+      tunnelId,
+      tunnelIdBytes: getTunnelIdBytes(tunnelId),
+      pendingDcFrames: [],
+      pendingDcBytes: 0,
+      backpressureTimer: null,
+      pausedForDataChannel: false,
+      pumpingDataChannel: false,
+    }
+    entry.providerTunnels.set(tunnelId, tunnel)
     socket.on('connect', () => {
       socket.setTimeout(0)
       sendDataChannelJson(entry.dataChannel, { type: 'tunnel_ready', tunnelId })
     })
     socket.on('data', (chunk) => {
-      sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnelId, chunk))
-      addBytes(entry.slot, chunk.length)
-      queueDirectByteReport(entry, chunk.length)
+      queueTunnelDataChannelFrame(entry, tunnel, chunk, () => {
+        addBytes(entry.slot, chunk.length)
+        queueDirectByteReport(entry, chunk.length)
+      })
     })
     socket.on('end', () => closeProviderDirectTunnel(entry, tunnelId, true))
-    socket.on('close', () => entry.providerTunnels.delete(tunnelId))
+    socket.on('close', () => {
+      clearTunnelBackpressure(tunnel)
+      entry.providerTunnels.delete(tunnelId)
+    })
     socket.on('error', () => closeProviderDirectTunnel(entry, tunnelId, true))
     return
   }
@@ -3044,6 +3146,7 @@ function closeProviderDirectTunnel(entry, tunnelId, notifyRequester = false) {
   const tunnel = entry?.providerTunnels?.get(tunnelId)
   if (!tunnel || tunnel.closed) return
   tunnel.closed = true
+  clearTunnelBackpressure(tunnel)
   entry.providerTunnels.delete(tunnelId)
   if (notifyRequester && entry.dataChannel) sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId })
   if (tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.destroy()
@@ -3227,9 +3330,10 @@ function startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen) {
 function openDirectTunnel(entry, tunnel) {
   if (!entry?.dataChannel || entry.mode !== 'direct') return false
   tunnel.openedDirect = true
+  tunnel.tunnelIdBytes = tunnel.tunnelIdBytes || getTunnelIdBytes(tunnel.tunnelId)
   tunnel.bridge._sendImpl = (data) => {
     const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
-    sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnel.tunnelId, chunk))
+    sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnel.tunnelId, chunk, tunnel.tunnelIdBytes))
   }
   tunnel.bridge._closeImpl = () => {
     sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
@@ -3278,6 +3382,7 @@ function openTunnelWs(hostname, port, onOpen) {
     ready: false,
     openedDirect: false,
   }
+  tunnel.tunnelIdBytes = getTunnelIdBytes(tunnel.tunnelId)
   directEntry.tunnels.set(tunnel.tunnelId, tunnel)
   if (directEntry.mode === 'direct') {
     openDirectTunnel(directEntry, tunnel)
