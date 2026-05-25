@@ -798,6 +798,8 @@ function buildSessionQuality(session, now = Date.now()) {
     providerDeviceId: session.providerDeviceId ?? null,
     country: session.country ?? null,
     directState: session.directState ?? 'relay',
+    directOpenedAt: session.directOpenedAt ? new Date(session.directOpenedAt).toISOString() : null,
+    directFailReason: session.directFailReason ?? null,
     transportTier: session.transportTier ?? 0,
   }
 }
@@ -1578,6 +1580,7 @@ async function handleMessage(ws, msg) {
       directSession.lastActivity = Date.now()
       if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
       forwardSessionSignal(ws, msg, 'direct_failed', ['reason'])
+      sendSessionQuality(directSession, 'direct_failed', true)
       syncSessionMetadata(directSession, 'direct_failed')
       log('DIRECT', `FAILED session=${directSession.sessionId.slice(0,8)} reason=${directSession.directFailReason} fallback=relay`)
       break
@@ -1592,6 +1595,7 @@ async function handleMessage(ws, msg) {
       directSession.lastActivity = Date.now()
       if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
       forwardSessionSignal(ws, msg, 'direct_open', [])
+      sendSessionQuality(directSession, 'direct_open', true)
       syncSessionMetadata(directSession, 'direct_open')
       log('DIRECT', `OPEN session=${directSession.sessionId.slice(0,8)} transport=${directSession.directTransport ?? 'unknown'}`)
       break
@@ -1693,7 +1697,8 @@ async function handleMessage(ws, msg) {
       const proxyClient = proxyClients.get(msg.tunnelId)
       if (!proxyClient) return
       const chunk = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data || '', 'base64')
-      const tunnelSession = ws.sessionId ? sessions.get(ws.sessionId) : null
+      const tunnelSessionId = proxyClient.sessionId ?? ws.sessionId ?? msg.sessionId ?? null
+      const tunnelSession = tunnelSessionId ? sessions.get(tunnelSessionId) : null
       if (!recordSessionBytes(tunnelSession, chunk.length, 'provider_to_requester')) return
       if (tunnelSession) {
         tunnelSession.lastActivity = Date.now()
@@ -2056,6 +2061,9 @@ function reportSessionEnd(session, sessionId) {
         ...(session.connectionQuality && typeof session.connectionQuality === 'object' ? session.connectionQuality : {}),
         mandateArchitecture: true,
         transportTier: session.transportTier ?? 0,
+        directState: session.directState ?? 'relay',
+        directOpenedAt: session.directOpenedAt ? new Date(session.directOpenedAt).toISOString() : null,
+        directFailReason: session.directFailReason ?? null,
         tokenFloorBytes: session.audit?.tokenFloorBytes ?? 0,
         auditBytesForwarded: session.audit?.bytesForwarded ?? 0,
       },

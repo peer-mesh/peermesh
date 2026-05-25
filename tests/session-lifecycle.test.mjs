@@ -146,6 +146,20 @@ test('relay assigns direct-first mandated sessions with relay fallback and direc
   assert.match(relay, /case 'direct_tunnel_open'/)
   assert.match(relay, /case 'direct_bytes'/)
   assert.match(relay, /recordSessionBytes\(directSession, byteCount, 'provider_to_requester'\)/)
+  assert.match(relay, /sendSessionQuality\(directSession, 'direct_failed', true\)/)
+  assert.match(relay, /sendSessionQuality\(directSession, 'direct_open', true\)/)
+  assert.match(relay, /const tunnelSessionId = proxyClient\.sessionId \?\? ws\.sessionId \?\? msg\.sessionId \?\? null/)
+  assert.match(relay, /const tunnelSession = tunnelSessionId \? sessions\.get\(tunnelSessionId\) : null/)
+})
+
+test('session metadata patch accepts direct transport state in connection quality', () => {
+  const route = readRepoFile('app/api/session/end/route.ts')
+
+  assert.match(route, /directState/)
+  assert.match(route, /directOpenedAt/)
+  assert.match(route, /directFailReason/)
+  assert.match(route, /const directQualityPatch: Record<string, unknown> = {}/)
+  assert.match(route, /patch\.connection_quality = mergedConnectionQuality/)
 })
 
 test('relay config route computes relay health once per request', () => {

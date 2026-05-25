@@ -273,6 +273,8 @@ test('mandated direct-first session stays alive and can relay-fallback a tunnel'
     provider.send({ type: 'direct_failed', sessionId: created.sessionId, reason: 'ice_failed' })
     const directFailed = await requester.waitFor(msg => msg.type === 'direct_failed', 'direct_failed')
     assert.equal(directFailed.reason, 'ice_failed')
+    const failedQuality = await requester.waitFor(msg => msg.type === 'session_quality' && msg.reason === 'direct_failed', 'direct_failed quality')
+    assert.equal(failedQuality.directState, 'relay')
 
     const noEarlyEnd = await requester
       .waitFor(msg => msg.type === 'session_ended', 'unexpected session end', 500)

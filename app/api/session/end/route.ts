@@ -88,10 +88,24 @@ export async function PATCH(req: Request) {
     providerAvgMbps,
     providerLastMbps,
     connectionQuality,
+    directState,
+    directOpenedAt,
+    directFailReason,
     reconnectAttempts,
     reconnectReason,
     lastActivityAt,
   } = await req.json().catch(() => ({}))
+
+  const directQualityPatch: Record<string, unknown> = {}
+  if (typeof directState === 'string') directQualityPatch.directState = directState
+  if (typeof directOpenedAt === 'string') directQualityPatch.directOpenedAt = directOpenedAt
+  if (typeof directFailReason === 'string' || directFailReason === null) directQualityPatch.directFailReason = directFailReason
+  const incomingConnectionQuality = connectionQuality && typeof connectionQuality === 'object'
+    ? connectionQuality as Record<string, unknown>
+    : null
+  const mergedConnectionQuality = (incomingConnectionQuality || Object.keys(directQualityPatch).length > 0)
+    ? { ...(incomingConnectionQuality ?? {}), ...directQualityPatch }
+    : null
 
   const resolvedId = dbSessionId ?? sessionId ?? null
   const hasPatchField = !!providerUserId || !!providerKind || !!providerDeviceId || !!providerBaseDeviceId || !!relayEndpoint || !!targetHost
@@ -99,7 +113,7 @@ export async function PATCH(req: Request) {
     || !!disconnectReason
     || typeof providerAvgMbps === 'number'
     || typeof providerLastMbps === 'number'
-    || !!connectionQuality
+    || !!mergedConnectionQuality
     || typeof reconnectAttempts === 'number'
     || typeof reconnectReason === 'string'
     || typeof lastActivityAt === 'string'
@@ -124,7 +138,7 @@ export async function PATCH(req: Request) {
   if (disconnectReason) patch.disconnect_reason = disconnectReason
   if (typeof providerAvgMbps === 'number') patch.provider_avg_mbps = providerAvgMbps
   if (typeof providerLastMbps === 'number') patch.provider_last_mbps = providerLastMbps
-  if (connectionQuality && typeof connectionQuality === 'object') patch.connection_quality = connectionQuality
+  if (mergedConnectionQuality) patch.connection_quality = mergedConnectionQuality
   if (typeof reconnectAttempts === 'number') patch.reconnect_attempts = Math.max(0, reconnectAttempts)
   if (typeof reconnectReason === 'string') patch.reconnect_reason = reconnectReason
   if (parsedLastActivityAt && !Number.isNaN(parsedLastActivityAt.getTime())) {
