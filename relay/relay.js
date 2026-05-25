@@ -827,6 +827,8 @@ function sendSessionQuality(session, reason = 'traffic', force = false) {
     providerKind: quality.providerKind,
     providerDeviceId: quality.providerDeviceId,
     country: quality.country,
+    directState: quality.directState,
+    transportTier: quality.transportTier,
   })
 }
 
@@ -1564,6 +1566,12 @@ async function handleMessage(ws, msg) {
     case 'direct_failed': {
       const directSession = sessions.get(msg.sessionId ?? ws.sessionId)
       if (!isSessionParticipant(directSession, ws)) break
+      if (directSession.directState === 'direct' || directSession.directOpenedAt) {
+        directSession.lastActivity = Date.now()
+        if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
+        log('DIRECT', `IGNORED late direct_failed session=${directSession.sessionId.slice(0,8)} reason=${String(msg.reason ?? 'ice_failed').slice(0, 120)}`)
+        break
+      }
       directSession.directState = 'relay'
       directSession.directFailedAt = Date.now()
       directSession.directFailReason = String(msg.reason ?? 'ice_failed').slice(0, 120)

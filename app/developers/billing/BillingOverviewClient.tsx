@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { formatBytes } from '@/lib/utils'
@@ -15,11 +15,42 @@ type Profile = {
 
 type BillingStat = {
   label: string
-  value: string
+  value: ReactNode
   sub: string
   subColor?: string
   href: string | null
   action: string | null
+}
+
+function LoadingDots() {
+  return (
+    <span
+      aria-label="Loading"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'flex-start',
+        gap: '4px',
+        width: '34px',
+        minHeight: '1em',
+        verticalAlign: 'baseline',
+      }}
+    >
+      {[0, 1, 2].map((index) => (
+        <span
+          key={index}
+          style={{
+            width: '5px',
+            height: '5px',
+            borderRadius: '999px',
+            background: 'currentColor',
+            opacity: 0.75 - index * 0.18,
+            flex: '0 0 auto',
+          }}
+        />
+      ))}
+    </span>
+  )
 }
 
 export default function BillingOverviewClient() {
@@ -47,25 +78,25 @@ export default function BillingOverviewClient() {
   const stats: BillingStat[] = [
     {
       label: 'USD Wallet',
-      value: loading ? '...' : `$${Number(profile?.wallet_balance_usd ?? 0).toFixed(2)}`,
+      value: loading ? <LoadingDots /> : `$${Number(profile?.wallet_balance_usd ?? 0).toFixed(2)}`,
       sub: outstandingBalanceUsd > 0 ? `Owed: $${outstandingBalanceUsd.toFixed(2)}` : 'Available for API sessions',
       subColor: outstandingBalanceUsd > 0 ? '#ffb0b0' : 'var(--muted)',
       href: '/developers/billing/fund',
-      action: 'Fund wallet →',
+      action: 'Fund wallet ->',
     },
     {
       label: 'Contribution Credits',
-      value: loading ? '...' : formatBytes(Number(profile?.contribution_credits_bytes ?? 0)),
+      value: loading ? <LoadingDots /> : formatBytes(Number(profile?.contribution_credits_bytes ?? 0)),
       sub: 'Earned by sharing bandwidth',
       href: null,
       action: null,
     },
     {
       label: 'Pending Payout',
-      value: loading ? '...' : `$${Number(profile?.wallet_pending_payout_usd ?? 0).toFixed(2)}`,
+      value: loading ? <LoadingDots /> : `$${Number(profile?.wallet_pending_payout_usd ?? 0).toFixed(2)}`,
       sub: 'Provider earnings awaiting withdrawal',
       href: '/developers/billing/payouts',
-      action: 'Withdraw →',
+      action: 'Withdraw ->',
     },
   ]
 

@@ -10,6 +10,10 @@ const startupBusy = {
   privateOnDemandStart: false,
 }
 
+const startupPending = {
+  scheduleWakeEnabled: null,
+}
+
 let devicePollInterval = null
 let deviceFlowActive = false
 let signingIn = false
@@ -649,7 +653,9 @@ function renderStartupPreferences(state) {
     disabled: !signedIn || startupBusy.sharingSchedule || sharingScheduleSaving,
   })
   setToggleVisual(scheduleWakeToggle, {
-    on: !!osWake.enabled,
+    on: startupBusy.scheduleWakeEnabled && startupPending.scheduleWakeEnabled !== null
+      ? startupPending.scheduleWakeEnabled
+      : !!osWake.enabled,
     loading: startupBusy.scheduleWakeEnabled,
     disabled: !scheduleWakeReady || startupBusy.scheduleWakeEnabled,
   })
@@ -1300,6 +1306,7 @@ async function updateSharingSchedule(patch) {
 
 async function updateScheduleWake(enabled) {
   startupBusy.scheduleWakeEnabled = true
+  startupPending.scheduleWakeEnabled = !!enabled
   renderStartupPreferences(window.__lastPeerMeshState || null)
   clearMainError()
   try {
@@ -1310,6 +1317,7 @@ async function updateScheduleWake(enabled) {
     showMainError(error?.message || 'Could not update OS wake setting')
   } finally {
     startupBusy.scheduleWakeEnabled = false
+    startupPending.scheduleWakeEnabled = null
     renderStartupPreferences(window.__lastPeerMeshState || null)
   }
 }

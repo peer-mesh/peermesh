@@ -145,6 +145,15 @@ function formatMbps(value) {
   return `${speed >= 10 ? speed.toFixed(1) : speed.toFixed(2)} Mbps`
 }
 
+function getSessionRouteLabel(session = null) {
+  const directState = String(session?.directState || session?.quality?.directState || '').toLowerCase()
+  if (directState === 'direct') return 'DIRECT'
+  if (directState === 'attempting_direct') return 'DIRECT SETUP'
+  if (directState === 'relay') return 'RELAY'
+  if (Number(session?.transportTier ?? session?.quality?.transportTier ?? 0) > 0) return 'DIRECT SETUP'
+  return 'RELAY'
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -508,6 +517,7 @@ async function refreshRuntimeStatus() {
     const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' })
     if (!status) return
     state.session = status.session || null
+    state.connectionType = status.connectionType || status.session?.connectionType || state.connectionType || 'public'
     state.helper = status.helper || null
     state.failClosed = !!status.failClosed
     const helper = ownedHelper(status.helper || null, state.user)
@@ -857,6 +867,7 @@ function renderDashboard(app) {
       <div class="session-card">
         <div class="via">Browsing via peer</div>
         <div class="country-display">${getFlagForCountry(session.country)} ${session.country}</div>
+        <div style="margin-top:6px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.24);color:#00ff88">${getSessionRouteLabel(session)}</div>
         <div style="margin-top:6px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.connectionType === 'private' ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.connectionType === 'private' ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.connectionType === 'private' ? '#00ff88' : '#666680'}">${state.connectionType === 'private' ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>
         ${session.quality ? `<div style="margin-top:8px;font-family:'Courier New',monospace;font-size:10px;color:var(--muted)">Provider speed: <span style="color:var(--accent)">${formatMbps(session.quality.currentMbps)}</span> now · ${formatMbps(session.quality.avgMbps)} avg</div>` : ''}
       </div>
@@ -1765,6 +1776,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
     state.failClosed = false
     state.reconnectStatus = null
+    render()
     // Brief visual pulse on the status pill so user knows a switch happened
     const pill = document.querySelector('.status-pill')
     if (pill) {

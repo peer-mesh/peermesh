@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PeerMesh",
-  "version": "1.6.61",
+  "version": "1.6.62",
   "description": "Browse the web through real people's connections worldwide.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz5udjvS2HGgdc7ZHd7edADd454nACcGTilT31pfuvwCq2Re9+Szk0QE4GuTQi09T3C3K47WYXiAoWqyScg97UH668m9VyqaYyaFn9sYlc8dWpztAPK6u7i2KbfYZ3VmNhCg4TiltaeMQgIptVDFcruQhhWw4M0Gj6fduuMYu7imSfw/M+1LqInygNfaMt2bCPpgAr0gIWJoWiJ+meL6ODwmkNvacKQdufs2FgaQOEOQOFouLMk4znYqWOYwd18uwQ3zHEN4++lDq60WpjhfN1PFCpOvzV1DBYG0Gv4WzMFbDsZUX6spUhuhvmkl3rGNkp9z2HleLZIs43Fmt8y3oZwIDAQAB",
   "permissions": [

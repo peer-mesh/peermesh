@@ -458,9 +458,19 @@ function closeSessionPanel() {
 }
 
 function getSessionPanelStatusLabel(status) {
-  if (status?.failClosed) return { label: 'PROTECTED BLOCK', color: '#ffaa00' }
   if (status?.connected) return { label: 'CONNECTED', color: '#00ff88' }
+  if (status?.failClosed) return { label: 'PROTECTED BLOCK', color: '#ffaa00' }
   return { label: 'DISCONNECTED', color: '#ff6060' }
+}
+
+function getSessionPanelRouteLabel(status = {}) {
+  const session = status.session || null
+  const directState = String(session?.directState || session?.quality?.directState || status.directState || '').toLowerCase()
+  if (directState === 'direct') return 'DIRECT'
+  if (directState === 'attempting_direct') return 'DIRECT SETUP'
+  if (directState === 'relay') return 'RELAY'
+  if (Number(session?.transportTier ?? session?.quality?.transportTier ?? 0) > 0) return 'DIRECT SETUP'
+  return session ? 'RELAY' : 'NONE'
 }
 
 function renderSessionPanelStatus(status = {}) {
@@ -473,19 +483,24 @@ function renderSessionPanelStatus(status = {}) {
   const state = getSessionPanelStatusLabel(status)
   const country = session?.country || helper?.country || 'none'
   const connectionType = String(session?.connectionType || status.connectionType || 'public').toUpperCase()
+  const route = getSessionPanelRouteLabel(status)
   const currentSpeed = quality ? formatPanelMbps(quality.currentMbps) : '0.00 Mbps'
   const avgSpeed = quality ? formatPanelMbps(quality.avgMbps) : '0.00 Mbps'
   const bytesUsed = quality?.transferredBytes != null ? formatPanelBytes(quality.transferredBytes) : '0B'
   const provider = quality?.providerKind || helper?.source || 'unknown'
   const sessionId = session?.sessionId || session?.id || ''
   const runtime = session ? formatPanelDuration(session.startedAt || session.createdAt) : '0m'
-  const failReason = status.failClosedReason || (status.failClosed ? 'Traffic is blocked to protect your real connection.' : '')
+  const failReason = status.failClosed && !status.connected
+    ? (status.failClosedReason || 'Traffic is blocked to protect your real connection.')
+    : ''
 
   panel.querySelector('[data-pm-status]').textContent = state.label
   panel.querySelector('[data-pm-status]').style.color = state.color
   panel.querySelector('[data-pm-dot]').style.background = state.color
   panel.querySelector('[data-pm-country]').textContent = country
   panel.querySelector('[data-pm-mode]').textContent = session ? connectionType : 'NONE'
+  const routeEl = panel.querySelector('[data-pm-route]')
+  if (routeEl) routeEl.textContent = route
   panel.querySelector('[data-pm-current]').textContent = currentSpeed
   panel.querySelector('[data-pm-avg]').textContent = avgSpeed
   panel.querySelector('[data-pm-bytes]').textContent = bytesUsed
@@ -564,6 +579,7 @@ function showSessionPanel() {
     <div style="padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
       <div><div style="color:#777b8f;font-size:10px">COUNTRY</div><div data-pm-country style="margin-top:3px">none</div></div>
       <div><div style="color:#777b8f;font-size:10px">MODE</div><div data-pm-mode style="margin-top:3px">none</div></div>
+      <div><div style="color:#777b8f;font-size:10px">ROUTE</div><div data-pm-route style="margin-top:3px;color:#00ff88">none</div></div>
       <div><div style="color:#777b8f;font-size:10px">CURRENT SPEED</div><div data-pm-current style="margin-top:3px;color:#00ff88">0.00 Mbps</div></div>
       <div><div style="color:#777b8f;font-size:10px">AVG SPEED</div><div data-pm-avg style="margin-top:3px;color:#00ff88">0.00 Mbps</div></div>
       <div><div style="color:#777b8f;font-size:10px">BYTES USED</div><div data-pm-bytes style="margin-top:3px">0B</div></div>
@@ -637,6 +653,7 @@ chrome.runtime.onMessage?.addListener((message) => {
       _lastOverlayState = null
       if (_overlayDebounceTimer) { clearTimeout(_overlayDebounceTimer); _overlayDebounceTimer = null }
       removePeerMeshOverlay()
+      refreshSessionPanelStatus()
       return
     }
     // Debounce rapid state changes (e.g. reconnecting flicker) — only render

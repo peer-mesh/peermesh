@@ -319,6 +319,10 @@ function snapshotRequesterSession(session) {
     relayEndpoint: session.relayEndpoint || null,
     quality: session.quality || null,
     connectionType: session.connectionType || 'public',
+    directState: session.directState || session.quality?.directState || 'relay',
+    transportTier: session.transportTier ?? session.quality?.transportTier ?? 0,
+    directTransport: session.directTransport || null,
+    iceEnabled: session.iceEnabled === true,
     refreshedAt: session.refreshedAt || null,
     startedAt: session.startedAt || session.createdAt || null,
     createdAt: session.createdAt || session.startedAt || null,
@@ -329,6 +333,15 @@ function rememberRequesterSession(session = currentSession) {
   const snapshot = snapshotRequesterSession(session)
   if (snapshot?.sessionId) lastRequesterSession = snapshot
   return snapshot
+}
+
+function persistRequesterSessionPatch(sessionId, patch = {}) {
+  chrome.storage.local.get(['session']).then(({ session }) => {
+    if (!session) return
+    const storedSessionId = session.id || session.sessionId
+    if (sessionId && storedSessionId && storedSessionId !== sessionId) return
+    chrome.storage.local.set({ session: { ...session, ...patch } })
+  }).catch(() => {})
 }
 
 function getPublicRequesterSession() {
@@ -470,9 +483,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const isSharing = helper.available && !helper.ownerMismatch && (helper.running || helper.shareEnabled)
           const failClosedState = await chrome.storage.session.get(['proxyFailClosedReason']).catch(() => ({}))
           const session = getPublicRequesterSession()
+          const connected = !!currentSession && !proxyFailClosed
           log('info', 'GET_STATUS helper.available=' + helper.available + ' running=' + helper.running + ' isSharing=' + isSharing)
           sendResponse({
-            connected: !!currentSession,
+            connected,
             session,
             connectionType: session?.connectionType || 'public',
             isSharing,
@@ -1529,7 +1543,12 @@ function connectDesktopSignaling(session) {
   desktopSignalSessionId = session.sessionId
   let openTimer = setTimeout(() => {
     openTimer = null
-    if (ws.readyState === WebSocket.CONNECTING && relayWs?.readyState === WebSocket.OPEN) {
+    if (
+      ws.readyState === WebSocket.CONNECTING &&
+      relayWs?.readyState === WebSocket.OPEN &&
+      currentSession?.sessionId === session.sessionId &&
+      currentSession?.directState !== 'direct'
+    ) {
       relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_timeout' }))
       scheduleDesktopSignalingRetry(session, 'desktop_signaling_timeout')
       try { ws.close(1000, 'desktop_signaling_timeout') } catch {}
@@ -1556,7 +1575,11 @@ function connectDesktopSignaling(session) {
   ws.onerror = () => {
     if (openTimer) clearTimeout(openTimer)
     openTimer = null
-    if (relayWs?.readyState === WebSocket.OPEN) {
+    if (
+      relayWs?.readyState === WebSocket.OPEN &&
+      currentSession?.sessionId === session.sessionId &&
+      currentSession?.directState !== 'direct'
+    ) {
       relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_error' }))
     }
     scheduleDesktopSignalingRetry(session, 'desktop_signaling_error')
@@ -1778,6 +1801,8 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               sessionId: msg.sessionId,
               country: msg.country || session.country || country,
               relayEndpoint: reconnectRelay,
+              directState: currentSession?.directState || session.directState || (currentSession?.iceEnabled ? 'attempting_direct' : 'relay'),
+              transportTier: currentSession?.transportTier ?? session.transportTier ?? 0,
               reconnectedAt: new Date().toISOString(),
             },
           })
@@ -1811,8 +1836,19 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
 
       if (msg.type === 'ice_answer' || msg.type === 'ice_candidate' || msg.type === 'direct_failed' || msg.type === 'direct_open') {
         if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
-          if (msg.type === 'direct_open') currentSession = { ...currentSession, directState: 'direct' }
-          if (msg.type === 'direct_failed') currentSession = { ...currentSession, directState: 'relay' }
+          if (msg.type === 'direct_open') {
+            currentSession = { ...currentSession, directState: 'direct' }
+            persistRequesterSessionPatch(msg.sessionId, { directState: 'direct' })
+            broadcastBrowsingStatus({
+              state: 'connected',
+              title: 'PeerMesh direct connection active',
+              message: currentSession.country ? `Browsing via ${currentSession.country} over a direct path.` : 'Browsing through PeerMesh over a direct path.',
+            }).catch(() => {})
+          }
+          if (msg.type === 'direct_failed' && currentSession.directState !== 'direct') {
+            currentSession = { ...currentSession, directState: 'relay' }
+            persistRequesterSessionPatch(msg.sessionId, { directState: 'relay' })
+          }
           rememberRequesterSession(currentSession)
         }
         forwardRelaySignalToDesktop(msg)
@@ -1865,16 +1901,20 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           sampleWindowMs: Number(msg.sampleWindowMs) || 0,
           providerKind: msg.providerKind || null,
           providerDeviceId: msg.providerDeviceId || null,
+          directState: msg.directState || currentSession?.directState || null,
+          transportTier: msg.transportTier ?? currentSession?.transportTier ?? 0,
         }
         if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
           currentSession.quality = quality
+          if (quality.directState) currentSession.directState = quality.directState
+          currentSession.transportTier = quality.transportTier
           rememberRequesterSession(currentSession)
         }
         chrome.storage.local.get(['session']).then(({ session }) => {
           if (!session) return
           const storedSessionId = session.id || session.sessionId
           if (msg.sessionId && storedSessionId && storedSessionId !== msg.sessionId) return
-          chrome.storage.local.set({ session: { ...session, quality } })
+          chrome.storage.local.set({ session: { ...session, quality, directState: quality.directState || session.directState, transportTier: quality.transportTier ?? session.transportTier } })
         }).catch(() => {})
         chrome.runtime.sendMessage({ type: 'SESSION_QUALITY', sessionId: msg.sessionId, quality }).catch(() => {})
       }
@@ -2019,6 +2059,10 @@ async function refreshRequesterSession(reason = 'session refresh') {
       country: data.country || previous.country,
       relayEndpoint: data.relayEndpoint,
       connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public'),
+      directState: currentSession?.directState || (currentSession?.iceEnabled ? 'attempting_direct' : 'relay'),
+      transportTier: currentSession?.transportTier ?? 0,
+      directTransport: currentSession?.directTransport || null,
+      iceEnabled: currentSession?.iceEnabled === true,
       startedAt: previous.startedAt || previous.createdAt || new Date().toISOString(),
       createdAt: previous.createdAt || Date.now(),
       refreshedAt: new Date().toISOString(),

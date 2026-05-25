@@ -917,7 +917,16 @@ function applyUptimeScheduleData(raw, { source = 'remote' } = {}) {
     state_changed_at: raw.state_changed_at ?? null,
   }
   const currentSync = config.uptimeScheduleSync ?? null
-  if (getSyncTimestamp(incomingSync.state_changed_at) < getSyncTimestamp(currentSync?.state_changed_at)) {
+  const incomingTs = getSyncTimestamp(incomingSync.state_changed_at)
+  const currentTs = getSyncTimestamp(currentSync?.state_changed_at)
+  if (incomingTs < currentTs) {
+    return false
+  }
+  if (
+    _localUptimeScheduleChangeAt &&
+    Date.now() - _localUptimeScheduleChangeAt < LOCAL_UPTIME_SCHEDULE_CHANGE_GRACE_MS &&
+    incomingTs <= currentTs
+  ) {
     return false
   }
 
@@ -1323,6 +1332,7 @@ async function syncSharingScheduleToServer(reason = 'sync') {
 }
 
 function setSharingSchedulePreference(nextSchedule = {}) {
+  _localUptimeScheduleChangeAt = Date.now()
   config.sharingSchedule = normalizeSharingSchedule({ ...config.sharingSchedule, ...nextSchedule })
   saveConfig()
   _lastScheduleInWindow = null
@@ -1359,6 +1369,7 @@ async function setScheduleWakeEnabledPreference(enabled) {
     }
   }
 
+  _localUptimeScheduleChangeAt = Date.now()
   config.scheduleWakeEnabled = !!enabled
   saveConfig()
   let status = await applyScheduleWakeIntegration('preference')
@@ -1368,6 +1379,14 @@ async function setScheduleWakeEnabledPreference(enabled) {
     config.scheduleWakeEnabled = true
     saveConfig()
     status = await applyScheduleWakeIntegration('preference_retry')
+  }
+  if (enabled && status?.error) {
+    config.scheduleWakeEnabled = false
+    config.scheduleWakeStatus = { ...status, enabled: false }
+    saveConfig()
+    void syncSharingScheduleToServer('wake_preference_failed')
+    updateTray()
+    return { success: false, error: status.error, osWake: getScheduleWakePublicState(), state: getPublicState() }
   }
   void syncSharingScheduleToServer('wake_preference')
   updateTray()
@@ -1382,6 +1401,7 @@ async function setOnDemandWakeEnabledPreference(enabled) {
       state: getPublicState(),
     }
   }
+  _localUptimeScheduleChangeAt = Date.now()
   config.allowOnDemandWake = !!enabled
   saveConfig()
   void syncSharingScheduleToServer('on_demand_wake_preference')
@@ -1390,6 +1410,7 @@ async function setOnDemandWakeEnabledPreference(enabled) {
 }
 
 async function setPrivateOnDemandStartPreference(enabled) {
+  _localUptimeScheduleChangeAt = Date.now()
   config.allowPrivateOnDemandStart = !!enabled
   if (!config.allowPrivateOnDemandStart) config.allowOnDemandWake = false
   saveConfig()
@@ -1474,7 +1495,9 @@ function stopSharingScheduleLoop() {
 
 let _savingDailyLimit = false
 let _localSlotChangeAt = 0
+let _localUptimeScheduleChangeAt = 0
 const LOCAL_SLOT_CHANGE_GRACE_MS = 8000
+const LOCAL_UPTIME_SCHEDULE_CHANGE_GRACE_MS = 12000
 
 async function refreshSharingConfig() {
   if (!config.token) return null
@@ -3260,9 +3283,11 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
   if (entry.directRetryTimer) clearTimeout(entry.directRetryTimer)
   if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
-  for (const [, tunnel] of entry.tunnels) {
-    if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
-      startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
+  if (!entry.everDirectOpened) {
+    for (const [, tunnel] of entry.tunnels) {
+      if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
+        startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
+      }
     }
   }
   try { entry.dataChannel?.close?.() } catch {}
@@ -3295,6 +3320,7 @@ async function startRequesterDirectSession(session, signalingWs) {
     fallbackGraceTimer: null,
     directRetryTimer: null,
     directAttemptTimer: null,
+    everDirectOpened: false,
   }
   requesterDirectSessions.set(session.sessionId, entry)
 
@@ -3365,6 +3391,15 @@ function scheduleRequesterDirectRetry(entry, reason = 'relay_active') {
   }, DIRECT_RETRY_INTERVAL_MS)
 }
 
+function retryRequesterDirectOnly(entry, reason = 'direct_lost') {
+  if (!entry || !entry.everDirectOpened || entry.directRetryTimer || entry.signalingWs?.readyState !== WebSocket.OPEN) return
+  entry.mode = 'attempting_direct'
+  entry.directRetryTimer = setTimeout(() => {
+    entry.directRetryTimer = null
+    if (entry.mode !== 'direct') beginRequesterDirectAttempt(entry, reason)
+  }, DIRECT_RETRY_INTERVAL_MS)
+}
+
 function bindRequesterDataChannel(entry, dc) {
   dc.onOpen(() => {
     if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
@@ -3376,6 +3411,7 @@ function bindRequesterDataChannel(entry, dc) {
     if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
     entry.directAttemptTimer = null
     entry.mode = 'direct'
+    entry.everDirectOpened = true
     sendRequesterSignal(entry, { type: 'direct_open', sessionId: entry.sessionId })
     log.info('DIRECT', 'requester WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
     for (const tunnel of entry.tunnels.values()) {
@@ -3384,7 +3420,7 @@ function bindRequesterDataChannel(entry, dc) {
   })
   dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
   dc.onClosed?.(() => {
-    if (entry.mode === 'direct') switchRequesterDirectToRelay(entry, 'data_channel_closed')
+    if (entry.mode === 'direct' || entry.everDirectOpened) retryRequesterDirectOnly(entry, 'data_channel_closed')
     else scheduleRequesterRelayFallback(entry, 'data_channel_closed')
   })
 }
@@ -3431,12 +3467,17 @@ function handleRequesterSignalMessage(sessionId, msg) {
     return
   }
   if (msg.type === 'direct_failed') {
-    switchRequesterDirectToRelay(entry, msg.reason || 'remote_direct_failed')
+    if (entry.everDirectOpened) retryRequesterDirectOnly(entry, msg.reason || 'remote_direct_failed')
+    else switchRequesterDirectToRelay(entry, msg.reason || 'remote_direct_failed')
   }
 }
 
 function switchRequesterDirectToRelay(entry, reason) {
   if (!entry || entry.mode === 'relay') return
+  if (entry.everDirectOpened) {
+    retryRequesterDirectOnly(entry, reason)
+    return
+  }
   entry.mode = 'relay'
   if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
   entry.fallbackTimer = null
@@ -4147,6 +4188,12 @@ function showNotification(title, body) {
 }
 
 function requestAppQuit(reason = 'quit', { forceExitMs = 2000 } = {}) {
+  if (proxySession?.sessionId && reason === 'control-quit') {
+    log.info('PROCESS', 'control quit ignored while requester proxy session is active', { reason, sessionId: proxySession.sessionId?.slice(0, 8) })
+    if (settingsWindow) settingsWindow.hide()
+    updateTray()
+    return
+  }
   if (_quitRequested) return
   _quitRequested = true
   log.info('PROCESS', 'requestAppQuit', { reason })
@@ -4483,6 +4530,16 @@ async function bootstrapDesktopApp() {
   app.on('second-instance', () => { log.info('PROCESS', 'second-instance event Ã¢â‚¬â€ showing window'); showWindow() })
 
   log.info('PROCESS', '=== APP START ===', { version: DESKTOP_VERSION, background: IS_BACKGROUND_LAUNCH, argv: process.argv.slice(1).join(' '), userDataDir: USER_DATA_DIR })
+  app.removeAllListeners('second-instance')
+  app.on('second-instance', (_event, argv = []) => {
+    if (argv.includes('--background')) {
+      log.info('PROCESS', 'second-instance background request - keeping app in tray')
+      updateTray()
+      return
+    }
+    log.info('PROCESS', 'second-instance event - showing window')
+    showWindow()
+  })
   app.on('window-all-closed', (e) => {
     if (_quitRequested) return
     e.preventDefault()
