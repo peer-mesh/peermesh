@@ -3296,6 +3296,18 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   log.info('DIRECT', 'requester WebRTC session closed', { sessionId: sessionId?.slice(0, 8), reason })
 }
 
+function handleRequesterSignalingClosed(sessionId, signalingWs, reason = 'local_signaling_closed') {
+  const entry = requesterDirectSessions.get(sessionId)
+  if (!entry) return
+  if (entry.signalingWs !== signalingWs) return
+  entry.signalingWs = null
+  if (entry.everDirectOpened && proxySession?.sessionId === sessionId) {
+    log.info('DIRECT', 'requester signaling closed after direct open; keeping direct session', { sessionId: sessionId?.slice(0, 8), reason })
+    return
+  }
+  closeRequesterDirectSession(sessionId, reason)
+}
+
 async function startRequesterDirectSession(session, signalingWs) {
   if (!session?.sessionId || session.iceEnabled !== true || session.directTransport !== 'webrtc') {
     signalingWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session?.sessionId, reason: 'ice_not_enabled' }))
@@ -3304,6 +3316,19 @@ async function startRequesterDirectSession(session, signalingWs) {
   const rtc = getNodeDataChannel()
   if (!rtc?.PeerConnection) {
     signalingWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'node_datachannel_unavailable' }))
+    return
+  }
+
+  const existing = requesterDirectSessions.get(session.sessionId)
+  if (existing?.everDirectOpened) {
+    existing.session = session
+    existing.signalingWs = signalingWs
+    if (existing.mode !== 'direct') {
+      if (existing.directRetryTimer) clearTimeout(existing.directRetryTimer)
+      existing.directRetryTimer = null
+      beginRequesterDirectAttempt(existing, 'signaling_reconnected')
+    }
+    log.info('DIRECT', 'requester signaling attached to sticky direct session', { sessionId: session.sessionId?.slice(0, 8), mode: existing.mode })
     return
   }
 
@@ -3376,7 +3401,7 @@ function sendRequesterSignal(entry, payload) {
 }
 
 function scheduleRequesterRelayFallback(entry, reason) {
-  if (!entry || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
+  if (!entry || entry.everDirectOpened || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
   entry.fallbackGraceTimer = setTimeout(() => {
     entry.fallbackGraceTimer = null
     if (entry.mode === 'attempting_direct') switchRequesterDirectToRelay(entry, reason)
@@ -3992,7 +4017,7 @@ controlSignalingWss.on('connection', (ws, req) => {
       handleRequesterSignalMessage(sessionId, msg)
     } catch {}
   })
-  ws.on('close', () => closeRequesterDirectSession(sessionId, 'local_signaling_closed'))
+  ws.on('close', () => handleRequesterSignalingClosed(sessionId, ws, 'local_signaling_closed'))
   startRequesterDirectSession(proxySession, ws).catch((err) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'direct_failed', sessionId, reason: err.message }))

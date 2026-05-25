@@ -32,7 +32,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.74'
+const VERSION     = '1.0.75'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -1484,6 +1484,7 @@ const directSessions = new Map()
 const requesterDirectSessions = new Map()
 const DIRECT_ICE_TIMEOUT_MS = 15000
 const DIRECT_RELAY_FALLBACK_GRACE_MS = 1500
+const DIRECT_RETRY_INTERVAL_MS = 8000
 const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
 const DIRECT_ICE_SERVERS = [
   'stun:stun.l.google.com:19302',
@@ -1721,15 +1722,31 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   if (!entry) return
   if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
   if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
-  for (const [, tunnel] of entry.tunnels) {
-    if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
-      startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
+  if (entry.directRetryTimer) clearTimeout(entry.directRetryTimer)
+  if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+  if (!entry.everDirectOpened) {
+    for (const [, tunnel] of entry.tunnels) {
+      if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
+        startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
+      }
     }
   }
   try { entry.dataChannel?.close?.() } catch {}
   closePeerConnection(entry.pc)
   requesterDirectSessions.delete(sessionId)
   clog.info('DIRECT', 'requester WebRTC session closed', { sessionId: sessionId?.slice(0, 8), reason })
+}
+
+function handleRequesterSignalingClosed(sessionId, signalingWs, reason = 'local_signaling_closed') {
+  const entry = requesterDirectSessions.get(sessionId)
+  if (!entry) return
+  if (entry.signalingWs !== signalingWs) return
+  entry.signalingWs = null
+  if (entry.everDirectOpened && _proxySession?.sessionId === sessionId) {
+    clog.info('DIRECT', 'requester signaling closed after direct open; keeping direct session', { sessionId: sessionId?.slice(0, 8), reason })
+    return
+  }
+  closeRequesterDirectSession(sessionId, reason)
 }
 
 async function startRequesterDirectSession(session, signalingWs) {
@@ -1740,6 +1757,19 @@ async function startRequesterDirectSession(session, signalingWs) {
   const rtc = await getNodeDataChannel()
   if (!rtc?.PeerConnection) {
     signalingWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'node_datachannel_unavailable' }))
+    return
+  }
+
+  const existing = requesterDirectSessions.get(session.sessionId)
+  if (existing?.everDirectOpened) {
+    existing.session = session
+    existing.signalingWs = signalingWs
+    if (existing.mode !== 'direct') {
+      if (existing.directRetryTimer) clearTimeout(existing.directRetryTimer)
+      existing.directRetryTimer = null
+      await beginRequesterDirectAttempt(existing, 'signaling_reconnected')
+    }
+    clog.info('DIRECT', 'requester signaling attached to sticky direct session', { sessionId: session.sessionId?.slice(0, 8), mode: existing.mode })
     return
   }
 
@@ -1754,10 +1784,28 @@ async function startRequesterDirectSession(session, signalingWs) {
     tunnels: new Map(),
     fallbackTimer: null,
     fallbackGraceTimer: null,
+    directRetryTimer: null,
+    directAttemptTimer: null,
+    everDirectOpened: false,
   }
   requesterDirectSessions.set(session.sessionId, entry)
 
-  const pc = new rtc.PeerConnection(`requester-${session.sessionId}`, { iceServers: normalizeIceServers(session.iceServers) })
+  await beginRequesterDirectAttempt(entry, 'initial')
+}
+
+async function beginRequesterDirectAttempt(entry, reason = 'retry') {
+  if (!entry?.signalingWs || entry.signalingWs.readyState !== WebSocket.OPEN || entry.mode === 'direct') return false
+  const rtc = await getNodeDataChannel()
+  if (!rtc?.PeerConnection) {
+    sendRequesterSignal(entry, { type: 'direct_failed', sessionId: entry.sessionId, reason: 'node_datachannel_unavailable' })
+    return false
+  }
+  if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+  entry.directAttemptTimer = null
+  try { entry.dataChannel?.close?.() } catch {}
+  closePeerConnection(entry.pc)
+
+  const pc = new rtc.PeerConnection(`requester-${entry.sessionId}`, { iceServers: normalizeIceServers(entry.session?.iceServers) })
   entry.pc = pc
   pc.onLocalDescription((sdp, type) => {
     sendRequesterSignal(entry, { type: 'ice_offer', sessionId: entry.sessionId, sdp, sdpType: type, candidates: [] })
@@ -1773,7 +1821,19 @@ async function startRequesterDirectSession(session, signalingWs) {
   const dc = pc.createDataChannel('peermesh-control')
   entry.dataChannel = dc
   bindRequesterDataChannel(entry, dc)
-  entry.fallbackTimer = setTimeout(() => switchRequesterDirectToRelay(entry, 'ice_timeout'), DIRECT_ICE_TIMEOUT_MS)
+  if (entry.mode === 'relay') {
+    entry.directAttemptTimer = setTimeout(() => {
+      entry.directAttemptTimer = null
+      if (entry.mode === 'relay') {
+        sendRequesterSignal(entry, { type: 'direct_failed', sessionId: entry.sessionId, reason: 'direct_retry_timeout' })
+        scheduleRequesterDirectRetry(entry, 'retry_timeout')
+      }
+    }, DIRECT_ICE_TIMEOUT_MS)
+  } else {
+    entry.fallbackTimer = setTimeout(() => switchRequesterDirectToRelay(entry, 'ice_timeout'), DIRECT_ICE_TIMEOUT_MS)
+  }
+  clog.info('DIRECT', 'requester WebRTC attempt started', { sessionId: entry.sessionId?.slice(0, 8), reason, mode: entry.mode })
+  return true
 }
 
 function sendRequesterSignal(entry, payload) {
@@ -1781,11 +1841,28 @@ function sendRequesterSignal(entry, payload) {
 }
 
 function scheduleRequesterRelayFallback(entry, reason) {
-  if (!entry || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
+  if (!entry || entry.everDirectOpened || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
   entry.fallbackGraceTimer = setTimeout(() => {
     entry.fallbackGraceTimer = null
     if (entry.mode === 'attempting_direct') switchRequesterDirectToRelay(entry, reason)
   }, DIRECT_RELAY_FALLBACK_GRACE_MS)
+}
+
+function scheduleRequesterDirectRetry(entry, reason = 'relay_active') {
+  if (!entry || entry.mode !== 'relay' || entry.directRetryTimer || entry.signalingWs?.readyState !== WebSocket.OPEN) return
+  entry.directRetryTimer = setTimeout(() => {
+    entry.directRetryTimer = null
+    if (entry.mode === 'relay') void beginRequesterDirectAttempt(entry, reason)
+  }, DIRECT_RETRY_INTERVAL_MS)
+}
+
+function retryRequesterDirectOnly(entry, reason = 'direct_lost') {
+  if (!entry || !entry.everDirectOpened || entry.directRetryTimer || entry.signalingWs?.readyState !== WebSocket.OPEN) return
+  entry.mode = 'attempting_direct'
+  entry.directRetryTimer = setTimeout(() => {
+    entry.directRetryTimer = null
+    if (entry.mode !== 'direct') void beginRequesterDirectAttempt(entry, reason)
+  }, DIRECT_RETRY_INTERVAL_MS)
 }
 
 function bindRequesterDataChannel(entry, dc) {
@@ -1794,7 +1871,12 @@ function bindRequesterDataChannel(entry, dc) {
     entry.fallbackTimer = null
     if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
     entry.fallbackGraceTimer = null
+    if (entry.directRetryTimer) clearTimeout(entry.directRetryTimer)
+    entry.directRetryTimer = null
+    if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+    entry.directAttemptTimer = null
     entry.mode = 'direct'
+    entry.everDirectOpened = true
     sendRequesterSignal(entry, { type: 'direct_open', sessionId: entry.sessionId })
     clog.info('DIRECT', 'requester WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
     for (const tunnel of entry.tunnels.values()) {
@@ -1802,7 +1884,10 @@ function bindRequesterDataChannel(entry, dc) {
     }
   })
   dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
-  dc.onClosed?.(() => scheduleRequesterRelayFallback(entry, 'data_channel_closed'))
+  dc.onClosed?.(() => {
+    if (entry.mode === 'direct' || entry.everDirectOpened) retryRequesterDirectOnly(entry, 'data_channel_closed')
+    else scheduleRequesterRelayFallback(entry, 'data_channel_closed')
+  })
 }
 
 function handleRequesterDataChannelMessage(entry, raw) {
@@ -1839,17 +1924,24 @@ function handleRequesterSignalMessage(sessionId, msg) {
     return
   }
   if (msg.type === 'direct_failed') {
-    switchRequesterDirectToRelay(entry, msg.reason || 'remote_direct_failed')
+    if (entry.everDirectOpened) retryRequesterDirectOnly(entry, msg.reason || 'remote_direct_failed')
+    else switchRequesterDirectToRelay(entry, msg.reason || 'remote_direct_failed')
   }
 }
 
 function switchRequesterDirectToRelay(entry, reason) {
   if (!entry || entry.mode === 'relay') return
+  if (entry.everDirectOpened) {
+    retryRequesterDirectOnly(entry, reason)
+    return
+  }
   entry.mode = 'relay'
   if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
   entry.fallbackTimer = null
   if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
   entry.fallbackGraceTimer = null
+  if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+  entry.directAttemptTimer = null
   sendRequesterSignal(entry, { type: 'direct_failed', sessionId: entry.sessionId, reason })
   clog.warn('DIRECT', 'WebRTC direct unavailable, falling back to relay', { sessionId: entry.sessionId?.slice(0, 8), reason })
   for (const tunnel of entry.tunnels.values()) {
@@ -1857,6 +1949,7 @@ function switchRequesterDirectToRelay(entry, reason) {
       startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
     }
   }
+  scheduleRequesterDirectRetry(entry, reason)
 }
 
 function createTunnelBridge() {
@@ -2189,7 +2282,7 @@ function attachControlWebRtcSignaling(server) {
         handleRequesterSignalMessage(sessionId, msg)
       } catch {}
     })
-    ws.on('close', () => closeRequesterDirectSession(sessionId, 'local_signaling_closed'))
+    ws.on('close', () => handleRequesterSignalingClosed(sessionId, ws, 'local_signaling_closed'))
     startRequesterDirectSession(_proxySession, ws).catch((err) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'direct_failed', sessionId, reason: err.message }))

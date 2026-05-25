@@ -1519,11 +1519,11 @@ function closeDesktopSignaling(reason = 'closed') {
 
 function scheduleDesktopSignalingRetry(session, reason = 'retry') {
   if (!session?.sessionId || session.iceEnabled !== true || session.directTransport !== 'webrtc') return
-  if (!currentSession || currentSession.sessionId !== session.sessionId || currentSession.directState === 'direct') return
+  if (!currentSession || currentSession.sessionId !== session.sessionId) return
   if (!relayWs || relayWs.readyState !== WebSocket.OPEN || desktopSignalRetryTimer) return
   desktopSignalRetryTimer = setTimeout(() => {
     desktopSignalRetryTimer = null
-    if (currentSession?.sessionId === session.sessionId && currentSession.directState !== 'direct') {
+    if (currentSession?.sessionId === session.sessionId && currentSession.iceEnabled === true && currentSession.directTransport === 'webrtc') {
       log('info', `[DIRECT] retrying desktop signaling session=${session.sessionId.slice(0,8)} reason=${reason}`)
       connectDesktopSignaling(currentSession)
     }
@@ -1546,10 +1546,11 @@ function connectDesktopSignaling(session) {
     if (
       ws.readyState === WebSocket.CONNECTING &&
       relayWs?.readyState === WebSocket.OPEN &&
-      currentSession?.sessionId === session.sessionId &&
-      currentSession?.directState !== 'direct'
+      currentSession?.sessionId === session.sessionId
     ) {
-      relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_timeout' }))
+      if (currentSession?.directState !== 'direct') {
+        relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_timeout' }))
+      }
       scheduleDesktopSignalingRetry(session, 'desktop_signaling_timeout')
       try { ws.close(1000, 'desktop_signaling_timeout') } catch {}
     }
@@ -1591,6 +1592,7 @@ function connectDesktopSignaling(session) {
       desktopSignalWs = null
       desktopSignalSessionId = null
     }
+    scheduleDesktopSignalingRetry(session, 'desktop_signaling_closed')
   }
 }
 

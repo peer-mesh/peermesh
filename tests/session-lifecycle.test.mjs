@@ -162,6 +162,24 @@ test('session metadata patch accepts direct transport state in connection qualit
   assert.match(route, /patch\.connection_quality = mergedConnectionQuality/)
 })
 
+test('requester direct path stays sticky after it opens once', () => {
+  const desktop = readRepoFile('desktop/main.js')
+  const cli = readRepoFile('cli/index.js')
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+
+  for (const source of [desktop, cli]) {
+    assert.match(source, /function handleRequesterSignalingClosed/)
+    assert.match(source, /requester signaling closed after direct open; keeping direct session/)
+    assert.match(source, /existing\?\.everDirectOpened/)
+    assert.match(source, /requester signaling attached to sticky direct session/)
+    assert.match(source, /if \(!entry \|\| entry\.everDirectOpened \|\| entry\.mode === 'relay'/)
+    assert.match(source, /retryRequesterDirectOnly/)
+  }
+  assert.doesNotMatch(serviceWorker, /currentSession\.directState === 'direct'\) return/)
+  assert.match(serviceWorker, /desktop_signaling_closed/)
+  assert.match(serviceWorker, /currentSession\?\.directState !== 'direct'[\s\S]*direct_failed/)
+})
+
 test('relay config route computes relay health once per request', () => {
   const route = readRepoFile('app/api/relay/config/route.ts')
 
