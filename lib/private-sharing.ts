@@ -36,3 +36,11 @@ export function isPrivateShareActive(
   const ts = new Date(expiresAt).getTime()
   return Number.isFinite(ts) && ts > now
 }
+
+export function shouldDeleteStalePrivateShareSlot(
+  enabled?: boolean | null,
+  expiresAt?: string | null,
+  now = Date.now()
+): boolean {
+  return !isPrivateShareActive(enabled, expiresAt, now)
+}

@@ -7,6 +7,7 @@ import {
   generatePrivateShareCode,
   isPrivateShareActive,
   parsePrivateShareExpiryHours,
+  shouldDeleteStalePrivateShareSlot,
 } from '@/lib/private-sharing'
 import { getEffectiveBandwidthLimitBytes } from '@/lib/billing'
 import { canRoleProvideNetwork, getProviderRoleError } from '@/lib/roles'
@@ -474,11 +475,15 @@ async function cleanupStalePrivateShareSlots(
       const slotIndex = getSlotIndex(row.base_device_id, baseDeviceId)
       return slotIndex !== null && slotIndex >= configuredSlots
     })
+    const deletableStaleSlots = staleSlots.filter(row =>
+      shouldDeleteStalePrivateShareSlot(row.enabled, row.expires_at)
+    )
+    const activePreserved = staleSlots.length - deletableStaleSlots.length
 
-    console.log(`[slot] cleanupStalePrivateShareSlots user=${userId} base=${baseDeviceId} configuredSlots=${configuredSlots} total=${allSlots.length} stale=${staleSlots.length}`)
+    console.log(`[slot] cleanupStalePrivateShareSlots user=${userId} base=${baseDeviceId} configuredSlots=${configuredSlots} total=${allSlots.length} stale=${staleSlots.length} deletable=${deletableStaleSlots.length} activePreserved=${activePreserved}`)
 
-    if (staleSlots.length > 0) {
-      const staleDeviceIds = staleSlots.map(row => row.base_device_id)
+    if (deletableStaleSlots.length > 0) {
+      const staleDeviceIds = deletableStaleSlots.map(row => row.base_device_id)
       console.log(`[slot] cleanupStalePrivateShareSlots deleting stale=${JSON.stringify(staleDeviceIds)}`)
       const { error } = await adminClient
         .from('private_share_devices')
@@ -490,8 +495,8 @@ async function cleanupStalePrivateShareSlots(
         console.error(`[slot] cleanupStalePrivateShareSlots delete error user=${userId} base=${baseDeviceId}:`, error)
         return { deletedCount: 0 }
       }
-      console.log(`[slot] cleanupStalePrivateShareSlots deleted=${staleSlots.length} ms=${Date.now() - t0}`)
-      return { deletedCount: staleSlots.length }
+      console.log(`[slot] cleanupStalePrivateShareSlots deleted=${deletableStaleSlots.length} ms=${Date.now() - t0}`)
+      return { deletedCount: deletableStaleSlots.length }
     }
 
     console.log(`[slot] cleanupStalePrivateShareSlots nothing to delete ms=${Date.now() - t0}`)
@@ -999,8 +1004,8 @@ export async function POST(req: Request) {
         .eq('user_id', userId)
         .like('device_id', `${baseDeviceId}_slot_%`)
 
-      const resultPrivate = await cleanupStalePrivateShareSlots(userId, baseDeviceId, body.connectionSlots)
-      const resultLimits = await cleanupStaleSlotLimits(userId, baseDeviceId, body.connectionSlots)
+      const resultPrivate = await cleanupStalePrivateShareSlots(userId, baseDeviceId, normalizedSlots)
+      const resultLimits = await cleanupStaleSlotLimits(userId, baseDeviceId, normalizedSlots)
       console.log(`[slot] connectionSlots cleanup done user=${userId} base=${baseDeviceId} private=${resultPrivate.deletedCount} slotLimits=${resultLimits.deletedCount}`)
 
       const providerRows = await loadProviderDeviceStates(userId, baseDeviceId)
