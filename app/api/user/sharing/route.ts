@@ -1075,22 +1075,29 @@ export async function PUT(req: Request) {
   const providerError = getProviderEligibilityError(eligibilityProfile)
   if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
 
-  // Detect the provider country from platform headers or Render's forwarded IP.
-  // Relay-forwarded registration supplies x-provider-ip so the API can still
-  // resolve the real provider IP instead of the relay server IP.
-  const providerIp = req.headers.get('x-provider-ip')
-  let country = await detectCountryCodeFromRequest(req, { explicitIp: providerIp }) ?? 'XX'
+  const requestedCountry = normalizeCountryCode(body.country)
+  const { data: existingDevice } = await adminClient
+    .from('provider_devices')
+    .select('country_code')
+    .eq('user_id', userId)
+    .eq('device_id', device_id)
+    .maybeSingle<{ country_code: string | null }>()
+  const existingCountry = normalizeCountryCode(existingDevice?.country_code)
 
-  if (country === 'XX') {
-    const { data: existingDevice } = await adminClient
-      .from('provider_devices')
-      .select('country_code')
-      .eq('user_id', userId)
-      .eq('device_id', device_id)
-      .maybeSingle<{ country_code: string | null }>()
-    country = normalizeCountryCode(existingDevice?.country_code) ?? country
+  // Direct desktop/CLI/extension heartbeats reach the app, so Render/forwarded
+  // IP detection is useful there. Relay-originated heartbeats come from the
+  // relay server, so they must not geolocate the relay and overwrite the
+  // provider's actual country.
+  let country = 'XX'
+  if (isRelayRequest(req)) {
+    country = existingCountry ?? requestedCountry ?? country
+  } else {
+    const providerIp = req.headers.get('x-provider-ip')
+    country = await detectCountryCodeFromRequest(req, { explicitIp: providerIp })
+      ?? existingCountry
+      ?? requestedCountry
+      ?? country
   }
-  if (country === 'XX') country = normalizeCountryCode(body.country) ?? country
 
   const { error: rpcError } = await adminClient.rpc('upsert_provider_heartbeat', {
     p_user_id: userId,

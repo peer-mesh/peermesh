@@ -191,6 +191,17 @@ test('requester direct path stays sticky after it opens once', () => {
   assert.match(relay, /STICKY_RETRY/)
 })
 
+test('relay provider registration does not geolocate the relay as the provider', () => {
+  const route = readRepoFile('app/api/user/sharing/route.ts')
+  const relay = readRepoFile('relay/relay.js')
+
+  assert.match(route, /if \(isRelayRequest\(req\)\) \{\s+country = existingCountry \?\? requestedCountry \?\? country/)
+  assert.match(route, /Relay-originated heartbeats come from the\s+\/\/ relay server/)
+  assert.doesNotMatch(relay, /x-provider-ip/)
+  assert.match(relay, /country: providerCountry/)
+  assert.match(relay, /ws\.country = detectedCountry \?\? registeredCountry \?\? msg\.country/)
+})
+
 test('relay config route computes relay health once per request', () => {
   const route = readRepoFile('app/api/relay/config/route.ts')
 

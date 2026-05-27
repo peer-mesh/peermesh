@@ -510,16 +510,12 @@ function normalizeCountryCode(value) {
   return /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null
 }
 
-function firstHeaderValue(value) {
-  return Array.isArray(value) ? value[0] : value
-}
-
 function isDirectCapabilityFailureReason(reason) {
   const value = String(reason || '').toLowerCase()
   return value === 'ice_not_enabled' || value === 'node_datachannel_unavailable'
 }
 
-async function registerProviderHeartbeatFromRelay({ userId, deviceId, relayUrl, providerIp }) {
+async function registerProviderHeartbeatFromRelay({ userId, deviceId, relayUrl, country }) {
   if (!API_BASE || !RELAY_SECRET || !userId || !deviceId) return null
   try {
     const headers = {
@@ -527,8 +523,7 @@ async function registerProviderHeartbeatFromRelay({ userId, deviceId, relayUrl, 
       'x-relay-secret': RELAY_SECRET,
       'x-peermesh-actor': 'relay',
     }
-    const ip = firstHeaderValue(providerIp)
-    if (ip) headers['x-provider-ip'] = String(ip)
+    const providerCountry = normalizeCountryCode(country)
 
     const res = await fetch(`${API_BASE}/api/user/sharing`, {
       method: 'PUT',
@@ -536,6 +531,7 @@ async function registerProviderHeartbeatFromRelay({ userId, deviceId, relayUrl, 
       body: JSON.stringify({
         user_id: userId,
         device_id: deviceId,
+        country: providerCountry,
         relay_url: relayUrl || null,
       }),
       signal: AbortSignal.timeout(5000),
@@ -1420,11 +1416,12 @@ async function handleMessage(ws, msg) {
       }
       ws.deviceId = msg.deviceId ?? null
       ws.baseDeviceId = msg.baseDeviceId ?? msg.deviceId ?? null
+      const registeredCountry = normalizeCountryCode(msg.country)
       const detectedCountry = await registerProviderHeartbeatFromRelay({
         userId: auth.userId,
         deviceId: ws.deviceId,
         relayUrl: ws.relayUrl,
-        providerIp: ws.clientIp,
+        country: registeredCountry,
       })
       for (const [id, peer] of peers) {
         if (peer.userId === auth.userId && peer.role === 'provider' && id !== ws.peerId) {
@@ -1447,7 +1444,7 @@ async function handleMessage(ws, msg) {
         }
       }
       ws.role = 'provider'
-      ws.country = detectedCountry ?? normalizeCountryCode(msg.country) ?? msg.country
+      ws.country = detectedCountry ?? registeredCountry ?? msg.country
       ws.userId = auth.userId
       ws.trustScore = auth.trustScore ?? 50
       ws.agentMode = msg.agentMode ?? false
