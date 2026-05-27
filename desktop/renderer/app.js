@@ -985,7 +985,7 @@ function showDisclosureModal() {
       <div style="font-size:14px;font-weight:600;margin-bottom:14px;line-height:1.3">What sharing your connection means</div>
       <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>1.</span><span>Your IP address will be used by other PeerMesh users to browse the web.</span></div>
       <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>2.</span><span>All sessions are logged with signed receipts.</span></div>
-      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>3.</span><span>Blocked: .onion sites, SMTP/mail, torrents, private IPs.</span></div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>3.</span><span>Blocked: .onion sites, SMTP/IMAP/POP3 hosts, torrents, private IPs.</span></div>
       <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>4.</span><span>You can stop sharing at any time.</span></div>
       <div style="display:flex;gap:10px;margin-bottom:10px;font-size:12px;color:var(--muted);line-height:1.5"><span>5.</span><span>Sharing earns you free browsing credits.</span></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px">

@@ -2258,7 +2258,7 @@ export default function Dashboard() {
             {([
               ['🌐', 'Your IP address will be used by other PeerMesh users to browse the web.'],
               ['📋', 'All sessions are logged with signed receipts. You can see what passed through in your session history.'],
-              ['🚫', 'Blocked automatically: .onion sites, SMTP/mail servers, torrent trackers, and private network addresses.'],
+              ['🚫', 'Blocked automatically: .onion sites, SMTP/IMAP/POP3 hosts, torrent trackers, and private network addresses.'],
               ['⚡', 'You can stop sharing at any time by toggling the switch off.'],
               ['💸', 'Sharing earns you free browsing credits on the free tier.'],
             ] as [string, string][]).map(([icon, text]) => (

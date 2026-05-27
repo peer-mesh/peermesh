@@ -67,7 +67,7 @@ const RELAY_PROXY_BUFFER_LOW_BYTES = 512 * 1024
 const RELAY_PROXY_BUFFER_CHECK_MS = 50
 
 const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
-const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^imap\./i, /^pop3\./i, /torrent/i]
 const PRIVATE_HOSTS = [
   /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
   /^172\.(1[6-9]|2\d|3[01])\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,

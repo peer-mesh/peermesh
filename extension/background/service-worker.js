@@ -3,7 +3,7 @@ const APP_URL = 'https://peermesh-0unl.onrender.com'
 const APP_HOST = new URL(APP_URL).hostname
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version
-const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^imap\./i, /^pop3\./i, /torrent/i]
 const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
 const PRIVATE_HOSTS = [
   /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,

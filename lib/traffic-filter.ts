@@ -4,7 +4,6 @@ const BLOCKED_PATTERNS = [
   /torrent/i,
   /\.onion$/,
   /^smtp\./i,
-  /^mail\./i,
   /^pop3\./i,
   /^imap\./i,
   /phishing/i,

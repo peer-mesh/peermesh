@@ -20,7 +20,7 @@ export const RELAY_ANCHOR_INTERVAL_MS = 1_000
 
 export const DEFAULT_MANDATE_POLICY = Object.freeze({
   allowedPorts: [80, 443, 8080, 8443],
-  blockedPatterns: ['onion', 'smtp', 'mail', 'torrent'],
+  blockedPatterns: ['onion', 'smtp', 'imap', 'pop3', 'torrent'],
   maxBytesPerMinute: 250 * 1024 * 1024,
   maxTunnelsPerMinute: 200,
   privateIPBlocked: true,

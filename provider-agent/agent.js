@@ -81,7 +81,7 @@ function closeAllTunnels(notifyRelay = false) {
   }
 }
 
-const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const BLOCKED = [/\.onion$/i, /^smtp\./i, /^imap\./i, /^pop3\./i, /torrent/i]
 const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
 const PRIVATE = [
   /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,

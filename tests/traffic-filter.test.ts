@@ -16,6 +16,10 @@ test('checkRateLimit allows up to 100 requests per minute', () => {
 
 test('isRequestAllowed blocks private targets and unsafe ports', () => {
   assert.equal(isRequestAllowed('example.com', 443), true)
+  assert.equal(isRequestAllowed('mail.google.com', 443), true)
+  assert.equal(isRequestAllowed('smtp.example.com', 443), false)
+  assert.equal(isRequestAllowed('imap.example.com', 443), false)
+  assert.equal(isRequestAllowed('pop3.example.com', 443), false)
   assert.equal(isRequestAllowed('example.com', 22), false)
   assert.equal(isRequestAllowed('localhost', 443), false)
   assert.equal(isRequestAllowed('127.0.0.1', 443), false)

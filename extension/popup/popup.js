@@ -1260,7 +1260,7 @@ function renderDashboard(app) {
         ${[
           ['WEB', 'Your IP address will be used by other PeerMesh users to browse the web.'],
           ['LOCK', 'All sessions are logged with signed receipts.'],
-          ['BLOCK', 'Blocked: .onion sites, SMTP/mail, torrents, private IPs.'],
+          ['BLOCK', 'Blocked: .onion sites, SMTP/IMAP/POP3 hosts, torrents, private IPs.'],
           ['STOP', 'You can stop sharing at any time.'],
           ['CREDITS', 'Sharing earns you free browsing credits.'],
         ].map(([icon, text]) => `

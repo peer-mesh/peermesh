@@ -32,7 +32,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.76'
+const VERSION     = '1.0.77'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -40,7 +40,7 @@ const PEER_PORT = 7656
 const LOCAL_PROXY_PORT = 7655
 const SLOT_CAP = 32
 
-const BLOCKED = [/\.onion$/i, /^smtp\./i, /^mail\./i, /torrent/i]
+const BLOCKED = [/\.onion$/i, /^smtp\./i, /^imap\./i, /^pop3\./i, /torrent/i]
 const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
 const PRIVATE = [
   /^localhost$/i, /^127\./, /^0\./, /^10\./, /^169\.254\./, /^192\.168\./,
@@ -2927,7 +2927,7 @@ async function main() {
       console.log('  Before you share:')
       console.log('  - Your IP will be used by other PeerMesh users to browse the web.')
       console.log('  - All sessions are logged with signed receipts.')
-      console.log('  - Blocked: .onion, SMTP/mail, torrents, private IPs.')
+      console.log('  - Blocked: .onion, SMTP/IMAP/POP3 hosts, torrents, private IPs.')
       console.log('  - You can stop sharing at any time.')
       console.log('')
       const confirmed = await promptYesNo('  Start sharing? [Y/n]: ')
