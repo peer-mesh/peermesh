@@ -11,6 +11,7 @@ import {
 import { getEffectiveBandwidthLimitBytes } from '@/lib/billing'
 import { canRoleProvideNetwork, getProviderRoleError } from '@/lib/roles'
 import { normalizeScheduleTime, normalizeScheduleTimezone } from '@/lib/uptime-scheduler'
+import { detectCountryCodeFromRequest, normalizeCountryCode } from '@/lib/ip-country'
 
 const RELAY_SECRET = process.env.RELAY_SECRET ?? ''
 const SURFACE_ACTORS = new Set(['dashboard', 'desktop', 'cli', 'extension'])
@@ -1074,26 +1075,22 @@ export async function PUT(req: Request) {
   const providerError = getProviderEligibilityError(eligibilityProfile)
   if (providerError) return NextResponse.json({ error: providerError }, { status: 403 })
 
-  // Detect country from the request IP
-  // x-vercel-ip-country is injected by Vercel for free — no external call needed.
-  // When the relay calls this endpoint it passes x-provider-ip (the real provider IP)
-  // so we fall back to a geo-lookup only in that case.
-  let country = 'XX'
+  // Detect the provider country from platform headers or Render's forwarded IP.
+  // Relay-forwarded registration supplies x-provider-ip so the API can still
+  // resolve the real provider IP instead of the relay server IP.
   const providerIp = req.headers.get('x-provider-ip')
-  if (providerIp) {
-    // Relay-forwarded heartbeat — geo-lookup the real provider IP
-    try {
-      const geo = await fetch(`https://ipapi.co/${encodeURIComponent(providerIp)}/country/`, { signal: AbortSignal.timeout(3000) })
-      if (geo.ok) {
-        const countryCode = (await geo.text()).trim().toUpperCase()
-        if (/^[A-Z]{2}$/.test(countryCode)) country = countryCode
-      }
-    } catch {}
-  } else {
-    // Direct heartbeat from desktop/CLI — Vercel knows the real IP
-    const vercelCountry = req.headers.get('x-vercel-ip-country')
-    if (vercelCountry && /^[A-Z]{2}$/.test(vercelCountry)) country = vercelCountry
+  let country = await detectCountryCodeFromRequest(req, { explicitIp: providerIp }) ?? 'XX'
+
+  if (country === 'XX') {
+    const { data: existingDevice } = await adminClient
+      .from('provider_devices')
+      .select('country_code')
+      .eq('user_id', userId)
+      .eq('device_id', device_id)
+      .maybeSingle<{ country_code: string | null }>()
+    country = normalizeCountryCode(existingDevice?.country_code) ?? country
   }
+  if (country === 'XX') country = normalizeCountryCode(body.country) ?? country
 
   const { error: rpcError } = await adminClient.rpc('upsert_provider_heartbeat', {
     p_user_id: userId,
@@ -1137,7 +1134,7 @@ export async function PUT(req: Request) {
     .update({ state_actor: stateActor, state_changed_at: stateChangedAt })
     .eq('id', userId)
 
-  return NextResponse.json({ ok: true })
+  return NextResponse.json({ ok: true, country })
 }
 
 // ── DELETE: device stopped sharing ───────────────────────────────────────────

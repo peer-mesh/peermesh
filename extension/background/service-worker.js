@@ -320,6 +320,7 @@ function snapshotRequesterSession(session) {
     quality: session.quality || null,
     connectionType: session.connectionType || 'public',
     directState: session.directState || session.quality?.directState || 'relay',
+    directSticky: session.directSticky === true,
     transportTier: session.transportTier ?? session.quality?.transportTier ?? 0,
     directTransport: session.directTransport || null,
     iceEnabled: session.iceEnabled === true,
@@ -560,6 +561,31 @@ async function loadSharingContext() {
   return stored
 }
 
+function normalizeDetectedCountry(value) {
+  const country = String(value ?? '').trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null
+}
+
+async function applyDetectedSharingCountry(country, source = 'heartbeat') {
+  const nextCountry = normalizeDetectedCountry(country)
+  if (!nextCountry || nextCountry === sharingCountry) return false
+
+  const previousCountry = sharingCountry
+  sharingCountry = nextCountry
+  await chrome.storage.local.set({ sharingCountry })
+  log('info', `[COUNTRY] provider country updated via ${source}: ${previousCountry || 'unknown'} -> ${nextCountry}`)
+
+  if (sharingMode === 'extension' && providerShareEnabled) {
+    if (providerWs) {
+      providerWs.close(1000, 'country_changed')
+    } else {
+      scheduleProviderReconnect('country_changed')
+    }
+  }
+  await persistSharingState()
+  return true
+}
+
 function isHelperOwnedByUser(helper, userId) {
   return !(helper?.available && helper.userId && userId && helper.userId !== userId)
 }
@@ -797,7 +823,12 @@ async function sendExtensionHeartbeat() {
       headers: withSharingHeaders({ 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }),
       body: JSON.stringify({ device_id: deviceId, country: sharingCountry }),
     })
-    if (response.ok) providerAuthFailureCount = 0
+    if (response.ok) {
+      providerAuthFailureCount = 0
+      const data = await response.json().catch(() => null)
+      if (data?.country) await applyDetectedSharingCountry(data.country)
+      return
+    }
     if (response.status === 401 || response.status === 403) {
       providerAuthFailureCount += 1
       log('warn', `[HEARTBEAT] auth rejected status=${response.status} count=${providerAuthFailureCount}`)
@@ -1548,7 +1579,7 @@ function connectDesktopSignaling(session) {
       relayWs?.readyState === WebSocket.OPEN &&
       currentSession?.sessionId === session.sessionId
     ) {
-      if (currentSession?.directState !== 'direct') {
+      if (currentSession?.directState !== 'direct' && currentSession?.directSticky !== true) {
         relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_timeout' }))
       }
       scheduleDesktopSignalingRetry(session, 'desktop_signaling_timeout')
@@ -1579,7 +1610,8 @@ function connectDesktopSignaling(session) {
     if (
       relayWs?.readyState === WebSocket.OPEN &&
       currentSession?.sessionId === session.sessionId &&
-      currentSession?.directState !== 'direct'
+      currentSession?.directState !== 'direct' &&
+      currentSession?.directSticky !== true
     ) {
       relayWs.send(JSON.stringify({ type: 'direct_failed', sessionId: session.sessionId, reason: 'desktop_signaling_error' }))
     }
@@ -1603,7 +1635,12 @@ function forwardRelaySignalToDesktop(msg) {
   return true
 }
 
-async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token, privateCode, connectionType }) {
+function isDirectCapabilityFailureReason(reason) {
+  const value = String(reason || '').toLowerCase()
+  return value === 'ice_not_enabled' || value === 'node_datachannel_unavailable'
+}
+
+async function connectOnce({ relayEndpoint, country, userId, dbSessionId, preferredProviderUserId, privateProviderUserId, privateBaseDeviceId, token, privateCode, connectionType, directSticky = false }) {
   const requesterIdentity = await getExtensionIdentity().catch(() => ({ deviceId: null }))
   return new Promise((resolve, reject) => {
     const wsUrl = relayEndpoint
@@ -1633,6 +1670,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         requireTunnel: true,
         supportsDirect: true,
         iceEnabled: true,
+        directSticky: directSticky === true,
         requesterDeviceId: requesterIdentity.deviceId ?? null,
       }))
       keepaliveTimer = setInterval(() => {
@@ -1670,6 +1708,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           iceEnabled: msg.iceEnabled === true,
           iceServers: msg.iceServers ?? [],
           directState: msg.directState ?? (msg.iceEnabled ? 'attempting_direct' : 'relay'),
+          directSticky: directSticky === true,
           providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
           createdAt: Date.now(),
           startedAt: new Date().toISOString(),
@@ -1704,6 +1743,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               directTransport: msg.directTransport ?? null,
               iceEnabled: msg.iceEnabled === true,
               iceServers: msg.iceServers ?? [],
+              directSticky: directSticky === true,
               providerDirectEndpoint: msg.providerDirectEndpoint ?? null,
             }),
             signal: AbortSignal.timeout(4000),
@@ -1748,6 +1788,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
             iceEnabled: msg.iceEnabled === true || currentSession.iceEnabled === true,
             iceServers: msg.iceServers ?? currentSession.iceServers ?? [],
             directState: msg.directState ?? (msg.iceEnabled ? 'attempting_direct' : currentSession.directState ?? 'relay'),
+            directSticky: currentSession.directSticky === true || msg.directSticky === true,
             providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession.providerDirectEndpoint ?? null,
             createdAt: currentSession.createdAt || Date.now(),
             startedAt: currentSession.startedAt || new Date().toISOString(),
@@ -1775,6 +1816,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               directTransport: msg.directTransport ?? currentSession?.directTransport ?? null,
               iceEnabled: msg.iceEnabled === true || currentSession?.iceEnabled === true,
               iceServers: msg.iceServers ?? currentSession?.iceServers ?? [],
+              directSticky: currentSession?.directSticky === true || msg.directSticky === true,
               providerDirectEndpoint: msg.providerDirectEndpoint ?? currentSession?.providerDirectEndpoint ?? null,
             }),
             signal: AbortSignal.timeout(4000),
@@ -1804,6 +1846,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
               country: msg.country || session.country || country,
               relayEndpoint: reconnectRelay,
               directState: currentSession?.directState || session.directState || (currentSession?.iceEnabled ? 'attempting_direct' : 'relay'),
+              directSticky: currentSession?.directSticky === true || session.directSticky === true,
               transportTier: currentSession?.transportTier ?? session.transportTier ?? 0,
               reconnectedAt: new Date().toISOString(),
             },
@@ -1839,15 +1882,19 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
       if (msg.type === 'ice_answer' || msg.type === 'ice_candidate' || msg.type === 'direct_failed' || msg.type === 'direct_open') {
         if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
           if (msg.type === 'direct_open') {
-            currentSession = { ...currentSession, directState: 'direct' }
-            persistRequesterSessionPatch(msg.sessionId, { directState: 'direct' })
+            currentSession = { ...currentSession, directState: 'direct', directSticky: true }
+            persistRequesterSessionPatch(msg.sessionId, { directState: 'direct', directSticky: true })
             broadcastBrowsingStatus({
               state: 'connected',
               title: 'PeerMesh direct connection active',
               message: currentSession.country ? `Browsing via ${currentSession.country} over a direct path.` : 'Browsing through PeerMesh over a direct path.',
             }).catch(() => {})
           }
-          if (msg.type === 'direct_failed' && currentSession.directState !== 'direct') {
+          if (
+            msg.type === 'direct_failed' &&
+            currentSession.directState !== 'direct' &&
+            (currentSession.directSticky !== true || isDirectCapabilityFailureReason(msg.reason))
+          ) {
             currentSession = { ...currentSession, directState: 'relay' }
             persistRequesterSessionPatch(msg.sessionId, { directState: 'relay' })
           }
@@ -1909,6 +1956,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
         if (currentSession && (!msg.sessionId || currentSession.sessionId === msg.sessionId)) {
           currentSession.quality = quality
           if (quality.directState) currentSession.directState = quality.directState
+          if (quality.directState === 'direct') currentSession.directSticky = true
           currentSession.transportTier = quality.transportTier
           rememberRequesterSession(currentSession)
         }
@@ -1916,7 +1964,7 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           if (!session) return
           const storedSessionId = session.id || session.sessionId
           if (msg.sessionId && storedSessionId && storedSessionId !== msg.sessionId) return
-          chrome.storage.local.set({ session: { ...session, quality, directState: quality.directState || session.directState, transportTier: quality.transportTier ?? session.transportTier } })
+          chrome.storage.local.set({ session: { ...session, quality, directState: quality.directState || session.directState, directSticky: quality.directState === 'direct' || session.directSticky === true, transportTier: quality.transportTier ?? session.transportTier } })
         }).catch(() => {})
         chrome.runtime.sendMessage({ type: 'SESSION_QUALITY', sessionId: msg.sessionId, quality }).catch(() => {})
       }
@@ -2015,6 +2063,7 @@ async function refreshRequesterSession(reason = 'session refresh') {
   const previous = currentSession
   const token = previous.token || desktopToken || supabaseToken
   if (!token) throw new Error('Cannot refresh PeerMesh session: missing auth token')
+  const directSticky = previous.directSticky === true || previous.directState === 'direct'
 
   _sessionRefreshing = true
   // Keep browser traffic blocked during refresh while allowing PeerMesh API
@@ -2052,6 +2101,7 @@ async function refreshRequesterSession(reason = 'session refresh') {
       privateBaseDeviceId: data.privateBaseDeviceId || null,
       privateCode: previous.privateCode || null,
       connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public'),
+      directSticky,
       token: refreshedToken,
     })
 
@@ -2062,6 +2112,7 @@ async function refreshRequesterSession(reason = 'session refresh') {
       relayEndpoint: data.relayEndpoint,
       connectionType: previous.connectionType || (previous.privateCode ? 'private' : 'public'),
       directState: currentSession?.directState || (currentSession?.iceEnabled ? 'attempting_direct' : 'relay'),
+      directSticky: directSticky || currentSession?.directSticky === true,
       transportTier: currentSession?.transportTier ?? 0,
       directTransport: currentSession?.directTransport || null,
       iceEnabled: currentSession?.iceEnabled === true,
@@ -2097,6 +2148,7 @@ async function syncDesktopProxySession(session, reason = 'desktop proxy sync') {
       directTransport: session.directTransport ?? null,
       iceEnabled: session.iceEnabled === true,
       iceServers: session.iceServers ?? [],
+      directSticky: session.directSticky === true,
       providerDirectEndpoint: session.providerDirectEndpoint ?? null,
     }),
     signal: AbortSignal.timeout(4000),

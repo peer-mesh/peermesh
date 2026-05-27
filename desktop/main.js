@@ -420,6 +420,23 @@ function getSyncTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+function normalizeDetectedCountry(value) {
+  const country = String(value ?? '').trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null
+}
+
+function applyDetectedCountry(country, source = 'heartbeat') {
+  const nextCountry = normalizeDetectedCountry(country)
+  if (!nextCountry || nextCountry === config.country) return false
+
+  const previousCountry = config.country
+  config.country = nextCountry
+  saveConfig()
+  log.info('COUNTRY', 'provider country updated', { source, previousCountry, nextCountry })
+  restartRelayForConfigChange('country_detected')
+  return true
+}
+
 function preferLatestSyncRow(current, candidate) {
   if (!candidate) return current ?? null
   if (!current) return candidate
@@ -2557,6 +2574,11 @@ function sendHeartbeat(slot) {
         await confirmDesktopAuthStillValid('heartbeat', r.status, { preserveWhileSharing: true })
         return
       }
+      if (r.ok) {
+        const data = await r.json().catch(() => null)
+        if (data?.country) applyDetectedCountry(data.country)
+        return
+      }
       if (!r.ok) {
         const body = await r.json().catch(() => null)
         log.warn('HEARTBEAT', 'PUT failed', { status: r.status, body, slot: slot.index })
@@ -2886,6 +2908,15 @@ const requesterDirectSessions = new Map()
 const DIRECT_ICE_TIMEOUT_MS = 15000
 const DIRECT_RELAY_FALLBACK_GRACE_MS = 1500
 const DIRECT_RETRY_INTERVAL_MS = 8000
+
+function hasRequesterStickyDirect(entry) {
+  return !!entry && (entry.everDirectOpened === true || entry.directSticky === true)
+}
+
+function isDirectCapabilityFailureReason(reason) {
+  const value = String(reason || '').toLowerCase()
+  return value === 'ice_not_enabled' || value === 'node_datachannel_unavailable'
+}
 const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
 const DIRECT_DC_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
 const DIRECT_DC_BUFFER_LOW_BYTES = 1 * 1024 * 1024
@@ -3283,7 +3314,7 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
   if (entry.directRetryTimer) clearTimeout(entry.directRetryTimer)
   if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
-  if (!entry.everDirectOpened) {
+  if (!hasRequesterStickyDirect(entry)) {
     for (const [, tunnel] of entry.tunnels) {
       if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
         startRelayFallbackForBridge(tunnel.bridge, tunnel.relayUrl, tunnel.connectRequest, tunnel.onOpen)
@@ -3301,7 +3332,7 @@ function handleRequesterSignalingClosed(sessionId, signalingWs, reason = 'local_
   if (!entry) return
   if (entry.signalingWs !== signalingWs) return
   entry.signalingWs = null
-  if (entry.everDirectOpened && proxySession?.sessionId === sessionId) {
+  if (hasRequesterStickyDirect(entry) && proxySession?.sessionId === sessionId) {
     log.info('DIRECT', 'requester signaling closed after direct open; keeping direct session', { sessionId: sessionId?.slice(0, 8), reason })
     return
   }
@@ -3319,9 +3350,11 @@ async function startRequesterDirectSession(session, signalingWs) {
     return
   }
 
+  const directSticky = session.directSticky === true
   const existing = requesterDirectSessions.get(session.sessionId)
-  if (existing?.everDirectOpened) {
+  if (hasRequesterStickyDirect(existing)) {
     existing.session = session
+    existing.directSticky = existing.directSticky === true || directSticky
     existing.signalingWs = signalingWs
     if (existing.mode !== 'direct') {
       if (existing.directRetryTimer) clearTimeout(existing.directRetryTimer)
@@ -3345,6 +3378,7 @@ async function startRequesterDirectSession(session, signalingWs) {
     fallbackGraceTimer: null,
     directRetryTimer: null,
     directAttemptTimer: null,
+    directSticky,
     everDirectOpened: false,
   }
   requesterDirectSessions.set(session.sessionId, entry)
@@ -3389,6 +3423,11 @@ function beginRequesterDirectAttempt(entry, reason = 'retry') {
         scheduleRequesterDirectRetry(entry, 'retry_timeout')
       }
     }, DIRECT_ICE_TIMEOUT_MS)
+  } else if (hasRequesterStickyDirect(entry)) {
+    entry.directAttemptTimer = setTimeout(() => {
+      entry.directAttemptTimer = null
+      if (entry.mode !== 'direct') retryRequesterDirectOnly(entry, 'direct_sticky_timeout')
+    }, DIRECT_ICE_TIMEOUT_MS)
   } else {
     entry.fallbackTimer = setTimeout(() => switchRequesterDirectToRelay(entry, 'ice_timeout'), DIRECT_ICE_TIMEOUT_MS)
   }
@@ -3401,7 +3440,7 @@ function sendRequesterSignal(entry, payload) {
 }
 
 function scheduleRequesterRelayFallback(entry, reason) {
-  if (!entry || entry.everDirectOpened || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
+  if (!entry || hasRequesterStickyDirect(entry) || entry.mode === 'relay' || entry.mode === 'direct' || entry.fallbackGraceTimer) return
   entry.fallbackGraceTimer = setTimeout(() => {
     entry.fallbackGraceTimer = null
     if (entry.mode === 'attempting_direct') switchRequesterDirectToRelay(entry, reason)
@@ -3417,7 +3456,13 @@ function scheduleRequesterDirectRetry(entry, reason = 'relay_active') {
 }
 
 function retryRequesterDirectOnly(entry, reason = 'direct_lost') {
-  if (!entry || !entry.everDirectOpened || entry.directRetryTimer || entry.signalingWs?.readyState !== WebSocket.OPEN) return
+  if (!entry || !hasRequesterStickyDirect(entry) || entry.directRetryTimer || entry.signalingWs?.readyState !== WebSocket.OPEN) return
+  if (entry.fallbackTimer) clearTimeout(entry.fallbackTimer)
+  entry.fallbackTimer = null
+  if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
+  entry.fallbackGraceTimer = null
+  if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+  entry.directAttemptTimer = null
   entry.mode = 'attempting_direct'
   entry.directRetryTimer = setTimeout(() => {
     entry.directRetryTimer = null
@@ -3445,7 +3490,7 @@ function bindRequesterDataChannel(entry, dc) {
   })
   dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
   dc.onClosed?.(() => {
-    if (entry.mode === 'direct' || entry.everDirectOpened) retryRequesterDirectOnly(entry, 'data_channel_closed')
+    if (entry.mode === 'direct' || hasRequesterStickyDirect(entry)) retryRequesterDirectOnly(entry, 'data_channel_closed')
     else scheduleRequesterRelayFallback(entry, 'data_channel_closed')
   })
 }
@@ -3492,14 +3537,14 @@ function handleRequesterSignalMessage(sessionId, msg) {
     return
   }
   if (msg.type === 'direct_failed') {
-    if (entry.everDirectOpened) retryRequesterDirectOnly(entry, msg.reason || 'remote_direct_failed')
+    if (hasRequesterStickyDirect(entry) && !isDirectCapabilityFailureReason(msg.reason)) retryRequesterDirectOnly(entry, msg.reason || 'remote_direct_failed')
     else switchRequesterDirectToRelay(entry, msg.reason || 'remote_direct_failed')
   }
 }
 
 function switchRequesterDirectToRelay(entry, reason) {
   if (!entry || entry.mode === 'relay') return
-  if (entry.everDirectOpened) {
+  if (hasRequesterStickyDirect(entry) && !isDirectCapabilityFailureReason(reason)) {
     retryRequesterDirectOnly(entry, reason)
     return
   }

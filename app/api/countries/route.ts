@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { adminClient } from '@/lib/supabase/admin'
+import { detectCountryCodeFromRequest } from '@/lib/ip-country'
 
 export const revalidate = 300 // cache 5 min at CDN edge
 
@@ -31,8 +32,7 @@ export async function GET(req: Request) {
     })
   }
 
-  // Detect user's country from Vercel IP header for default selection
-  const ipCountry = req.headers.get('x-vercel-ip-country')?.toUpperCase() ?? null
+  const ipCountry = await detectCountryCodeFromRequest(req)
 
   return new NextResponse(JSON.stringify({
     countries: data ?? [],

@@ -166,18 +166,29 @@ test('requester direct path stays sticky after it opens once', () => {
   const desktop = readRepoFile('desktop/main.js')
   const cli = readRepoFile('cli/index.js')
   const serviceWorker = readRepoFile('extension/background/service-worker.js')
+  const relay = readRepoFile('relay/relay.js')
 
   for (const source of [desktop, cli]) {
     assert.match(source, /function handleRequesterSignalingClosed/)
     assert.match(source, /requester signaling closed after direct open; keeping direct session/)
-    assert.match(source, /existing\?\.everDirectOpened/)
+    assert.match(source, /function hasRequesterStickyDirect/)
+    assert.match(source, /function isDirectCapabilityFailureReason/)
+    assert.match(source, /const directSticky = session\.directSticky === true/)
     assert.match(source, /requester signaling attached to sticky direct session/)
-    assert.match(source, /if \(!entry \|\| entry\.everDirectOpened \|\| entry\.mode === 'relay'/)
+    assert.match(source, /if \(!entry \|\| hasRequesterStickyDirect\(entry\) \|\| entry\.mode === 'relay'/)
+    assert.match(source, /direct_sticky_timeout/)
     assert.match(source, /retryRequesterDirectOnly/)
   }
   assert.doesNotMatch(serviceWorker, /currentSession\.directState === 'direct'\) return/)
   assert.match(serviceWorker, /desktop_signaling_closed/)
   assert.match(serviceWorker, /currentSession\?\.directState !== 'direct'[\s\S]*direct_failed/)
+  assert.match(serviceWorker, /const directSticky = previous\.directSticky === true \|\| previous\.directState === 'direct'/)
+  assert.match(serviceWorker, /directSticky: directSticky === true/)
+  assert.match(serviceWorker, /currentSession\.directSticky !== true/)
+  assert.match(serviceWorker, /function isDirectCapabilityFailureReason/)
+  assert.match(relay, /ws\.directSticky = msg\.directSticky === true/)
+  assert.match(relay, /if \(directSession\.directSticky && !isDirectCapabilityFailureReason\(directFailReason\)\)/)
+  assert.match(relay, /STICKY_RETRY/)
 })
 
 test('relay config route computes relay health once per request', () => {

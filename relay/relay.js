@@ -505,6 +505,53 @@ async function verifyPeerAuth({
   }
 }
 
+function normalizeCountryCode(value) {
+  const country = String(value ?? '').trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null
+}
+
+function firstHeaderValue(value) {
+  return Array.isArray(value) ? value[0] : value
+}
+
+function isDirectCapabilityFailureReason(reason) {
+  const value = String(reason || '').toLowerCase()
+  return value === 'ice_not_enabled' || value === 'node_datachannel_unavailable'
+}
+
+async function registerProviderHeartbeatFromRelay({ userId, deviceId, relayUrl, providerIp }) {
+  if (!API_BASE || !RELAY_SECRET || !userId || !deviceId) return null
+  try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-relay-secret': RELAY_SECRET,
+      'x-peermesh-actor': 'relay',
+    }
+    const ip = firstHeaderValue(providerIp)
+    if (ip) headers['x-provider-ip'] = String(ip)
+
+    const res = await fetch(`${API_BASE}/api/user/sharing`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        user_id: userId,
+        device_id: deviceId,
+        relay_url: relayUrl || null,
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      log('HEARTBEAT', `relay provider heartbeat failed userId=${userId.slice(0,8)} status=${res.status} error=${data.error ?? 'unknown'}`)
+      return null
+    }
+    return normalizeCountryCode(data.country)
+  } catch (err) {
+    logErr('HEARTBEAT', `relay provider heartbeat failed userId=${userId.slice(0,8)}`, err)
+    return null
+  }
+}
+
 async function findProvider(country, requesterId, requestingUserId, {
   requireTunnel = false,
   preferredUserId = null,
@@ -621,6 +668,7 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     directOpenedAt: null,
     directFailedAt: null,
     directFailReason: null,
+    directSticky: requesterWs.directSticky === true,
     providerDirectEndpoint: null,
     mandate: null,
     relayPublicKey: null,
@@ -1320,6 +1368,7 @@ wss.on('connection', (ws, req) => {
     supportsHttp: true, supportsTunnel: false,
     supportsBinaryTunnel: false,
     supportsDirect: false, directEndpoint: null, directTransport: null, iceEnabled: false,
+    directSticky: false,
     privateOnly: false,
     bytesTransferred: 0, isAlive: true,
     relayUrl,
@@ -1371,6 +1420,12 @@ async function handleMessage(ws, msg) {
       }
       ws.deviceId = msg.deviceId ?? null
       ws.baseDeviceId = msg.baseDeviceId ?? msg.deviceId ?? null
+      const detectedCountry = await registerProviderHeartbeatFromRelay({
+        userId: auth.userId,
+        deviceId: ws.deviceId,
+        relayUrl: ws.relayUrl,
+        providerIp: ws.clientIp,
+      })
       for (const [id, peer] of peers) {
         if (peer.userId === auth.userId && peer.role === 'provider' && id !== ws.peerId) {
           // Only evict if same device reconnecting — different devices are allowed
@@ -1392,7 +1447,7 @@ async function handleMessage(ws, msg) {
         }
       }
       ws.role = 'provider'
-      ws.country = msg.country
+      ws.country = detectedCountry ?? normalizeCountryCode(msg.country) ?? msg.country
       ws.userId = auth.userId
       ws.trustScore = auth.trustScore ?? 50
       ws.agentMode = msg.agentMode ?? false
@@ -1507,6 +1562,7 @@ async function handleMessage(ws, msg) {
       ws.role = 'requester'
       ws.userId = auth.userId
       ws.iceEnabled = msg.iceEnabled !== false && msg.supportsDirect === true
+      ws.directSticky = msg.directSticky === true
       peers.set(ws.peerId, ws)
 
       createSession(ws, provider, resolvedCountry, msg.dbSessionId ?? null)
@@ -1574,9 +1630,21 @@ async function handleMessage(ws, msg) {
         log('DIRECT', `IGNORED late direct_failed session=${directSession.sessionId.slice(0,8)} reason=${String(msg.reason ?? 'ice_failed').slice(0, 120)}`)
         break
       }
+      const directFailReason = String(msg.reason ?? 'ice_failed').slice(0, 120)
+      if (directSession.directSticky && !isDirectCapabilityFailureReason(directFailReason)) {
+        directSession.directFailedAt = Date.now()
+        directSession.directFailReason = directFailReason
+        directSession.lastActivity = Date.now()
+        if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
+        forwardSessionSignal(ws, msg, 'direct_failed', ['reason'])
+        sendSessionQuality(directSession, 'direct_sticky_retry', true)
+        syncSessionMetadata(directSession, 'direct_sticky_retry')
+        log('DIRECT', `STICKY_RETRY session=${directSession.sessionId.slice(0,8)} reason=${directSession.directFailReason} fallback=blocked`)
+        break
+      }
       directSession.directState = 'relay'
       directSession.directFailedAt = Date.now()
-      directSession.directFailReason = String(msg.reason ?? 'ice_failed').slice(0, 120)
+      directSession.directFailReason = directFailReason
       directSession.lastActivity = Date.now()
       if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
       forwardSessionSignal(ws, msg, 'direct_failed', ['reason'])
@@ -1592,6 +1660,7 @@ async function handleMessage(ws, msg) {
       directSession.directState = 'direct'
       directSession.directOpenedAt = Date.now()
       directSession.directFailReason = null
+      directSession.directSticky = true
       directSession.lastActivity = Date.now()
       if (directSession.audit) directSession.audit.lastRelaySignalAt = Date.now()
       forwardSessionSignal(ws, msg, 'direct_open', [])

@@ -7,6 +7,7 @@ import {
   filterAvailableProviderDevices,
 } from '@/lib/provider-capacity'
 import { isProviderHealthy, sortProvidersByHealth } from '@/lib/provider-health'
+import { isPrivateShareActive } from '@/lib/private-sharing'
 
 export async function GET(req: Request) {
   // Try cookie-based auth first, then Bearer token - both optional.
@@ -45,12 +46,13 @@ export async function GET(req: Request) {
   // device still hide every slot under that base device.
   const { data: privateDevices } = await adminClient
     .from('private_share_devices')
-    .select('user_id, base_device_id')
+    .select('user_id, base_device_id, enabled, expires_at')
     .eq('enabled', true)
 
   function isPrivateSlot(userId: string, deviceId: string): boolean {
     for (const entry of privateDevices ?? []) {
       if (entry.user_id !== userId) continue
+      if (!isPrivateShareActive(entry.enabled, entry.expires_at)) continue
       if (entry.base_device_id === deviceId) return true
       if (!entry.base_device_id.includes('_slot_') && deviceId.startsWith(`${entry.base_device_id}_slot_`)) {
         return true
