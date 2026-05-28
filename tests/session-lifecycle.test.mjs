@@ -117,6 +117,23 @@ test('provider byte accounting is throttled off hot tunnel chunks', () => {
   }
 })
 
+test('requester CONNECT tunnels flush browser sockets on normal remote close', () => {
+  const desktop = readRepoFile('desktop/main.js')
+  const cli = readRepoFile('cli/index.js')
+
+  for (const source of [desktop, cli]) {
+    const start = source.indexOf("localProxyServer.on('connect'")
+    const end = source.indexOf('let localProxyListenStarted', start)
+    const connectBlock = source.slice(start, end === -1 ? undefined : end)
+
+    assert.notEqual(start, -1)
+    assert.match(source, /function endProxyClientSocket/)
+    assert.match(connectBlock, /Normal remote FIN/)
+    assert.match(connectBlock, /if \(clientSocket\._connectSent\)[\s\S]+endProxyClientSocket\(clientSocket\)/)
+    assert.doesNotMatch(connectBlock, /tunnelWs\.on\('close'[\s\S]+clientSocket\.destroy\(\)/)
+  }
+})
+
 test('fail-closed reconnect clears only PeerMesh control path and status panel can disconnect', () => {
   const serviceWorker = readRepoFile('extension/background/service-worker.js')
   const popup = readRepoFile('extension/popup/popup.js')

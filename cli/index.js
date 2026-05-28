@@ -32,7 +32,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.77'
+const VERSION     = '1.0.78'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -2099,6 +2099,21 @@ function openTunnelWs(hostname, port, onOpen) {
   return bridge
 }
 
+function endProxyClientSocket(clientSocket, response = null) {
+  if (!clientSocket || clientSocket.destroyed || clientSocket.writableEnded) return
+  try {
+    if (response != null) clientSocket.end(response)
+    else clientSocket.end()
+  } catch {
+    try { clientSocket.destroy() } catch {}
+  }
+}
+
+function destroyProxyClientSocket(clientSocket) {
+  if (!clientSocket || clientSocket.destroyed) return
+  try { clientSocket.destroy() } catch {}
+}
+
 const localProxyServer = http.createServer(async (req, res) => {
   if (!_proxySession?.sessionId) {
     res.writeHead(503); res.end('No PeerMesh session'); return
@@ -2177,21 +2192,22 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
   const [hostname, portStr] = (req.url || '').split(':')
   const port = parseInt(portStr) || 443
   if (!_proxySession?.sessionId) {
-    clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
-    clientSocket.destroy(); return
+    endProxyClientSocket(clientSocket, 'HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    return
   }
   if (!(await isAllowedResolved(hostname, port))) {
-    clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
-    clientSocket.destroy(); return
+    endProxyClientSocket(clientSocket, 'HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+    return
   }
-  let opened = false
   const tunnelWs = openTunnelWs(hostname, port)
-  if (!tunnelWs) { clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n'); clientSocket.destroy(); return }
+  if (!tunnelWs) {
+    endProxyClientSocket(clientSocket, 'HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    return
+  }
   tunnelWs.on('message', (data) => {
     const text = Buffer.isBuffer(data) ? data.toString() : data
     if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {
       clientSocket._connectSent = true
-      opened = true
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       if (head?.length) tunnelWs.send(head)
       clientSocket.on('data', (chunk) => { if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk) })
@@ -2201,9 +2217,27 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
     }
     if (!clientSocket.destroyed) clientSocket.write(Buffer.isBuffer(data) ? data : Buffer.from(data))
   })
-  tunnelWs.on('close', () => { if (!clientSocket.destroyed) clientSocket.destroy() })
-  tunnelWs.on('error', () => { if (!opened) clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n'); if (!clientSocket.destroyed) clientSocket.destroy() })
-  setTimeout(() => { if (!opened) { tunnelWs.terminate(); clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n'); clientSocket.destroy() } }, 30000)
+  tunnelWs.on('close', () => {
+    if (clientSocket._connectSent) {
+      // Normal remote FIN: flush bytes already written to Chrome before closing.
+      endProxyClientSocket(clientSocket)
+    } else {
+      endProxyClientSocket(clientSocket, 'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    }
+  })
+  tunnelWs.on('error', () => {
+    if (!clientSocket._connectSent) {
+      endProxyClientSocket(clientSocket, 'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    } else {
+      destroyProxyClientSocket(clientSocket)
+    }
+  })
+  setTimeout(() => {
+    if (!clientSocket._connectSent) {
+      tunnelWs.terminate?.()
+      endProxyClientSocket(clientSocket, 'HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
+    }
+  }, 30000)
 })
 
 let localProxyListenStarted = false

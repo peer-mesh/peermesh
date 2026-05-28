@@ -3669,6 +3669,21 @@ function openTunnelWs(hostname, port, onOpen) {
   return bridge
 }
 
+function endProxyClientSocket(clientSocket, response = null) {
+  if (!clientSocket || clientSocket.destroyed || clientSocket.writableEnded) return
+  try {
+    if (response != null) clientSocket.end(response)
+    else clientSocket.end()
+  } catch {
+    try { clientSocket.destroy() } catch {}
+  }
+}
+
+function destroyProxyClientSocket(clientSocket) {
+  if (!clientSocket || clientSocket.destroyed) return
+  try { clientSocket.destroy() } catch {}
+}
+
 const localProxyServer = http.createServer(async (req, res) => {
   if (!proxySession?.sessionId) {
     log.warn('LOCAL-PROXY', 'HTTP rejected Ã¢â‚¬â€ no session', { url: req.url })
@@ -3779,18 +3794,20 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
 
   if (!proxySession?.sessionId) {
     log.warn('LOCAL-PROXY', 'CONNECT rejected Ã¢â‚¬â€ no proxySession', { target: `${hostname}:${port}` })
-    clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
-    clientSocket.destroy(); return
+    endProxyClientSocket(clientSocket, 'HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    return
   }
   if (!(await isAllowedResolved(hostname, port))) {
     log.warn('LOCAL-PROXY', 'CONNECT rejected - blocked target', { target: `${hostname}:${port}` })
-    clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
-    clientSocket.destroy(); return
+    endProxyClientSocket(clientSocket, 'HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+    return
   }
 
-  let opened = false
-  const tunnelWs = openTunnelWs(hostname, port, () => { opened = true })
-  if (!tunnelWs) { clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n'); clientSocket.destroy(); return }
+  const tunnelWs = openTunnelWs(hostname, port)
+  if (!tunnelWs) {
+    endProxyClientSocket(clientSocket, 'HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    return
+  }
   log.debug('LOCAL-PROXY', 'opening tunnel WS', { target: `${hostname}:${port}` })
 
   tunnelWs.on('message', (data) => {
@@ -3811,19 +3828,28 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
 
   tunnelWs.on('close', (code, reason) => {
     log.info('LOCAL-PROXY', 'tunnel WS closed', { target: `${hostname}:${port}`, code, reason: reason?.toString() || '' })
-    if (!clientSocket.destroyed) clientSocket.destroy()
+    if (clientSocket._connectSent) {
+      // Normal remote FIN: flush bytes already written to Chrome before closing.
+      endProxyClientSocket(clientSocket)
+    } else {
+      endProxyClientSocket(clientSocket, 'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    }
   })
 
   tunnelWs.on('error', (e) => {
     log.error('LOCAL-PROXY', 'tunnel WS error', { target: `${hostname}:${port}`, err: e.message })
-    if (!opened) clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
-    if (!clientSocket.destroyed) clientSocket.destroy()
+    if (!clientSocket._connectSent) {
+      endProxyClientSocket(clientSocket, 'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    } else {
+      destroyProxyClientSocket(clientSocket)
+    }
   })
 
   setTimeout(() => {
-    if (!opened) {
+    if (!clientSocket._connectSent) {
       log.warn('LOCAL-PROXY', 'tunnel timeout', { target: `${hostname}:${port}` })
-      tunnelWs.terminate(); clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n'); clientSocket.destroy()
+      tunnelWs.terminate?.()
+      endProxyClientSocket(clientSocket, 'HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
     }
   }, 30000)
 })
