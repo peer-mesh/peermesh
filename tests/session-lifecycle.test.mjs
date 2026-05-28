@@ -117,21 +117,31 @@ test('provider byte accounting is throttled off hot tunnel chunks', () => {
   }
 })
 
-test('requester CONNECT tunnels flush browser sockets on normal remote close', () => {
+test('provider direct tunnel drains queued data before notifying requester close', () => {
   const desktop = readRepoFile('desktop/main.js')
-  const cli = readRepoFile('cli/index.js')
+  const queueStart = desktop.indexOf('function queueTunnelDataChannelFrame')
+  const pumpStart = desktop.indexOf('function pumpTunnelDataChannel')
+  const closeStart = desktop.indexOf('function closeProviderDirectTunnel')
+  const providerDirectStart = desktop.indexOf('async function handleProviderDataChannelMessage')
+  const socketCloseStart = desktop.indexOf("socket.on('close'", desktop.indexOf("if (msg.type === 'open_tunnel')", providerDirectStart))
 
-  for (const source of [desktop, cli]) {
-    const start = source.indexOf("localProxyServer.on('connect'")
-    const end = source.indexOf('let localProxyListenStarted', start)
-    const connectBlock = source.slice(start, end === -1 ? undefined : end)
+  assert.notEqual(queueStart, -1)
+  assert.notEqual(pumpStart, -1)
+  assert.notEqual(closeStart, -1)
+  assert.notEqual(providerDirectStart, -1)
+  assert.notEqual(socketCloseStart, -1)
 
-    assert.notEqual(start, -1)
-    assert.match(source, /function endProxyClientSocket/)
-    assert.match(connectBlock, /Normal remote FIN/)
-    assert.match(connectBlock, /if \(clientSocket\._connectSent\)[\s\S]+endProxyClientSocket\(clientSocket\)/)
-    assert.doesNotMatch(connectBlock, /tunnelWs\.on\('close'[\s\S]+clientSocket\.destroy\(\)/)
-  }
+  const queueBlock = desktop.slice(queueStart, pumpStart)
+  const pumpBlock = desktop.slice(pumpStart, desktop.indexOf('function closePeerConnection', pumpStart))
+  const closeBlock = desktop.slice(closeStart, desktop.indexOf('function closeRequesterDirectSession', closeStart))
+  const socketCloseBlock = desktop.slice(socketCloseStart, desktop.indexOf("socket.on('error'", socketCloseStart))
+
+  assert.match(desktop, /function hasPendingDirectFrames/)
+  assert.match(desktop, /function finalizeProviderDirectTunnel/)
+  assert.match(queueBlock, /closeProviderDirectTunnel\(entry, tunnel\.tunnelId, true, \{ drainPending: false \}\)/)
+  assert.match(pumpBlock, /tunnel\.closeAfterPending && !hasPendingDirectFrames\(tunnel\)[\s\S]+finalizeProviderDirectTunnel\(entry, tunnel\.tunnelId, true\)/)
+  assert.match(closeBlock, /notifyRequester && drainPending && hasPendingDirectFrames\(tunnel\)[\s\S]+tunnel\.closeAfterPending = true[\s\S]+pumpTunnelDataChannel\(entry, tunnel\)/)
+  assert.match(socketCloseBlock, /tunnel\.closeAfterPending && hasPendingDirectFrames\(tunnel\)[\s\S]+return/)
 })
 
 test('fail-closed reconnect clears only PeerMesh control path and status panel can disconnect', () => {

@@ -3035,12 +3035,16 @@ function scheduleTunnelDataChannelPump(entry, tunnel) {
   tunnel.backpressureTimer = setInterval(() => pumpTunnelDataChannel(entry, tunnel), DIRECT_DC_BUFFER_CHECK_MS)
 }
 
+function hasPendingDirectFrames(tunnel) {
+  return Boolean(tunnel?.pendingDcFrames?.length)
+}
+
 function queueTunnelDataChannelFrame(entry, tunnel, chunk, onSent) {
   if (!entry?.dataChannel || !tunnel || tunnel.closed) return false
   if (!tunnel.pendingDcFrames) tunnel.pendingDcFrames = []
   tunnel.pendingDcBytes = (tunnel.pendingDcBytes || 0) + chunk.length
   if (tunnel.pendingDcBytes > DIRECT_TUNNEL_PENDING_MAX_BYTES) {
-    closeProviderDirectTunnel(entry, tunnel.tunnelId, true)
+    closeProviderDirectTunnel(entry, tunnel.tunnelId, true, { drainPending: false })
     return false
   }
   tunnel.pendingDcFrames.push({ chunk, onSent })
@@ -3086,6 +3090,10 @@ function pumpTunnelDataChannel(entry, tunnel) {
     const wasPaused = tunnel.pausedForDataChannel
     clearTunnelBackpressure(tunnel)
     if (wasPaused && tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.resume()
+  }
+
+  if (tunnel.closeAfterPending && !hasPendingDirectFrames(tunnel)) {
+    finalizeProviderDirectTunnel(entry, tunnel.tunnelId, true)
   }
 }
 
@@ -3281,6 +3289,7 @@ async function handleProviderDataChannelMessage(entry, raw) {
     })
     socket.on('end', () => closeProviderDirectTunnel(entry, tunnelId, true))
     socket.on('close', () => {
+      if (tunnel.closeAfterPending && hasPendingDirectFrames(tunnel)) return
       clearTunnelBackpressure(tunnel)
       entry.providerTunnels.delete(tunnelId)
     })
@@ -3297,7 +3306,7 @@ async function handleProviderDataChannelMessage(entry, raw) {
   if (msg.type === 'tunnel_close') closeProviderDirectTunnel(entry, msg.tunnelId, false)
 }
 
-function closeProviderDirectTunnel(entry, tunnelId, notifyRequester = false) {
+function finalizeProviderDirectTunnel(entry, tunnelId, notifyRequester = false) {
   const tunnel = entry?.providerTunnels?.get(tunnelId)
   if (!tunnel || tunnel.closed) return
   tunnel.closed = true
@@ -3305,6 +3314,18 @@ function closeProviderDirectTunnel(entry, tunnelId, notifyRequester = false) {
   entry.providerTunnels.delete(tunnelId)
   if (notifyRequester && entry.dataChannel) sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId })
   if (tunnel.socket && !tunnel.socket.destroyed) tunnel.socket.destroy()
+}
+
+function closeProviderDirectTunnel(entry, tunnelId, notifyRequester = false, options = {}) {
+  const tunnel = entry?.providerTunnels?.get(tunnelId)
+  if (!tunnel || tunnel.closed) return
+  const drainPending = options.drainPending !== false
+  if (notifyRequester && drainPending && hasPendingDirectFrames(tunnel)) {
+    tunnel.closeAfterPending = true
+    pumpTunnelDataChannel(entry, tunnel)
+    return
+  }
+  finalizeProviderDirectTunnel(entry, tunnelId, notifyRequester)
 }
 
 function closeRequesterDirectSession(sessionId, reason = 'requester_direct_closed') {
@@ -3669,21 +3690,6 @@ function openTunnelWs(hostname, port, onOpen) {
   return bridge
 }
 
-function endProxyClientSocket(clientSocket, response = null) {
-  if (!clientSocket || clientSocket.destroyed || clientSocket.writableEnded) return
-  try {
-    if (response != null) clientSocket.end(response)
-    else clientSocket.end()
-  } catch {
-    try { clientSocket.destroy() } catch {}
-  }
-}
-
-function destroyProxyClientSocket(clientSocket) {
-  if (!clientSocket || clientSocket.destroyed) return
-  try { clientSocket.destroy() } catch {}
-}
-
 const localProxyServer = http.createServer(async (req, res) => {
   if (!proxySession?.sessionId) {
     log.warn('LOCAL-PROXY', 'HTTP rejected Ã¢â‚¬â€ no session', { url: req.url })
@@ -3794,20 +3800,18 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
 
   if (!proxySession?.sessionId) {
     log.warn('LOCAL-PROXY', 'CONNECT rejected Ã¢â‚¬â€ no proxySession', { target: `${hostname}:${port}` })
-    endProxyClientSocket(clientSocket, 'HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
-    return
+    clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
+    clientSocket.destroy(); return
   }
   if (!(await isAllowedResolved(hostname, port))) {
     log.warn('LOCAL-PROXY', 'CONNECT rejected - blocked target', { target: `${hostname}:${port}` })
-    endProxyClientSocket(clientSocket, 'HTTP/1.1 403 Target Not Allowed\r\n\r\n')
-    return
+    clientSocket.write('HTTP/1.1 403 Target Not Allowed\r\n\r\n')
+    clientSocket.destroy(); return
   }
 
-  const tunnelWs = openTunnelWs(hostname, port)
-  if (!tunnelWs) {
-    endProxyClientSocket(clientSocket, 'HTTP/1.1 503 No PeerMesh Session\r\n\r\n')
-    return
-  }
+  let opened = false
+  const tunnelWs = openTunnelWs(hostname, port, () => { opened = true })
+  if (!tunnelWs) { clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n'); clientSocket.destroy(); return }
   log.debug('LOCAL-PROXY', 'opening tunnel WS', { target: `${hostname}:${port}` })
 
   tunnelWs.on('message', (data) => {
@@ -3828,28 +3832,19 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
 
   tunnelWs.on('close', (code, reason) => {
     log.info('LOCAL-PROXY', 'tunnel WS closed', { target: `${hostname}:${port}`, code, reason: reason?.toString() || '' })
-    if (clientSocket._connectSent) {
-      // Normal remote FIN: flush bytes already written to Chrome before closing.
-      endProxyClientSocket(clientSocket)
-    } else {
-      endProxyClientSocket(clientSocket, 'HTTP/1.1 502 Bad Gateway\r\n\r\n')
-    }
+    if (!clientSocket.destroyed) clientSocket.destroy()
   })
 
   tunnelWs.on('error', (e) => {
     log.error('LOCAL-PROXY', 'tunnel WS error', { target: `${hostname}:${port}`, err: e.message })
-    if (!clientSocket._connectSent) {
-      endProxyClientSocket(clientSocket, 'HTTP/1.1 502 Bad Gateway\r\n\r\n')
-    } else {
-      destroyProxyClientSocket(clientSocket)
-    }
+    if (!opened) clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    if (!clientSocket.destroyed) clientSocket.destroy()
   })
 
   setTimeout(() => {
-    if (!clientSocket._connectSent) {
+    if (!opened) {
       log.warn('LOCAL-PROXY', 'tunnel timeout', { target: `${hostname}:${port}` })
-      tunnelWs.terminate?.()
-      endProxyClientSocket(clientSocket, 'HTTP/1.1 504 Tunnel Timeout\r\n\r\n')
+      tunnelWs.terminate(); clientSocket.write('HTTP/1.1 504 Tunnel Timeout\r\n\r\n'); clientSocket.destroy()
     }
   }, 30000)
 })
