@@ -183,6 +183,66 @@ test('CONNECT proxy preserves bytes coalesced after tunnel response', () => {
   }
 })
 
+test('identity spoofing remains active with connected proxy', () => {
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+  const manifest = readRepoFile('extension/manifest.json')
+
+  assert.match(serviceWorker, /const HEADER_RESOURCE_TYPES = \['main_frame', 'sub_frame', 'xmlhttprequest', 'script'/)
+  assert.match(serviceWorker, /requestHeaders: \[\{ header: 'User-Agent', operation: 'set'/)
+  assert.match(serviceWorker, /requestHeaders: \[\{ header: 'Accept-Language', operation: 'set'/)
+  assert.match(serviceWorker, /requestHeaders: \[\{ header: 'Sec-CH-UA'/)
+  assert.match(serviceWorker, /blockWebRTC\(\)[\s\S]+if \(country\) applyHeaderRules/)
+  assert.match(manifest, /"content\/injector\.js"[\s\S]+"content\/identity\.js"/)
+})
+
+test('relay enforces requester billing cap across direct and relay bytes', () => {
+  const relay = readRepoFile('relay/relay.js')
+  const relayAuth = readRepoFile('app/api/relay/auth/route.ts')
+
+  assert.match(relayAuth, /getBrowseBytesCoveredByWalletUsd/)
+  assert.match(relayAuth, /billingCapBytes:/)
+  assert.match(relay, /billingCapBytes: Number\.isFinite/)
+  assert.match(relay, /requesterBillingCapBytes: requesterWs\.billingCapBytes/)
+  assert.match(relay, /billing_usage_limit_reached/)
+  assert.match(relay, /acceptedBytes = Math\.min\(byteCount, remainingBytes\)/)
+  assert.match(relay, /pendingMeteringEndReason/)
+  assert.match(relay, /finishMeteredSessionIfNeeded/)
+  assert.match(relay, /case 'direct_bytes':[\s\S]+recordSessionBytes\(directSession, byteCount, 'provider_to_requester'\)/)
+  assert.match(relay, /case 'tunnel_data':[\s\S]+recordSessionBytes\(tunnelSession, chunk\.length, 'provider_to_requester'\)/)
+})
+
+test('provider agent uses binary tunnel frames to avoid base64 relay overhead', () => {
+  const agent = readRepoFile('provider-agent/agent.js')
+
+  assert.match(agent, /supportsBinaryTunnel: true/)
+  assert.match(agent, /encodeRelayTunnelDataBinary/)
+  assert.match(agent, /decodeRelayTunnelDataBinary/)
+  assert.match(agent, /sendRelayTunnelData\(tunnelId, data\)/)
+  assert.match(agent, /isBinary \|\| buf\[0\] === RELAY_BINARY_TUNNEL_DATA/)
+})
+
+test('requester disconnects when the last browser window closes', () => {
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+
+  assert.match(serviceWorker, /chrome\.windows\?\.onRemoved\?\.addListener/)
+  assert.match(serviceWorker, /windows\.length > 0 \|\| !currentSession/)
+  assert.match(serviceWorker, /last browser window closed - disconnecting requester session/)
+  assert.match(serviceWorker, /disconnect\(\)\.catch/)
+})
+
+test('requester speed display can use provider advertised speed', () => {
+  const relay = readRepoFile('relay/relay.js')
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+  const popup = readRepoFile('extension/popup/popup.js')
+  const injector = readRepoFile('extension/content/injector.js')
+
+  assert.match(relay, /providerAdvertisedLastMbps/)
+  assert.match(relay, /providerAdvertisedAvgMbps/)
+  assert.match(serviceWorker, /providerAdvertisedLastMbps: Number\(msg\.providerAdvertisedLastMbps\)/)
+  assert.match(popup, /providerAdvertisedLastMbps \|\| session\.quality\.currentMbps/)
+  assert.match(injector, /providerAdvertisedLastMbps \|\| quality\.currentMbps/)
+})
+
 test('relay assigns direct-first mandated sessions with relay fallback and direct accounting', () => {
   const relay = readRepoFile('relay/relay.js')
 

@@ -869,7 +869,7 @@ function renderDashboard(app) {
         <div class="country-display">${getFlagForCountry(session.country)} ${session.country}</div>
         <div style="margin-top:6px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.24);color:#00ff88">${getSessionRouteLabel(session)}</div>
         <div style="margin-top:6px;display:inline-block;font-family:'Courier New',monospace;font-size:9px;padding:2px 7px;border-radius:4px;background:${state.connectionType === 'private' ? 'rgba(0,255,136,0.12)' : 'rgba(255,255,255,0.05)'};border:1px solid ${state.connectionType === 'private' ? 'rgba(0,255,136,0.35)' : '#1e1e2a'};color:${state.connectionType === 'private' ? '#00ff88' : '#666680'}">${state.connectionType === 'private' ? '\uD83D\uDD12 PRIVATE' : '\uD83C\uDF10 PUBLIC'}</div>
-        ${session.quality ? `<div style="margin-top:8px;font-family:'Courier New',monospace;font-size:10px;color:var(--muted)">Provider speed: <span style="color:var(--accent)">${formatMbps(session.quality.currentMbps)}</span> now · ${formatMbps(session.quality.avgMbps)} avg</div>` : ''}
+        ${session.quality ? `<div style="margin-top:8px;font-family:'Courier New',monospace;font-size:10px;color:var(--muted)">Provider speed: <span style="color:var(--accent)">${formatMbps(session.quality.providerAdvertisedLastMbps || session.quality.currentMbps)}</span> now · ${formatMbps(session.quality.providerAdvertisedAvgMbps || session.quality.avgMbps)} avg</div>` : ''}
       </div>
       <button class="connect-btn disconnect" id="disconnectBtn" ${state.disconnecting ? 'disabled' : ''}>
         ${state.disconnecting

@@ -1950,6 +1950,8 @@ async function connectOnce({ relayEndpoint, country, userId, dbSessionId, prefer
           sampleWindowMs: Number(msg.sampleWindowMs) || 0,
           providerKind: msg.providerKind || null,
           providerDeviceId: msg.providerDeviceId || null,
+          providerAdvertisedLastMbps: Number(msg.providerAdvertisedLastMbps) || 0,
+          providerAdvertisedAvgMbps: Number(msg.providerAdvertisedAvgMbps) || 0,
           directState: msg.directState || currentSession?.directState || null,
           transportTier: msg.transportTier ?? currentSession?.transportTier ?? 0,
         }
@@ -2463,6 +2465,14 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
     clearProxy()
     await chrome.storage.local.clear()
   }
+})
+
+chrome.windows?.onRemoved?.addListener(() => {
+  chrome.windows.getAll({ windowTypes: ['normal'] }, (windows = []) => {
+    if (chrome.runtime.lastError || windows.length > 0 || !currentSession) return
+    log('info', '[LIFECYCLE] last browser window closed - disconnecting requester session')
+    disconnect().catch((error) => log('warn', `[LIFECYCLE] disconnect on window close failed: ${error.message}`))
+  })
 })
 
 chrome.storage.onChanged.addListener((changes, areaName) => {

@@ -1146,7 +1146,19 @@ export async function PUT(req: Request) {
     .update({ state_actor: stateActor, state_changed_at: stateChangedAt })
     .eq('id', userId)
 
-  return NextResponse.json({ ok: true, country })
+  const { data: updatedDevice } = await adminClient
+    .from('provider_devices')
+    .select('provider_last_mbps, provider_avg_mbps')
+    .eq('user_id', userId)
+    .eq('device_id', device_id)
+    .maybeSingle()
+
+  return NextResponse.json({
+    ok: true,
+    country,
+    providerLastMbps: Number(updatedDevice?.provider_last_mbps ?? 0),
+    providerAvgMbps: Number(updatedDevice?.provider_avg_mbps ?? 0),
+  })
 }
 
 // ── DELETE: device stopped sharing ───────────────────────────────────────────

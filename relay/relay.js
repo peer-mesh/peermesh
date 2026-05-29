@@ -495,6 +495,7 @@ async function verifyPeerAuth({
       ok: true,
       userId: data.userId ?? null,
       trustScore: data.trustScore ?? 50,
+      billingCapBytes: Number.isFinite(Number(data.billingCapBytes)) ? Math.max(0, Math.floor(Number(data.billingCapBytes))) : null,
       country: data.country ?? null,
       privateProviderUserId: data.privateProviderUserId ?? null,
       privateBaseDeviceId: data.privateBaseDeviceId ?? null,
@@ -541,7 +542,11 @@ async function registerProviderHeartbeatFromRelay({ userId, deviceId, relayUrl, 
       log('HEARTBEAT', `relay provider heartbeat failed userId=${userId.slice(0,8)} status=${res.status} error=${data.error ?? 'unknown'}`)
       return null
     }
-    return normalizeCountryCode(data.country)
+    return {
+      country: normalizeCountryCode(data.country),
+      providerLastMbps: Number(data.providerLastMbps ?? data.provider_last_mbps ?? 0) || 0,
+      providerAvgMbps: Number(data.providerAvgMbps ?? data.provider_avg_mbps ?? 0) || 0,
+    }
   } catch (err) {
     logErr('HEARTBEAT', `relay provider heartbeat failed userId=${userId.slice(0,8)}`, err)
     return null
@@ -633,6 +638,8 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     bytesProvider: 0,
     providerAvgMbps: 0,
     providerLastMbps: 0,
+    providerAdvertisedAvgMbps: provider.providerAvgMbps ?? 0,
+    providerAdvertisedLastMbps: provider.providerLastMbps ?? 0,
     connectionQuality: {},
     lastQualitySentAt: 0,
     lastQualityBytes: 0,
@@ -647,6 +654,7 @@ function createSession(requesterWs, provider, country, dbSessionId, {
     reconnectAttempts: reconnectAttempt,
     reconnectReason: reconnectAttempt > 0 ? 'provider_disconnected' : null,
     requesterTrustScore: requesterWs.trustScore ?? 50,
+    requesterBillingCapBytes: requesterWs.billingCapBytes ?? null,
     blockedRequests: 0,
     tunnelWindowStart: Date.now(),
     tunnelOpenCount: 0,
@@ -840,6 +848,8 @@ function buildSessionQuality(session, now = Date.now()) {
     measuredAt: new Date(now).toISOString(),
     providerKind: session.providerKind ?? null,
     providerDeviceId: session.providerDeviceId ?? null,
+    providerAdvertisedLastMbps: Number(session.providerAdvertisedLastMbps ?? 0) || 0,
+    providerAdvertisedAvgMbps: Number(session.providerAdvertisedAvgMbps ?? 0) || 0,
     country: session.country ?? null,
     directState: session.directState ?? 'relay',
     directOpenedAt: session.directOpenedAt ? new Date(session.directOpenedAt).toISOString() : null,
@@ -872,6 +882,8 @@ function sendSessionQuality(session, reason = 'traffic', force = false) {
     sampleWindowMs: quality.sampleWindowMs,
     providerKind: quality.providerKind,
     providerDeviceId: quality.providerDeviceId,
+    providerAdvertisedLastMbps: quality.providerAdvertisedLastMbps,
+    providerAdvertisedAvgMbps: quality.providerAdvertisedAvgMbps,
     country: quality.country,
     directState: quality.directState,
     transportTier: quality.transportTier,
@@ -907,9 +919,30 @@ function canOpenTunnel(session) {
 }
 
 function recordSessionBytes(session, byteCount, direction = 'unknown') {
-  if (!session || byteCount <= 0) return true
+  if (!session || byteCount <= 0) return Math.max(0, byteCount)
   const now = Date.now()
   const limits = sessionLimits(session.requesterTrustScore ?? 50)
+  let acceptedBytes = byteCount
+  const capBytes = session.requesterBillingCapBytes
+  if (Number.isFinite(capBytes) && capBytes >= 0) {
+    const currentBytes = Math.max(0, Number(session.bytesRequester) || 0)
+    const remainingBytes = Math.max(0, capBytes - currentBytes)
+    acceptedBytes = Math.min(byteCount, remainingBytes)
+    const projectedBytes = currentBytes + byteCount
+    if (projectedBytes > capBytes) {
+      session.disconnectReason = 'billing_usage_limit_reached'
+      session.pendingMeteringEndReason = session.disconnectReason
+      logSecurityEvent('session_billing_ended', session, {
+        reason: session.disconnectReason,
+        direction,
+        projectedBytes,
+        billingCapBytes: capBytes,
+        acceptedBytes,
+      })
+      if (acceptedBytes <= 0) return 0
+    }
+  }
+  if (acceptedBytes <= 0) return 0
 
   // Sliding window: keep a ring of (timestamp, bytes) samples so the window
   // always covers exactly the last BYTE_BURST_WINDOW_MS milliseconds.
@@ -923,8 +956,8 @@ function recordSessionBytes(session, byteCount, direction = 'unknown') {
       session.byteBurstWindowBytes += session.byteBurstSamples[i].b
     }
   }
-  session.byteBurstSamples.push({ t: now, b: byteCount })
-  session.byteBurstWindowBytes += byteCount
+  session.byteBurstSamples.push({ t: now, b: acceptedBytes })
+  session.byteBurstWindowBytes += acceptedBytes
 
   // Evict samples older than the window
   const cutoff = now - BYTE_BURST_WINDOW_MS
@@ -944,18 +977,26 @@ function recordSessionBytes(session, byteCount, direction = 'unknown') {
   const windowBytes = session.byteBurstWindowBytes
 
   if (windowBytes <= limits.maxBytesPerMinute) {
-    recordAuditBytes(session, byteCount, direction)
-    return true
+    recordAuditBytes(session, acceptedBytes, direction)
+    return acceptedBytes
   }
 
   session.disconnectReason = 'security_bandwidth_burst_limit'
+  session.pendingMeteringEndReason = session.disconnectReason
   logSecurityEvent('session_security_ended', session, {
     reason: session.disconnectReason,
     direction,
     windowBytes,
     maxBytesPerMinute: limits.maxBytesPerMinute,
   })
-  endRelaySession(session, session.sessionId ?? null, 'security_bandwidth_burst_limit')
+  return 0
+}
+
+function finishMeteredSessionIfNeeded(session) {
+  if (!session?.pendingMeteringEndReason) return true
+  const reason = session.pendingMeteringEndReason
+  delete session.pendingMeteringEndReason
+  endRelaySession(session, session.sessionId ?? null, reason)
   return false
 }
 
@@ -1332,7 +1373,11 @@ proxyWss.on('connection', (ws, req) => {
     if (provider.readyState === WebSocket.OPEN) {
       const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
       const currentSession = sessions.get(sessionId)
-      if (!recordSessionBytes(currentSession, chunk.length, 'requester_to_provider')) return
+      const meteredBytes = recordSessionBytes(currentSession, chunk.length, 'requester_to_provider')
+      if (meteredBytes !== chunk.length) {
+        finishMeteredSessionIfNeeded(currentSession)
+        return
+      }
       sendTunnelDataToProvider(provider, tunnelId, chunk)
     }
   })
@@ -1417,12 +1462,13 @@ async function handleMessage(ws, msg) {
       ws.deviceId = msg.deviceId ?? null
       ws.baseDeviceId = msg.baseDeviceId ?? msg.deviceId ?? null
       const registeredCountry = normalizeCountryCode(msg.country)
-      const detectedCountry = await registerProviderHeartbeatFromRelay({
+      const heartbeatState = await registerProviderHeartbeatFromRelay({
         userId: auth.userId,
         deviceId: ws.deviceId,
         relayUrl: ws.relayUrl,
         country: registeredCountry,
       })
+      const detectedCountry = heartbeatState?.country ?? null
       for (const [id, peer] of peers) {
         if (peer.userId === auth.userId && peer.role === 'provider' && id !== ws.peerId) {
           // Only evict if same device reconnecting — different devices are allowed
@@ -1447,6 +1493,8 @@ async function handleMessage(ws, msg) {
       ws.country = detectedCountry ?? registeredCountry ?? msg.country
       ws.userId = auth.userId
       ws.trustScore = auth.trustScore ?? 50
+      ws.providerLastMbps = heartbeatState?.providerLastMbps ?? 0
+      ws.providerAvgMbps = heartbeatState?.providerAvgMbps ?? 0
       ws.agentMode = msg.agentMode ?? false
       ws.providerKind = msg.providerKind ?? 'unknown'
       ws.supportsHttp = msg.supportsHttp ?? true
@@ -1497,6 +1545,7 @@ async function handleMessage(ws, msg) {
       const privateProviderUserId = auth.privateProviderUserId ?? null
       const privateOnly = !!privateBaseDeviceId
       ws.trustScore = auth.trustScore ?? 50
+      ws.billingCapBytes = auth.billingCapBytes
       ws.supportsDirect = msg.supportsDirect === true
       ws.deviceId = msg.requesterDeviceId ?? msg.deviceId ?? null
       const limits = sessionLimits(ws.trustScore)
@@ -1690,10 +1739,15 @@ async function handleMessage(ws, msg) {
       const byteCount = Math.max(0, Math.min(Number(msg.bytes) || 0, 128 * 1024 * 1024))
       if (byteCount <= 0) return
       directSession.lastActivity = Date.now()
-      if (!recordSessionBytes(directSession, byteCount, 'provider_to_requester')) return
-      directSession.bytesProvider = (directSession.bytesProvider ?? 0) + byteCount
-      directSession.bytesRequester = (directSession.bytesRequester ?? 0) + byteCount
+      const meteredBytes = recordSessionBytes(directSession, byteCount, 'provider_to_requester')
+      if (meteredBytes <= 0) {
+        finishMeteredSessionIfNeeded(directSession)
+        return
+      }
+      directSession.bytesProvider = (directSession.bytesProvider ?? 0) + meteredBytes
+      directSession.bytesRequester = (directSession.bytesRequester ?? 0) + meteredBytes
       sendSessionQuality(directSession, 'direct_bytes')
+      finishMeteredSessionIfNeeded(directSession)
       break
     }
 
@@ -1704,7 +1758,11 @@ async function handleMessage(ws, msg) {
       if (!provider || !provider.agentMode) return
       proxySession.lastActivity = Date.now()
       const reqBytes = JSON.stringify(msg.request ?? {}).length
-      if (!recordSessionBytes(proxySession, reqBytes, 'proxy_request')) return
+      const meteredBytes = recordSessionBytes(proxySession, reqBytes, 'proxy_request')
+      if (meteredBytes !== reqBytes) {
+        finishMeteredSessionIfNeeded(proxySession)
+        return
+      }
       proxySession.bytesRequester = (proxySession.bytesRequester ?? 0) + reqBytes
       if (msg.request?.url) {
         try {
@@ -1734,9 +1792,18 @@ async function handleMessage(ws, msg) {
       const requester = peers.get(respSession.requesterId)
       if (!requester) return
       const respBytes = msg.response?.body?.length ?? 0
-      if (!recordSessionBytes(respSession, respBytes, 'proxy_response')) return
-      respSession.bytesRequester = (respSession.bytesRequester ?? 0) + respBytes
-      respSession.bytesProvider = (respSession.bytesProvider ?? 0) + respBytes
+      const meteredBytes = recordSessionBytes(respSession, respBytes, 'proxy_response')
+      if (meteredBytes !== respBytes) {
+        if (meteredBytes > 0) {
+          respSession.bytesRequester = (respSession.bytesRequester ?? 0) + meteredBytes
+          respSession.bytesProvider = (respSession.bytesProvider ?? 0) + meteredBytes
+          sendSessionQuality(respSession, 'proxy_response')
+        }
+        finishMeteredSessionIfNeeded(respSession)
+        return
+      }
+      respSession.bytesRequester = (respSession.bytesRequester ?? 0) + meteredBytes
+      respSession.bytesProvider = (respSession.bytesProvider ?? 0) + meteredBytes
       send(requester, { type: 'proxy_response', sessionId: msg.sessionId, response: msg.response })
       sendSessionQuality(respSession, 'proxy_response')
       break
@@ -1765,11 +1832,16 @@ async function handleMessage(ws, msg) {
       const chunk = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data || '', 'base64')
       const tunnelSessionId = proxyClient.sessionId ?? ws.sessionId ?? msg.sessionId ?? null
       const tunnelSession = tunnelSessionId ? sessions.get(tunnelSessionId) : null
-      if (!recordSessionBytes(tunnelSession, chunk.length, 'provider_to_requester')) return
+      const meteredBytes = recordSessionBytes(tunnelSession, chunk.length, 'provider_to_requester')
+      if (meteredBytes <= 0) {
+        finishMeteredSessionIfNeeded(tunnelSession)
+        return
+      }
+      const meteredChunk = meteredBytes === chunk.length ? chunk : chunk.subarray(0, meteredBytes)
       if (tunnelSession) {
         tunnelSession.lastActivity = Date.now()
-        tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + chunk.length
-        tunnelSession.bytesRequester = (tunnelSession.bytesRequester ?? 0) + chunk.length
+        tunnelSession.bytesProvider = (tunnelSession.bytesProvider ?? 0) + meteredBytes
+        tunnelSession.bytesRequester = (tunnelSession.bytesRequester ?? 0) + meteredBytes
         // Only compute and send quality metrics every 3s — avoid running buildSessionQuality
         // on every chunk for high-throughput streams (thousands of chunks/minute).
         const now = Date.now()
@@ -1780,12 +1852,12 @@ async function handleMessage(ws, msg) {
       if (proxyClient.readyState !== undefined) {
         // WS-based client
         if (proxyClient.readyState === WebSocket.OPEN) {
-          proxyClient.send(chunk)
+          proxyClient.send(meteredChunk)
           applyProxyClientBackpressure(ws, msg.tunnelId, proxyClient)
         }
       } else if (proxyClient.socket && !proxyClient.socket.destroyed && proxyClient.ready) {
         // Raw socket client
-        const flushed = proxyClient.socket.write(chunk)
+        const flushed = proxyClient.socket.write(meteredChunk)
         if (!flushed) {
           pauseProviderForProxyBackpressure(ws, msg.tunnelId, proxyClient, 'requester_socket_backpressure')
           proxyClient.socket.once('drain', () => resumeProviderAfterProxyBackpressure(ws, msg.tunnelId, proxyClient))
@@ -1793,6 +1865,7 @@ async function handleMessage(ws, msg) {
           applyProxyClientBackpressure(ws, msg.tunnelId, proxyClient)
         }
       }
+      finishMeteredSessionIfNeeded(tunnelSession)
       break
     }
 

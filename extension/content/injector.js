@@ -484,8 +484,8 @@ function renderSessionPanelStatus(status = {}) {
   const country = session?.country || helper?.country || 'none'
   const connectionType = String(session?.connectionType || status.connectionType || 'public').toUpperCase()
   const route = getSessionPanelRouteLabel(status)
-  const currentSpeed = quality ? formatPanelMbps(quality.currentMbps) : '0.00 Mbps'
-  const avgSpeed = quality ? formatPanelMbps(quality.avgMbps) : '0.00 Mbps'
+  const currentSpeed = quality ? formatPanelMbps(quality.providerAdvertisedLastMbps || quality.currentMbps) : '0.00 Mbps'
+  const avgSpeed = quality ? formatPanelMbps(quality.providerAdvertisedAvgMbps || quality.avgMbps) : '0.00 Mbps'
   const bytesUsed = quality?.transferredBytes != null ? formatPanelBytes(quality.transferredBytes) : '0B'
   const provider = quality?.providerKind || helper?.source || 'unknown'
   const sessionId = session?.sessionId || session?.id || ''

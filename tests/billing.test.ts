@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { quoteApiUsage, settleUserUsage, sharedBytesToCreditBytes } from '../lib/billing.ts'
+import { getBrowseBytesCoveredByWalletUsd, quoteApiUsage, settleUserUsage, sharedBytesToCreditBytes } from '../lib/billing.ts'
 
 test('quoteApiUsage returns a positive estimate for standard rotating usage', () => {
   const quote = quoteApiUsage({
@@ -66,4 +66,9 @@ test('settleUserUsage consumes free bytes, then credits, then wallet balance', (
   assert.equal(settlement.shortfallUsd, 0)
   assert.equal(settlement.providerPayoutUsd, 1.8)
   assert.equal(settlement.platformRevenueUsd, 1.2)
+})
+
+test('wallet balance converts to live browsing byte cap', () => {
+  assert.equal(getBrowseBytesCoveredByWalletUsd(3), 1024 ** 3)
+  assert.equal(getBrowseBytesCoveredByWalletUsd(0), 0)
 })

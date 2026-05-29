@@ -47,6 +47,7 @@ let heartbeatTimer = null
 const DEVICE_ID = 'agent_' + Math.random().toString(36).slice(2, 10)
 
 const activeTunnels = new Map()
+const RELAY_BINARY_TUNNEL_DATA = 0x01
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19)
@@ -57,6 +58,35 @@ function sendRelayMessage(data) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data))
   }
+}
+
+function getRelayTunnelIdBytes(tunnelId) {
+  return Buffer.from(String(tunnelId || '').replace(/-/g, '').padEnd(32, '0').slice(0, 32), 'ascii')
+}
+
+function encodeRelayTunnelDataBinary(tunnelId, chunk, idBytes = null) {
+  const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+  const tunnelIdBytes = idBytes || getRelayTunnelIdBytes(tunnelId)
+  const frame = Buffer.allocUnsafe(1 + 32 + payload.length)
+  frame[0] = RELAY_BINARY_TUNNEL_DATA
+  tunnelIdBytes.copy(frame, 1)
+  payload.copy(frame, 33)
+  return frame
+}
+
+function decodeRelayTunnelDataBinary(buf) {
+  const idHex = buf.slice(1, 33).toString('ascii')
+  return {
+    type: 'tunnel_data',
+    tunnelId: `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`,
+    data: buf.slice(33),
+    binary: true,
+  }
+}
+
+function sendRelayTunnelData(tunnelId, chunk) {
+  if (ws?.readyState !== WebSocket.OPEN) return
+  ws.send(encodeRelayTunnelDataBinary(tunnelId, chunk), { binary: true })
 }
 
 function closeTunnel(tunnelId, notifyRelay = false) {
@@ -203,6 +233,7 @@ async function handleMessage(msg) {
         providerKind: 'agent',
         supportsHttp: true,
         supportsTunnel: true,
+        supportsBinaryTunnel: true,
       }))
       break
 
@@ -239,7 +270,7 @@ async function handleMessage(msg) {
         sendRelayMessage({ type: 'tunnel_ready', tunnelId })
       })
       socket.on('data', (data) => {
-        sendRelayMessage({ type: 'tunnel_data', tunnelId, data: data.toString('base64') })
+        sendRelayTunnelData(tunnelId, data)
         stats.bytesServed += data.length
         stats.requestsHandled++
       })
@@ -257,7 +288,8 @@ async function handleMessage(msg) {
     case 'tunnel_data': {
       const tunnel = activeTunnels.get(msg.tunnelId)
       if (tunnel?.socket && !tunnel.socket.destroyed) {
-        tunnel.socket.write(Buffer.from(msg.data, 'base64'))
+        const chunk = Buffer.isBuffer(msg.data) ? msg.data : Buffer.from(msg.data, 'base64')
+        tunnel.socket.write(chunk)
       }
       break
     }
@@ -311,9 +343,13 @@ function connectRelay() {
     heartbeatTimer = setInterval(sendHeartbeat, 30_000)
   })
   ws.on('ping', () => { try { ws.pong() } catch {} })
-  ws.on('message', (data) => {
+  ws.on('message', (data, isBinary) => {
     try {
-      handleMessage(JSON.parse(data.toString()))
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      const msg = (isBinary || buf[0] === RELAY_BINARY_TUNNEL_DATA)
+        ? decodeRelayTunnelDataBinary(buf)
+        : JSON.parse(buf.toString())
+      handleMessage(msg)
     } catch (err) {
       log(`Parse error: ${err.message}`)
     }

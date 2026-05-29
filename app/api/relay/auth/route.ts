@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { adminClient } from '@/lib/supabase/admin'
+import { getBrowseBytesCoveredByWalletUsd, getEffectiveBandwidthLimitBytes } from '@/lib/billing'
 import { canRoleProvideNetwork, getProviderRoleError } from '@/lib/roles'
 import { resolveAuthTokenUser } from '@/lib/requester-auth'
 
@@ -41,14 +42,23 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Relay auth token does not match the claimed user' }, { status: 403 })
   }
 
+  try { await adminClient.rpc('ensure_current_bandwidth_month', { p_user_id: userId }) } catch {}
+
   const { data: profile, error: profileError } = await adminClient
     .from('profiles')
-    .select('trust_score, role, is_verified, has_accepted_provider_terms')
+    .select('trust_score, role, is_verified, has_accepted_provider_terms, bandwidth_used_month, bandwidth_limit, is_premium, contribution_credits_bytes, wallet_balance_usd, outstanding_balance_usd, billing_hold_reason')
     .eq('id', userId)
     .maybeSingle()
 
   if (profileError || !profile) {
     return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
+  }
+  if (role === 'requester' && (Number(profile.outstanding_balance_usd ?? 0) > 0 || profile.billing_hold_reason)) {
+    return NextResponse.json({
+      error: 'Your account has an outstanding usage balance. Fund your wallet before continuing this session.',
+      code: 'billing_hold',
+      outstandingBalanceUsd: Number(profile.outstanding_balance_usd ?? 0),
+    }, { status: 402 })
   }
 
   if (role === 'provider') {
@@ -137,5 +147,13 @@ export async function POST(req: Request) {
     country: sessionRow.target_country ?? requestedCountry,
     privateProviderUserId: authorizedPrivateProviderUserId || null,
     privateBaseDeviceId: authorizedPrivateBaseDeviceId || null,
+    billingCapBytes: Math.max(
+      0,
+      Math.floor(
+        Math.max(0, getEffectiveBandwidthLimitBytes(Number(profile.bandwidth_limit ?? 0), profile.is_premium === true) - Number(profile.bandwidth_used_month ?? 0))
+          + Math.max(0, Number(profile.contribution_credits_bytes ?? 0))
+          + getBrowseBytesCoveredByWalletUsd(Number(profile.wallet_balance_usd ?? 0)),
+      ),
+    ),
   })
 }

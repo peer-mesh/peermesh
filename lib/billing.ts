@@ -168,6 +168,12 @@ export function calculateBrowseUsageCostUsd(bytesUsed: number): number {
   return roundCurrency4(Math.max(0, bytesToGb(Math.max(0, bytesUsed))) * pricePerGb)
 }
 
+export function getBrowseBytesCoveredByWalletUsd(walletUsd: number): number {
+  const pricePerGb = getPositiveNumberEnv('PEERMESH_BROWSE_USD_PER_GB', BROWSE_PER_GB_USD)
+  const normalizedWallet = Math.max(0, Number(walletUsd) || 0)
+  return Math.floor((normalizedWallet / pricePerGb) * 1024 ** 3)
+}
+
 export function calculateProviderRevenueShareUsd(grossUsd: number): number {
   const share = Math.min(1, getPositiveNumberEnv('PEERMESH_PROVIDER_REVENUE_SHARE', PROVIDER_REVENUE_SHARE))
   return roundCurrency(Math.max(0, grossUsd) * share)
