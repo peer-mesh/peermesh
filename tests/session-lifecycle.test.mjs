@@ -159,6 +159,30 @@ test('fail-closed reconnect clears only PeerMesh control path and status panel c
   assert.match(injector, /type: 'DISCONNECT'/)
 })
 
+test('private code connect wins over stale country selection', () => {
+  const popup = readRepoFile('extension/popup/popup.js')
+
+  assert.match(popup, /const isPrivateConnect = !!privateCode/)
+  assert.match(popup, /if \(state\.privateCodeInput && state\.selectedCountry\) state\.selectedCountry = null/)
+  assert.match(popup, /chrome\.storage\.local\.set\(\{ privateCodeInput: state\.privateCodeInput, selectedCountry: state\.selectedCountry \}\)/)
+  assert.doesNotMatch(popup, /state\.privateCodeInput = ''[\s\S]{0,120}chrome\.storage\.local\.set\(\{ privateCodeInput: '' \}\)/)
+})
+
+test('CONNECT proxy preserves bytes coalesced after tunnel response', () => {
+  const serviceWorker = readRepoFile('extension/background/service-worker.js')
+  const desktop = readRepoFile('desktop/main.js')
+  const cli = readRepoFile('cli/index.js')
+
+  assert.doesNotMatch(serviceWorker, /DIRECT_ASSET_BYPASS_HOSTS/)
+  for (const source of [desktop, cli]) {
+    assert.match(source, /let connectResponse = Buffer\.alloc\(0\)/)
+    assert.match(source, /const headerEnd = connectResponse\.indexOf\('\\r\\n\\r\\n'\)/)
+    assert.match(source, /const initialPayload = connectResponse\.slice\(headerEnd \+ 4\)/)
+    assert.match(source, /if \(initialPayload\.length && !clientSocket\.destroyed\) clientSocket\.write\(initialPayload\)/)
+    assert.match(source, /\^HTTP\\\/\\S\+ 200\\b/)
+  }
+})
+
 test('relay assigns direct-first mandated sessions with relay fallback and direct accounting', () => {
   const relay = readRepoFile('relay/relay.js')
 

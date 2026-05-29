@@ -1543,8 +1543,17 @@ function normalizeIceServers(iceServers) {
 
 function sendDataChannelJson(dc, payload) {
   const text = JSON.stringify(payload)
-  if (typeof dc?.sendMessage === 'function') dc.sendMessage(text)
-  else if (typeof dc?.send === 'function') dc.send(text)
+  try {
+    if (typeof dc?.sendMessage === 'function') {
+      dc.sendMessage(text)
+      return true
+    }
+    if (typeof dc?.send === 'function') {
+      dc.send(text)
+      return true
+    }
+  } catch {}
+  return false
 }
 
 function parseDataChannelJson(raw) {
@@ -1752,6 +1761,7 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
   if (entry.directRetryTimer) clearTimeout(entry.directRetryTimer)
   if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+  entry.dataChannelOpen = false
   if (!hasRequesterStickyDirect(entry)) {
     for (const [, tunnel] of entry.tunnels) {
       if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
@@ -1818,6 +1828,7 @@ async function startRequesterDirectSession(session, signalingWs) {
     directAttemptTimer: null,
     directSticky,
     everDirectOpened: false,
+    dataChannelOpen: false,
   }
   requesterDirectSessions.set(session.sessionId, entry)
 
@@ -1833,6 +1844,7 @@ async function beginRequesterDirectAttempt(entry, reason = 'retry') {
   }
   if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
   entry.directAttemptTimer = null
+  entry.dataChannelOpen = false
   try { entry.dataChannel?.close?.() } catch {}
   closePeerConnection(entry.pc)
 
@@ -1919,6 +1931,7 @@ function bindRequesterDataChannel(entry, dc) {
     entry.directAttemptTimer = null
     entry.mode = 'direct'
     entry.everDirectOpened = true
+    entry.dataChannelOpen = true
     sendRequesterSignal(entry, { type: 'direct_open', sessionId: entry.sessionId })
     clog.info('DIRECT', 'requester WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
     for (const tunnel of entry.tunnels.values()) {
@@ -1927,6 +1940,7 @@ function bindRequesterDataChannel(entry, dc) {
   })
   dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
   dc.onClosed?.(() => {
+    if (entry.dataChannel === dc) entry.dataChannelOpen = false
     if (entry.mode === 'direct' || hasRequesterStickyDirect(entry)) retryRequesterDirectOnly(entry, 'data_channel_closed')
     else scheduleRequesterRelayFallback(entry, 'data_channel_closed')
   })
@@ -2034,40 +2048,50 @@ function startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen) {
 }
 
 function openDirectTunnel(entry, tunnel) {
-  if (!entry?.dataChannel || entry.mode !== 'direct') return false
+  if (!canUseRequesterDirect(entry)) return false
   tunnel.openedDirect = true
   tunnel.bridge._sendImpl = (data) => {
-    sendDataChannelJson(entry.dataChannel, {
+    const sent = sendDataChannelJson(entry.dataChannel, {
       type: 'tunnel_data',
       tunnelId: tunnel.tunnelId,
       data: Buffer.from(data).toString('base64'),
     })
+    if (sent === false) entry.dataChannelOpen = false
   }
   tunnel.bridge._closeImpl = () => {
-    sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
+    if (canUseRequesterDirect(entry)) sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
     entry.tunnels.delete(tunnel.tunnelId)
   }
   tunnel.bridge._terminateImpl = tunnel.bridge._closeImpl
-  sendDataChannelJson(entry.dataChannel, {
+  const opened = sendDataChannelJson(entry.dataChannel, {
     type: 'open_tunnel',
     tunnelId: tunnel.tunnelId,
     hostname: tunnel.hostname,
     port: tunnel.port,
   })
+  if (!opened) {
+    entry.dataChannelOpen = false
+    entry.tunnels.delete(tunnel.tunnelId)
+    return false
+  }
   if (tunnel.onOpen) tunnel.onOpen()
   tunnel.bridge.emit('open')
   return true
 }
 
+function canUseRequesterDirect(entry) {
+  return Boolean(entry?.mode === 'direct' && entry.dataChannelOpen === true && entry.dataChannel)
+}
+
 function openTunnelWs(hostname, port, onOpen) {
   if (!_proxySession?.sessionId) return null
-  const useDirect = _proxySession.iceEnabled === true &&
+  const useDirectSession = _proxySession.iceEnabled === true &&
     _proxySession.directTransport === 'webrtc' &&
     requesterDirectSessions.has(_proxySession.sessionId)
   const relayUrl = relayProxyUrlForSession(_proxySession)
   const connectRequest = `CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`
 
-  if (!useDirect) {
+  if (!useDirectSession) {
     if (!relayUrl) return null
     const tunnelWs = new WebSocket(relayUrl)
     tunnelWs.on('open', () => {
@@ -2091,9 +2115,9 @@ function openTunnelWs(hostname, port, onOpen) {
     openedDirect: false,
   }
   directEntry.tunnels.set(tunnel.tunnelId, tunnel)
-  if (directEntry.mode === 'direct') {
-    openDirectTunnel(directEntry, tunnel)
-  } else if (directEntry.mode === 'relay') {
+  if (canUseRequesterDirect(directEntry)) {
+    if (!openDirectTunnel(directEntry, tunnel)) startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen)
+  } else {
     startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen)
   }
   return bridge
@@ -2187,11 +2211,25 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
   let opened = false
   const tunnelWs = openTunnelWs(hostname, port, () => { opened = true })
   if (!tunnelWs) { clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n'); clientSocket.destroy(); return }
+  let connectResponse = Buffer.alloc(0)
   tunnelWs.on('message', (data) => {
-    const text = Buffer.isBuffer(data) ? data.toString() : data
-    if (!clientSocket._connectSent && text.startsWith('HTTP/1.1 200')) {
+    if (!clientSocket._connectSent) {
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      connectResponse = Buffer.concat([connectResponse, chunk])
+      const headerEnd = connectResponse.indexOf('\r\n\r\n')
+      if (headerEnd === -1) return
+      const firstLineEnd = connectResponse.indexOf('\r\n')
+      const firstLine = connectResponse.slice(0, firstLineEnd === -1 ? headerEnd : firstLineEnd).toString()
+      if (!/^HTTP\/\S+ 200\b/.test(firstLine)) {
+        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
+        clientSocket.destroy()
+        tunnelWs.close()
+        return
+      }
       clientSocket._connectSent = true
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      const initialPayload = connectResponse.slice(headerEnd + 4)
+      if (initialPayload.length && !clientSocket.destroyed) clientSocket.write(initialPayload)
       if (head?.length) tunnelWs.send(head)
       clientSocket.on('data', (chunk) => { if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk) })
       clientSocket.on('end', () => tunnelWs.close())

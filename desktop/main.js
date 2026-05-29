@@ -2970,15 +2970,26 @@ function normalizeIceServers(iceServers) {
 
 function sendDataChannelJson(dc, payload) {
   const text = JSON.stringify(payload)
-  if (typeof dc?.sendMessage === 'function') dc.sendMessage(text)
-  else if (typeof dc?.send === 'function') dc.send(text)
+  try {
+    if (typeof dc?.sendMessage === 'function') {
+      dc.sendMessage(text)
+      return true
+    }
+    if (typeof dc?.send === 'function') {
+      dc.send(text)
+      return true
+    }
+  } catch {}
+  return false
 }
 
 // Send raw binary over the data channel — avoids base64 encoding overhead for tunnel_data.
 // node-datachannel supports sendMessageBinary for Buffer/Uint8Array.
 function sendDataChannelBinary(dc, buf) {
-  if (typeof dc?.sendMessageBinary === 'function') return dc.sendMessageBinary(buf)
-  if (typeof dc?.send === 'function') return dc.send(buf)
+  try {
+    if (typeof dc?.sendMessageBinary === 'function') return dc.sendMessageBinary(buf)
+    if (typeof dc?.send === 'function') return dc.send(buf)
+  } catch {}
   return false
 }
 
@@ -3335,6 +3346,7 @@ function closeRequesterDirectSession(sessionId, reason = 'requester_direct_close
   if (entry.fallbackGraceTimer) clearTimeout(entry.fallbackGraceTimer)
   if (entry.directRetryTimer) clearTimeout(entry.directRetryTimer)
   if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
+  entry.dataChannelOpen = false
   if (!hasRequesterStickyDirect(entry)) {
     for (const [, tunnel] of entry.tunnels) {
       if (!tunnel.bridge._relayStarted && tunnel.bridge.readyState === WebSocket.CONNECTING) {
@@ -3401,6 +3413,7 @@ async function startRequesterDirectSession(session, signalingWs) {
     directAttemptTimer: null,
     directSticky,
     everDirectOpened: false,
+    dataChannelOpen: false,
   }
   requesterDirectSessions.set(session.sessionId, entry)
 
@@ -3416,6 +3429,7 @@ function beginRequesterDirectAttempt(entry, reason = 'retry') {
   }
   if (entry.directAttemptTimer) clearTimeout(entry.directAttemptTimer)
   entry.directAttemptTimer = null
+  entry.dataChannelOpen = false
   try { entry.dataChannel?.close?.() } catch {}
   closePeerConnection(entry.pc)
 
@@ -3503,6 +3517,7 @@ function bindRequesterDataChannel(entry, dc) {
     entry.directAttemptTimer = null
     entry.mode = 'direct'
     entry.everDirectOpened = true
+    entry.dataChannelOpen = true
     sendRequesterSignal(entry, { type: 'direct_open', sessionId: entry.sessionId })
     log.info('DIRECT', 'requester WebRTC data channel open', { sessionId: entry.sessionId?.slice(0, 8) })
     for (const tunnel of entry.tunnels.values()) {
@@ -3511,6 +3526,7 @@ function bindRequesterDataChannel(entry, dc) {
   })
   dc.onMessage((raw) => handleRequesterDataChannelMessage(entry, raw))
   dc.onClosed?.(() => {
+    if (entry.dataChannel === dc) entry.dataChannelOpen = false
     if (entry.mode === 'direct' || hasRequesterStickyDirect(entry)) retryRequesterDirectOnly(entry, 'data_channel_closed')
     else scheduleRequesterRelayFallback(entry, 'data_channel_closed')
   })
@@ -3626,38 +3642,48 @@ function startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen) {
 }
 
 function openDirectTunnel(entry, tunnel) {
-  if (!entry?.dataChannel || entry.mode !== 'direct') return false
+  if (!canUseRequesterDirect(entry)) return false
   tunnel.openedDirect = true
   tunnel.tunnelIdBytes = tunnel.tunnelIdBytes || getTunnelIdBytes(tunnel.tunnelId)
   tunnel.bridge._sendImpl = (data) => {
     const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
-    sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnel.tunnelId, chunk, tunnel.tunnelIdBytes))
+    const sent = sendDataChannelBinary(entry.dataChannel, encodeTunnelDataBinary(tunnel.tunnelId, chunk, tunnel.tunnelIdBytes))
+    if (sent === false) entry.dataChannelOpen = false
   }
   tunnel.bridge._closeImpl = () => {
-    sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
+    if (canUseRequesterDirect(entry)) sendDataChannelJson(entry.dataChannel, { type: 'tunnel_close', tunnelId: tunnel.tunnelId })
     entry.tunnels.delete(tunnel.tunnelId)
   }
   tunnel.bridge._terminateImpl = tunnel.bridge._closeImpl
-  sendDataChannelJson(entry.dataChannel, {
+  const opened = sendDataChannelJson(entry.dataChannel, {
     type: 'open_tunnel',
     tunnelId: tunnel.tunnelId,
     hostname: tunnel.hostname,
     port: tunnel.port,
   })
+  if (!opened) {
+    entry.dataChannelOpen = false
+    entry.tunnels.delete(tunnel.tunnelId)
+    return false
+  }
   if (tunnel.onOpen) tunnel.onOpen()
   tunnel.bridge.emit('open')
   return true
 }
 
+function canUseRequesterDirect(entry) {
+  return Boolean(entry?.mode === 'direct' && entry.dataChannelOpen === true && entry.dataChannel)
+}
+
 function openTunnelWs(hostname, port, onOpen) {
   if (!proxySession?.sessionId) return null
-  const useDirect = proxySession.iceEnabled === true &&
+  const useDirectSession = proxySession.iceEnabled === true &&
     proxySession.directTransport === 'webrtc' &&
     requesterDirectSessions.has(proxySession.sessionId)
   const relayUrl = relayProxyUrlForSession(proxySession)
   const connectRequest = `CONNECT ${hostname}:${port} HTTP/1.1\r\nHost: ${hostname}:${port}\r\n\r\n`
 
-  if (!useDirect) {
+  if (!useDirectSession) {
     if (!relayUrl) return null
     const tunnelWs = new WebSocket(relayUrl)
     tunnelWs.on('open', () => {
@@ -3682,9 +3708,9 @@ function openTunnelWs(hostname, port, onOpen) {
   }
   tunnel.tunnelIdBytes = getTunnelIdBytes(tunnel.tunnelId)
   directEntry.tunnels.set(tunnel.tunnelId, tunnel)
-  if (directEntry.mode === 'direct') {
-    openDirectTunnel(directEntry, tunnel)
-  } else if (directEntry.mode === 'relay') {
+  if (canUseRequesterDirect(directEntry)) {
+    if (!openDirectTunnel(directEntry, tunnel)) startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen)
+  } else {
     startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen)
   }
   return bridge
@@ -3814,13 +3840,27 @@ localProxyServer.on('connect', async (req, clientSocket, head) => {
   if (!tunnelWs) { clientSocket.write('HTTP/1.1 503 No PeerMesh Session\r\n\r\n'); clientSocket.destroy(); return }
   log.debug('LOCAL-PROXY', 'opening tunnel WS', { target: `${hostname}:${port}` })
 
+  let connectResponse = Buffer.alloc(0)
   tunnelWs.on('message', (data) => {
     if (!clientSocket._connectSent) {
-      const text = Buffer.isBuffer(data) ? data.toString() : data
-      if (!text.startsWith('HTTP/1.1 200')) return
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      connectResponse = Buffer.concat([connectResponse, chunk])
+      const headerEnd = connectResponse.indexOf('\r\n\r\n')
+      if (headerEnd === -1) return
+      const firstLineEnd = connectResponse.indexOf('\r\n')
+      const firstLine = connectResponse.slice(0, firstLineEnd === -1 ? headerEnd : firstLineEnd).toString()
+      if (!/^HTTP\/\S+ 200\b/.test(firstLine)) {
+        log.warn('LOCAL-PROXY', 'CONNECT tunnel rejected', { target: `${hostname}:${port}`, firstLine })
+        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
+        clientSocket.destroy()
+        tunnelWs.close()
+        return
+      }
       clientSocket._connectSent = true
       log.info('LOCAL-PROXY', 'tunnel ready Ã¢â‚¬â€ 200 sent to Chrome', { target: `${hostname}:${port}` })
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      const initialPayload = connectResponse.slice(headerEnd + 4)
+      if (initialPayload.length && !clientSocket.destroyed) clientSocket.write(initialPayload)
       if (head?.length) tunnelWs.send(head)
       clientSocket.on('data', (chunk) => { if (tunnelWs.readyState === WebSocket.OPEN) tunnelWs.send(chunk) })
       clientSocket.on('end', () => tunnelWs.close())

@@ -1116,10 +1116,11 @@ function renderDashboard(app) {
 
   document.getElementById('privateCodeInput')?.addEventListener('input', (e) => {
     state.privateCodeInput = e.target.value.replace(/\D/g, '').slice(0, 9)
+    if (state.privateCodeInput && state.selectedCountry) state.selectedCountry = null
     e.target.value = state.privateCodeInput
     setPendingEdit('privateCodeInput', state.privateCodeInput)
     state.error = null
-    chrome.storage.local.set({ privateCodeInput: state.privateCodeInput })
+    chrome.storage.local.set({ privateCodeInput: state.privateCodeInput, selectedCountry: state.selectedCountry })
     const btn = document.getElementById('connectPrivateBtn')
     if (btn) btn.disabled = !state.privateCodeInput || !state.isOnline || state.connecting
   })
@@ -1352,12 +1353,11 @@ async function createSessionWithOnDemandRetry({ authToken, isPrivateConnect, pri
 
 async function connectSession() {
   const privateCode = (state.privateCodeInput || '').trim()
-  // Country selected = public mode; clear any stale private code
+  const isPrivateConnect = !!privateCode
   if (state.selectedCountry && privateCode) {
-    state.privateCodeInput = ''
-    chrome.storage.local.set({ privateCodeInput: '' })
+    state.selectedCountry = null
+    chrome.storage.local.set({ selectedCountry: null })
   }
-  const isPrivateConnect = !state.selectedCountry && !!privateCode
   if ((!state.selectedCountry && !privateCode) || !state.user || state.connecting) return
 
   if (!state.isOnline) {
