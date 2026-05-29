@@ -252,6 +252,19 @@ test('backpressure thresholds avoid throttling requester below provider speed to
   assert.match(cli, /RELAY_WS_BUFFER_HIGH_BYTES = 16 \* 1024 \* 1024/)
 })
 
+test('desktop manual sharing stop is not immediately undone by schedule jobs', () => {
+  const desktop = readRepoFile('desktop/main.js')
+
+  assert.match(desktop, /let _manualSharingPaused = false/)
+  assert.match(desktop, /markManualSharingPaused\('native_share_stop'\)/)
+  assert.match(desktop, /markManualSharingPaused\('ipc_toggle_stop'\)/)
+  assert.match(desktop, /start skipped - sharing was manually paused/)
+  assert.match(desktop, /uptime start skipped - sharing was manually paused/)
+  assert.match(desktop, /const isPrivateOnDemandStart = String\(job\?\.payload\?\.reason/)
+  assert.match(desktop, /clearManualSharingPaused\('private_on_demand_start'\)/)
+  assert.match(desktop, /clearManualSharingPaused\('ipc_toggle_start'\)/)
+})
+
 test('requester speed display can use provider advertised speed', () => {
   const relay = readRepoFile('relay/relay.js')
   const serviceWorker = readRepoFile('extension/background/service-worker.js')

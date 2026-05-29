@@ -129,6 +129,7 @@ let _sharingScheduleActionBusy = false
 let _lastScheduleInWindow = null
 let _scheduleWakeSyncBusy = false
 let _sharingScheduleCloudSyncBusy = false
+let _manualSharingPaused = false
 let _uptimeJobsTimer = null
 let _uptimeJobsBusy = false
 let _lastActiveBrowser = null
@@ -142,6 +143,17 @@ const AUTH_CLEAR_FAILURE_THRESHOLD = 3
 const WINDOWS_WAKE_TASK_NAME = 'PeerMesh Scheduled Wake'
 const _pendingBytesByDevice = new Map()
 let _flushTimer = null
+
+function markManualSharingPaused(reason = 'manual_stop') {
+  _manualSharingPaused = true
+  log.info('SHARING', 'manual sharing pause set', { reason })
+}
+
+function clearManualSharingPaused(reason = 'manual_start') {
+  if (!_manualSharingPaused) return
+  _manualSharingPaused = false
+  log.info('SHARING', 'manual sharing pause cleared', { reason })
+}
 
 function notifyPeer(p, body) {
   if (!peerPort) return
@@ -1350,6 +1362,7 @@ async function syncSharingScheduleToServer(reason = 'sync') {
 
 function setSharingSchedulePreference(nextSchedule = {}) {
   _localUptimeScheduleChangeAt = Date.now()
+  clearManualSharingPaused('schedule_changed')
   config.sharingSchedule = normalizeSharingSchedule({ ...config.sharingSchedule, ...nextSchedule })
   saveConfig()
   _lastScheduleInWindow = null
@@ -1458,6 +1471,10 @@ async function runSharingScheduleTick(reason = 'interval') {
   try {
     _sharingScheduleActionBusy = true
     if (inWindow && (enteredWindow || alwaysOn) && !config.shareEnabled && !running && !peerSharing) {
+      if (_manualSharingPaused) {
+        log.info('SCHEDULE', 'start skipped - sharing was manually paused', { reason, alwaysOn })
+        return
+      }
       if (!shouldScheduleStartSharing()) {
         log.warn('SCHEDULE', 'start skipped - provider is not ready', {
           reason,
@@ -1653,7 +1670,15 @@ async function processUptimeJob(job) {
       await completeUptimeJob(job, 'completed')
       return
     }
-    if (String(job?.payload?.reason || '').startsWith('on_demand_private')) {
+    const isPrivateOnDemandStart = String(job?.payload?.reason || '').startsWith('on_demand_private')
+    if (_manualSharingPaused && !isPrivateOnDemandStart) {
+      const err = 'Sharing was manually paused'
+      log.info('SCHEDULE', 'uptime start skipped - sharing was manually paused', { jobId: job.id, windowKey: job.windowKey })
+      await completeUptimeJob(job, 'completed', err)
+      return
+    }
+    if (isPrivateOnDemandStart) {
+      clearManualSharingPaused('private_on_demand_start')
       try { await refreshSharingConfig() } catch (e) { log.warn('SCHEDULE', 'private on-demand refresh failed before start', { jobId: job.id, err: e.message }) }
     }
     if (!shouldScheduleStartSharing()) {
@@ -3979,6 +4004,7 @@ const controlServer = http.createServer((req, res) => {
           connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots),
           shareEnabled: true,
         }
+        clearManualSharingPaused('native_share_start')
         ensureSlotStates()
         await pollTodayBytes()
         saveConfig()
@@ -3996,6 +4022,7 @@ const controlServer = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/native/share/stop') {
     log.info('CONTROL', '/native/share/stop called')
+    markManualSharingPaused('native_share_stop')
     stopRelay()
     persistSharingState(false)
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -4062,6 +4089,7 @@ const controlServer = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body)
         log.info('CONTROL', '/start called', { userId: data.userId || config.userId })
+        clearManualSharingPaused('control_start')
         config = { ...config, ...data, connectionSlots: clampSlots(data.slots ?? data.connectionSlots ?? config.connectionSlots), shareEnabled: true }
         saveConfig(); stopRelay(); config.shareEnabled = true; saveConfig(); connectRelay()
         res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }))
@@ -4077,6 +4105,7 @@ const controlServer = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && url.pathname === '/stop') {
     log.info('CONTROL', '/stop called')
+    markManualSharingPaused('control_stop')
     stopRelay()
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: true }))
     return
@@ -4205,6 +4234,7 @@ function updateTray() {
         if (wasRunning || wasPeerSharing) {
           peerSharing = false
           if (_cliWatchTimer) { clearInterval(_cliWatchTimer); _cliWatchTimer = null }
+          markManualSharingPaused('tray_stop')
           stopRelay()
           if (peerPort && wasPeerSharing) {
             try { await fetch(`http://127.0.0.1:${peerPort}/native/share/stop`, { method: 'POST', signal: AbortSignal.timeout(2000) }) } catch {}
@@ -4212,6 +4242,7 @@ function updateTray() {
           peerPort = null
           updateTray()
         } else if (config.token && config.userId) {
+          clearManualSharingPaused('tray_start')
           config.shareEnabled = true
           saveConfig()
           updateTray()
@@ -4577,6 +4608,7 @@ ipcMain.handle('toggle-sharing', async () => {
   if (wasRunning || wasPeerSharing) {
     peerSharing = false
     if (_cliWatchTimer) { clearInterval(_cliWatchTimer); _cliWatchTimer = null; log.info('IPC', '_cliWatchTimer cleared on toggle-stop') }
+    markManualSharingPaused('ipc_toggle_stop')
     stopRelay()
     if (peerPort && wasPeerSharing) {
       log.info('IPC', 'sending share/stop to CLI peer', { peerPort })
@@ -4589,6 +4621,7 @@ ipcMain.handle('toggle-sharing', async () => {
     updateTray()
   } else if (config.token) {
     log.info('IPC', 'toggle-sharing ON Ã¢â‚¬â€ starting sharing')
+    clearManualSharingPaused('ipc_toggle_start')
     config.shareEnabled = true; saveConfig(); updateTray(); connectRelay()
   }
   _sharingToggleBusy = false
@@ -4741,6 +4774,7 @@ async function bootstrapDesktopApp() {
       if (req.method === 'POST' && url.pathname === '/native/share/stop') {
         log.info('PEER-SERVER', '/native/share/stop Ã¢â‚¬â€ desktop peer received stop signal (not forwarding back to CLI)')
         // Do NOT forward to CLI Ã¢â‚¬â€ they sent this to us; forwarding would cause a loop
+        markManualSharingPaused('peer_share_stop')
         peerSharing = false
         config.shareEnabled = false
         saveConfig()
