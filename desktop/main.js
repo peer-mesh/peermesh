@@ -2383,9 +2383,9 @@ async function isAllowedResolved(hostname, port = 443) {
 // Ã¢â€â‚¬Ã¢â€â‚¬ Fetch handler Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const RELAY_BINARY_TUNNEL_DATA = 0x01
-const RELAY_WS_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
-const RELAY_WS_BUFFER_LOW_BYTES = 512 * 1024
-const RELAY_WS_BUFFER_CHECK_MS = 50
+const RELAY_WS_BUFFER_HIGH_BYTES = 16 * 1024 * 1024
+const RELAY_WS_BUFFER_LOW_BYTES = 8 * 1024 * 1024
+const RELAY_WS_BUFFER_CHECK_MS = 25
 const ADD_BYTES_SYNC_INTERVAL_MS = 2000
 let _lastAggregateSync = 0
 
@@ -2918,10 +2918,10 @@ function isDirectCapabilityFailureReason(reason) {
   return value === 'ice_not_enabled' || value === 'node_datachannel_unavailable'
 }
 const DIRECT_BYTE_REPORT_INTERVAL_MS = 1000
-const DIRECT_DC_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
-const DIRECT_DC_BUFFER_LOW_BYTES = 1 * 1024 * 1024
-const DIRECT_DC_BUFFER_CHECK_MS = 50
-const DIRECT_TUNNEL_PENDING_MAX_BYTES = 8 * 1024 * 1024
+const DIRECT_DC_BUFFER_HIGH_BYTES = 16 * 1024 * 1024
+const DIRECT_DC_BUFFER_LOW_BYTES = 8 * 1024 * 1024
+const DIRECT_DC_BUFFER_CHECK_MS = 25
+const DIRECT_TUNNEL_PENDING_MAX_BYTES = 32 * 1024 * 1024
 const DIRECT_ICE_SERVERS = [
   'stun:stun.l.google.com:19302',
   'stun:stun1.l.google.com:19302',

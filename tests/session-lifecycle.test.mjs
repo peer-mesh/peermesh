@@ -82,6 +82,10 @@ test('desktop and CLI expose STUN direct data channel capability behind relay fa
     assert.match(source, /WebRTC direct unavailable, falling back to relay/)
     assert.match(source, /type: 'direct_bytes'/)
     assert.match(source, /type: 'direct_tunnel_open'/)
+    assert.match(source, /DC_BINARY_TUNNEL_DATA/)
+    assert.match(source, /sendDataChannelBinary/)
+    assert.match(source, /encodeDirectTunnelDataBinary|encodeTunnelDataBinary/)
+    assert.match(source, /decodeDirectTunnelDataBinary|decodeTunnelDataBinary/)
   }
 })
 
@@ -99,7 +103,8 @@ test('relay tunnel path uses binary frames and backpressure on desktop and CLI p
   for (const source of [desktop, cli]) {
     assert.match(source, /supportsBinaryTunnel: true/)
     assert.match(source, /sendRelayTunnelData/)
-    assert.match(source, /RELAY_WS_BUFFER_HIGH_BYTES/)
+    assert.match(source, /RELAY_WS_BUFFER_HIGH_BYTES = 16 \* 1024 \* 1024/)
+    assert.match(source, /RELAY_WS_BUFFER_LOW_BYTES = 8 \* 1024 \* 1024/)
     assert.match(source, /scheduleRelayBackpressureCheck/)
     assert.match(source, /tunnel_pause/)
     assert.match(source, /tunnel_resume/)
@@ -228,6 +233,23 @@ test('requester disconnects when the last browser window closes', () => {
   assert.match(serviceWorker, /windows\.length > 0 \|\| !currentSession/)
   assert.match(serviceWorker, /last browser window closed - disconnecting requester session/)
   assert.match(serviceWorker, /disconnect\(\)\.catch/)
+  assert.match(serviceWorker, /chrome\.runtime\.onSuspend\?\.addListener/)
+  assert.match(serviceWorker, /disconnectForBrowserShutdown\('extension_suspend'\)/)
+  assert.match(serviceWorker, /method: 'DELETE', keepalive: true/)
+})
+
+test('backpressure thresholds avoid throttling requester below provider speed too early', () => {
+  const relay = readRepoFile('relay/relay.js')
+  const desktop = readRepoFile('desktop/main.js')
+  const cli = readRepoFile('cli/index.js')
+
+  assert.match(relay, /RELAY_PROXY_BUFFER_HIGH_BYTES = 16 \* 1024 \* 1024/)
+  assert.match(relay, /RELAY_PROXY_BUFFER_LOW_BYTES = 8 \* 1024 \* 1024/)
+  assert.match(relay, /RELAY_PROXY_BUFFER_CHECK_MS = 25/)
+  assert.match(desktop, /DIRECT_DC_BUFFER_HIGH_BYTES = 16 \* 1024 \* 1024/)
+  assert.match(desktop, /DIRECT_DC_BUFFER_LOW_BYTES = 8 \* 1024 \* 1024/)
+  assert.match(desktop, /DIRECT_TUNNEL_PENDING_MAX_BYTES = 32 \* 1024 \* 1024/)
+  assert.match(cli, /RELAY_WS_BUFFER_HIGH_BYTES = 16 \* 1024 \* 1024/)
 })
 
 test('requester speed display can use provider advertised speed', () => {
@@ -241,6 +263,16 @@ test('requester speed display can use provider advertised speed', () => {
   assert.match(serviceWorker, /providerAdvertisedLastMbps: Number\(msg\.providerAdvertisedLastMbps\)/)
   assert.match(popup, /providerAdvertisedLastMbps \|\| session\.quality\.currentMbps/)
   assert.match(injector, /providerAdvertisedLastMbps \|\| quality\.currentMbps/)
+})
+
+test('relay assignment considers live provider speed and direct support', () => {
+  const relay = readRepoFile('relay/relay.js')
+
+  assert.match(relay, /providerRuntimeQualityScore/)
+  assert.match(relay, /providerLastMbps/)
+  assert.match(relay, /providerAvgMbps/)
+  assert.match(relay, /peer\.supportsDirect && peer\.iceEnabled/)
+  assert.match(relay, /eligible\.sort\(\(a, b\) => providerRuntimeQualityScore\(b\) - providerRuntimeQualityScore\(a\)\)/)
 })
 
 test('relay assigns direct-first mandated sessions with relay fallback and direct accounting', () => {

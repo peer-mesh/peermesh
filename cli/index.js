@@ -32,7 +32,7 @@ async function getLiveRelays() {
 const CONFIG_DIR = join(homedir(), '.peermesh')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const SHARED_IDENTITY_FILE = join(CONFIG_DIR, 'machine-identity.json')
-const VERSION     = '1.0.79'
+const VERSION     = '1.0.80'
 const DEBUG_LOG = join(homedir(), 'Desktop', 'peermesh-debug.log')
 
 const CONTROL_PORT = 7654
@@ -868,9 +868,9 @@ function startProfileSync() {
 }
 
 const RELAY_BINARY_TUNNEL_DATA = 0x01
-const RELAY_WS_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
-const RELAY_WS_BUFFER_LOW_BYTES = 512 * 1024
-const RELAY_WS_BUFFER_CHECK_MS = 50
+const RELAY_WS_BUFFER_HIGH_BYTES = 16 * 1024 * 1024
+const RELAY_WS_BUFFER_LOW_BYTES = 8 * 1024 * 1024
+const RELAY_WS_BUFFER_CHECK_MS = 25
 const ADD_BYTES_SYNC_INTERVAL_MS = 2000
 let _lastAggregateSync = 0
 
@@ -1504,6 +1504,7 @@ const requesterDirectSessions = new Map()
 const DIRECT_ICE_TIMEOUT_MS = 15000
 const DIRECT_RELAY_FALLBACK_GRACE_MS = 1500
 const DIRECT_RETRY_INTERVAL_MS = 8000
+const DC_BINARY_TUNNEL_DATA = 0x01
 
 function hasRequesterStickyDirect(entry) {
   return !!entry && (entry.everDirectOpened === true || entry.directSticky === true)
@@ -1556,9 +1557,39 @@ function sendDataChannelJson(dc, payload) {
   return false
 }
 
+function sendDataChannelBinary(dc, buf) {
+  try {
+    if (typeof dc?.sendMessageBinary === 'function') return dc.sendMessageBinary(buf)
+    if (typeof dc?.send === 'function') return dc.send(buf)
+  } catch {}
+  return false
+}
+
 function parseDataChannelJson(raw) {
   const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString()
   return JSON.parse(text)
+}
+
+function getDirectTunnelIdBytes(tunnelId) {
+  return Buffer.from(String(tunnelId || '').replace(/-/g, '').padEnd(32, '0').slice(0, 32), 'ascii')
+}
+
+function encodeDirectTunnelDataBinary(tunnelId, chunk, idBytes = null) {
+  const payload = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+  const tunnelIdBytes = idBytes || getDirectTunnelIdBytes(tunnelId)
+  const frame = Buffer.allocUnsafe(1 + 32 + payload.length)
+  frame[0] = DC_BINARY_TUNNEL_DATA
+  tunnelIdBytes.copy(frame, 1)
+  payload.copy(frame, 33)
+  return frame
+}
+
+function decodeDirectTunnelDataBinary(buf) {
+  const idHex = buf.slice(1, 33).toString('ascii')
+  return {
+    tunnelId: `${idHex.slice(0,8)}-${idHex.slice(8,12)}-${idHex.slice(12,16)}-${idHex.slice(16,20)}-${idHex.slice(20)}`,
+    data: buf.slice(33),
+  }
 }
 
 function closePeerConnection(pc) {
@@ -1706,6 +1737,14 @@ function bindProviderDataChannel(entry, dc, limitBytes) {
 }
 
 async function handleProviderDataChannelMessage(entry, raw, limitBytes) {
+  const buf = Buffer.isBuffer(raw) ? raw : (raw instanceof Uint8Array ? Buffer.from(raw) : null)
+  if (buf && buf.length > 33 && buf[0] === DC_BINARY_TUNNEL_DATA) {
+    const { tunnelId, data } = decodeDirectTunnelDataBinary(buf)
+    const tunnel = entry.providerTunnels.get(tunnelId)
+    if (tunnel?.socket && !tunnel.socket.destroyed) tunnel.socket.write(data)
+    return
+  }
+
   const msg = parseDataChannelJson(raw)
   if (msg.type === 'open_tunnel') {
     const tunnelId = msg.tunnelId || randomUUID()
@@ -1721,10 +1760,11 @@ async function handleProviderDataChannelMessage(entry, raw, limitBytes) {
     config.todayRequestsHandled = (config.todayRequestsHandled ?? 0) + 1
     saveConfig(config)
     const socket = connect(port, hostname)
-    entry.providerTunnels.set(tunnelId, { socket, closed: false })
+    entry.providerTunnels.set(tunnelId, { socket, closed: false, tunnelIdBytes: getDirectTunnelIdBytes(tunnelId) })
     socket.on('connect', () => sendDataChannelJson(entry.dataChannel, { type: 'tunnel_ready', tunnelId }))
     socket.on('data', chunk => {
-      sendDataChannelJson(entry.dataChannel, { type: 'tunnel_data', tunnelId, data: chunk.toString('base64') })
+      const tunnel = entry.providerTunnels.get(tunnelId)
+      sendDataChannelBinary(entry.dataChannel, encodeDirectTunnelDataBinary(tunnelId, chunk, tunnel?.tunnelIdBytes))
       addBytes(entry.slot, chunk.length, limitBytes)
       queueDirectByteReport(entry, chunk.length)
     })
@@ -1947,6 +1987,14 @@ function bindRequesterDataChannel(entry, dc) {
 }
 
 function handleRequesterDataChannelMessage(entry, raw) {
+  const buf = Buffer.isBuffer(raw) ? raw : (raw instanceof Uint8Array ? Buffer.from(raw) : null)
+  if (buf && buf.length > 33 && buf[0] === DC_BINARY_TUNNEL_DATA) {
+    const { tunnelId, data } = decodeDirectTunnelDataBinary(buf)
+    const tunnel = entry.tunnels.get(tunnelId)
+    if (tunnel) tunnel.bridge.emit('message', data)
+    return
+  }
+
   const msg = parseDataChannelJson(raw)
   const tunnel = entry.tunnels.get(msg.tunnelId)
   if (!tunnel) return
@@ -2049,13 +2097,13 @@ function startRelayFallbackForBridge(bridge, relayUrl, connectRequest, onOpen) {
 
 function openDirectTunnel(entry, tunnel) {
   if (!canUseRequesterDirect(entry)) return false
+  tunnel.tunnelIdBytes = getDirectTunnelIdBytes(tunnel.tunnelId)
   tunnel.openedDirect = true
   tunnel.bridge._sendImpl = (data) => {
-    const sent = sendDataChannelJson(entry.dataChannel, {
-      type: 'tunnel_data',
-      tunnelId: tunnel.tunnelId,
-      data: Buffer.from(data).toString('base64'),
-    })
+    const sent = sendDataChannelBinary(
+      entry.dataChannel,
+      encodeDirectTunnelDataBinary(tunnel.tunnelId, Buffer.from(data), tunnel.tunnelIdBytes),
+    )
     if (sent === false) entry.dataChannelOpen = false
   }
   tunnel.bridge._closeImpl = () => {

@@ -62,9 +62,9 @@ const sessions = new Map()
 const proxyClients = new Map()
 
 const RELAY_BINARY_TUNNEL_DATA = 0x01
-const RELAY_PROXY_BUFFER_HIGH_BYTES = 4 * 1024 * 1024
-const RELAY_PROXY_BUFFER_LOW_BYTES = 512 * 1024
-const RELAY_PROXY_BUFFER_CHECK_MS = 50
+const RELAY_PROXY_BUFFER_HIGH_BYTES = 16 * 1024 * 1024
+const RELAY_PROXY_BUFFER_LOW_BYTES = 8 * 1024 * 1024
+const RELAY_PROXY_BUFFER_CHECK_MS = 25
 
 const ALLOWED_TARGET_PORTS = new Set([80, 443, 8080, 8443])
 const BLOCKED_HOSTS = [/\.onion$/i, /^smtp\./i, /^imap\./i, /^pop3\./i, /torrent/i]
@@ -560,6 +560,15 @@ async function findProvider(country, requesterId, requestingUserId, {
   privateOnly = false,
   excludePeerIds = [],
 } = {}) {
+  const providerRuntimeQualityScore = (peer) => {
+    const trust = Math.max(0, Math.min(100, Number(peer.trustScore ?? 50) || 50)) / 100
+    const lastMbps = Math.max(0, Number(peer.providerLastMbps ?? 0) || 0)
+    const avgMbps = Math.max(0, Number(peer.providerAvgMbps ?? 0) || 0)
+    const speedScore = Math.min(0.45, Math.log10(1 + avgMbps + lastMbps * 0.5) * 0.18)
+    const directScore = peer.supportsDirect && peer.iceEnabled ? 0.08 : 0
+    return trust + speedScore + directScore
+  }
+
   const isEligible = (peer) =>
     peer.role === 'provider' &&
     peer.country === country &&
@@ -599,7 +608,7 @@ async function findProvider(country, requesterId, requestingUserId, {
     if (isEligible(peer)) eligible.push(peer)
   }
   if (eligible.length === 0) return null
-  eligible.sort((a, b) => (b.trustScore ?? 50) - (a.trustScore ?? 50))
+  eligible.sort((a, b) => providerRuntimeQualityScore(b) - providerRuntimeQualityScore(a))
 
   for (const peer of eligible) {
     const status = await getProviderShareStatus(peer.userId, peer.deviceId, peer.baseDeviceId)

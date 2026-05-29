@@ -2408,6 +2408,24 @@ async function disconnect() {
   _userInitiatedDisconnect = false
 }
 
+function disconnectForBrowserShutdown(reason = 'browser_shutdown') {
+  _userInitiatedDisconnect = true
+  const ws = relayWs
+  if (ws?.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify({ type: 'end_session', reason })) } catch {}
+    try { ws.close(1000, reason) } catch {}
+  }
+  relayWs = null
+  currentSession = null
+  lastRequesterSession = null
+  agentSessionId = null
+  closeDesktopSignaling(reason)
+  fetch(`http://127.0.0.1:${CONTROL_PORT}/proxy-session`, { method: 'DELETE', keepalive: true }).catch(() => {})
+  chrome.storage.local.set({ session: null }).catch(() => {})
+  chrome.storage.session.remove(['proxyFailClosed', 'proxyFailClosedReason', 'proxySessionId', 'proxyHost', 'proxyPort']).catch(() => {})
+  _userInitiatedDisconnect = false
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ Lifecycle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async function manualUnblockBrowser() {
@@ -2473,6 +2491,12 @@ chrome.windows?.onRemoved?.addListener(() => {
     log('info', '[LIFECYCLE] last browser window closed - disconnecting requester session')
     disconnect().catch((error) => log('warn', `[LIFECYCLE] disconnect on window close failed: ${error.message}`))
   })
+})
+
+chrome.runtime.onSuspend?.addListener(() => {
+  if (!currentSession) return
+  log('info', '[LIFECYCLE] extension suspend - closing requester session')
+  disconnectForBrowserShutdown('extension_suspend')
 })
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
